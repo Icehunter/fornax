@@ -49,7 +49,7 @@ public final class BlockAtlasPageBudget {
      * plus a normal and a material sidecar chain each at {@code 1/OVERFLOW_PBR_DIVISOR^2} the
      * albedo's texel count.
      */
-    static long bytesPerPage(int pageWidth, int pageHeight) {
+    public static long bytesPerPage(int pageWidth, int pageHeight) {
         if (pageWidth <= 0 || pageHeight <= 0) {
             throw new IllegalArgumentException("page dimensions must be positive");
         }

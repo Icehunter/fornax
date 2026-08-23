@@ -8,7 +8,6 @@ import dev.icehunter.fornax.atlas.BlockAtlasPagedLayout;
 import dev.icehunter.fornax.atlas.BlockAtlasPagedStitch;
 import dev.icehunter.fornax.atlas.BlockAtlasPaging;
 import dev.icehunter.fornax.atlas.LabPbrSidecarSurvey;
-import dev.icehunter.fornax.config.FornaxConfig;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.TextureFilteringMethod;
@@ -28,8 +27,7 @@ import java.util.List;
 import java.util.concurrent.Executor;
 
 /**
- * The paged block atlas's stitch decision point (M13 phase 3, gated behind
- * {@code FornaxSettings.pagedBlockAtlasEnabled}): plans every BLOCK-atlas stitch through
+ * The paged block atlas's stitch decision point: plans every BLOCK-atlas stitch through
  * {@link BlockAtlasPaging}, and when -- and only when -- the pack cannot fit one page, TAKES OVER
  * the stitch entirely, returning {@link BlockAtlasPagedStitch}-built {@code Preparations} in
  * vanilla's place: page 0 placed by vanilla's own {@code Stitcher} at three-quarter height, the
@@ -41,8 +39,13 @@ import java.util.concurrent.Executor;
  * the takeover path: the fit check below runs vanilla's own stitch math (same {@code Stitcher},
  * same lowered mip level, same anisotropy padding -- {@link BlockAtlasPagedStitch#lowerMipLevel} is
  * the decompile-exact replica) and, on success, falls through untouched so vanilla performs its own
- * stitch exactly as it always has. With the flag off, this method costs one boolean read and
- * touches nothing.
+ * stitch exactly as it always has. Every pack small enough to fit today is therefore unaffected,
+ * which is what lets this run unconditionally.
+ *
+ * <p>There is no setting for this. Paging only engages where the alternative is the reload
+ * aborting and the game turning the player's resource packs off, so there is nothing for a toggle
+ * to pick between. While one existed, default-off, it turned a loadable pack into "Maybe try a
+ * lower resolution resourcepack?" with nothing on screen pointing at the switch.
  *
  * <p><b>Failure honesty.</b> If even {@code 1 + }{@link BlockAtlasGhostLayout#MAX_OVERFLOW_PAGES}
  * pages cannot hold the pack, or the takeover itself fails, this logs and falls through to
@@ -70,11 +73,6 @@ public class SpriteLoaderPagedStitchMixin {
         if (!TextureAtlas.LOCATION_BLOCKS.equals(this.location)) {
             return;
         }
-        if (!FornaxConfig.get().pagedBlockAtlasEnabled) {
-            BlockAtlasPagedLayout.clear();
-            return;
-        }
-
         GpuDevice device = RenderSystem.tryGetDevice();
         if (device == null) {
             FornaxMod.LOGGER.warn("[Fornax] Paged block atlas: no GPU device available, vanilla stitch proceeds");
@@ -95,6 +93,11 @@ public class SpriteLoaderPagedStitchMixin {
                         "[Fornax] Paged block atlas: {} sprite(s) fit one page, vanilla stitch proceeds",
                         contents.size());
                 BlockAtlasPagedLayout.clear();
+                // Back to the cheap grid. A previous pack may have escalated it, and without this
+                // the biggest pack of the session would keep its 512 MB grid allocated for every
+                // pack loaded after it.
+                dev.icehunter.fornax.pipeline.SpriteBoundsTexture.useGridSize(
+                        dev.icehunter.fornax.pipeline.SpriteBoundsTexture.DEFAULT_SIZE);
                 return;
             } catch (BlockAtlasPaging.PagingException overflowsOnePage) {
                 // The pack genuinely needs paging -- the takeover below is the only path that can
@@ -102,7 +105,8 @@ public class SpriteLoaderPagedStitchMixin {
             }
 
             BlockAtlasPagedStitch.Takeover takeover = BlockAtlasPagedStitch.takeover(
-                    this.location, contents, maxTextureSize, loweredMip, anisotropicLevel, executor);
+                    this.location, contents, maxTextureSize, loweredMip, anisotropicLevel,
+                    fornax$atlasBudgetBytes(), executor);
 
             BlockAtlasPagedLayout.install(takeover.layout());
             long animatedGhosts = takeover.layout().ghosts().stream()
@@ -115,10 +119,21 @@ public class SpriteLoaderPagedStitchMixin {
                     contents.size(), takeover.layout().ghosts().size(), animatedGhosts, loweredMip);
             cir.setReturnValue(takeover.preparations());
         } catch (BlockAtlasPaging.PagingException e) {
+            // The budget is in the message because it is the usual reason and the one nobody can
+            // guess: the page ceiling is fixed, the budget depends on the machine. Falling through
+            // gives vanilla's StitcherException, a fast refusal. Building pages that do not fit
+            // does not fail at all, it swaps.
+            long budget = fornax$atlasBudgetBytes();
             FornaxMod.LOGGER.warn(
-                    "[Fornax] Paged block atlas: pack exceeds even {} pages ({}), vanilla stitch proceeds"
-                            + " and will fail exactly as it does unpaged",
-                    1 + BlockAtlasGhostLayout.MAX_OVERFLOW_PAGES, e.getMessage());
+                    "[Fornax] Paged block atlas: pack does not fit ({}). Ceiling is {} overflow"
+                            + " page(s); this machine's budget is {} MB for overflow, {} MB per"
+                            + " page. Vanilla stitch proceeds and will fail exactly as it does"
+                            + " unpaged.",
+                    e.getMessage(), BlockAtlasGhostLayout.MAX_OVERFLOW_PAGES,
+                    budget / (1024 * 1024),
+                    dev.icehunter.fornax.atlas.BlockAtlasPageBudget
+                            .bytesPerPage(LabPbrSidecarSurvey.maxTextureDimension(device),
+                                    LabPbrSidecarSurvey.maxTextureDimension(device)) / (1024 * 1024));
             BlockAtlasPagedLayout.clear();
         } catch (RuntimeException e) {
             // Broad on purpose: a takeover bug must degrade to vanilla's own behavior, never invent
@@ -127,6 +142,42 @@ public class SpriteLoaderPagedStitchMixin {
                     + " vanilla stitch proceeds", e);
             BlockAtlasPagedLayout.clear();
         }
+    }
+
+    /**
+     * Share of physical memory the overflow pages and the sprite-bounds grid may claim between
+     * them. An eighth gives a 16 GB laptop 2 GB, enough for one page, and a 48 GB machine 6 GB,
+     * enough for three.
+     *
+     * <p>Kept small because plenty sits outside this budget and is roughly as big again: page 0,
+     * the labPBR normal and material atlases (measured at 358 MB and 268 MB on one pack), and
+     * vanilla's own atlases. A pack shipping item textures brought a 16384x8192 shulker-box atlas
+     * with it, which nothing here can see or refuse.
+     */
+    private static final double FORNAX_BUDGET_FRACTION = 1.0 / 8.0;
+
+    /**
+     * Physical memory times {@link #FORNAX_BUDGET_FRACTION}, or a 2 GB assumption when the JVM will
+     * not say.
+     *
+     * <p>Physical memory, not VRAM, and that is an approximation. Blaze3D exposes no VRAM query, so
+     * there is nothing better to ask. On Apple Silicon the two are the same pool. On a discrete GPU
+     * this overestimates, and a machine with far more system RAM than VRAM can still be handed a
+     * page its card cannot hold. Still better than a fixed constant, which is wrong everywhere
+     * rather than somewhere.
+     */
+    private static long fornax$atlasBudgetBytes() {
+        try {
+            java.lang.management.OperatingSystemMXBean os =
+                    java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+            if (os instanceof com.sun.management.OperatingSystemMXBean sun) {
+                return (long) (sun.getTotalMemorySize() * FORNAX_BUDGET_FRACTION);
+            }
+        } catch (RuntimeException | LinkageError unavailable) {
+            // Falls through to the assumption below: a budget that is merely conservative beats a
+            // reload that dies here, and this runs inside a resource reload.
+        }
+        return 2L * 1024L * 1024L * 1024L;
     }
 
     /**

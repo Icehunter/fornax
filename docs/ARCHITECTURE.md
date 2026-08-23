@@ -1735,6 +1735,11 @@ else entirely.
 
 ## 12. Known laws
 
+- **The sprite-bounds grid's resolution is not fixed.** The engine sizes it to the pack, since the
+  same grid sets how tightly a paged stitch may place sprites. A shader that derives the cell index
+  from its own constant reads the wrong cell, with no error: the rect-contains-uv test fails and
+  whatever used the rectangle switches off. Packs read the grid through `fornax_spriteGridCell` in
+  `fornax:block_atlas.glsl`, which takes the size from the texture.
 - **std140 scalar-after-vec3.** A scalar immediately following a vec3 member must land at the
   next 16-byte boundary, never in the vec3's spec-legal trailing 4 bytes. The pack-options layout
   builder enforces this as a hard rule rather than relying on any particular driver's packing

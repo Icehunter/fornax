@@ -127,3 +127,17 @@ vec4 fornax_sampleBlockAtlasBlend(sampler2D blockTex, vec2 uv, float ghostShare)
 }
 
 #endif
+
+// ---------------------------------------------------------------------------------------------
+// The atlas-indexed grids: builtin.spriteBounds and builtin.spriteHeightRange.
+//
+// Both are square textures covering the block atlas, one cell per patch of it. Use this to read a
+// cell. Do not work the index out from a resolution written into the shader: the engine sizes this
+// grid to the pack, and a stale copy of the number reads the wrong cell with no error.
+//
+// uv is the ordinary atlas coordinate, the same one used to sample the atlas.
+vec4 fornax_spriteGridCell(sampler2D grid, vec2 uv) {
+    ivec2 size = textureSize(grid, 0);
+    // Clamped: uv hits exactly 1.0 on a sprite's far edge, one past the last cell.
+    return texelFetch(grid, clamp(ivec2(uv * vec2(size)), ivec2(0), size - ivec2(1)), 0);
+}

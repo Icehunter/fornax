@@ -152,11 +152,33 @@ Some images are provided by the engine rather than declared by you. They are nam
 | `builtin.lightmap`, `builtin.blockAtlas` | Vanilla's own lighting and block textures |
 | `builtin.normalAtlas`, `builtin.materialAtlas` | LabPBR sidecar textures, if the resource pack ships them |
 | `builtin.celestials` | Sun and moon |
+| `builtin.spriteBounds` | Which sprite covers each part of the block atlas, and its rectangle |
+| `builtin.spriteHeightRange` | The labPBR height range of that sprite |
 | `builtin.output` | **The screen.** Something must write here or nothing appears. |
 
 There is one more, `sceneHistory`, holding the finished previous frame. The engine writes it every
 frame no matter what, so reflections can read it. **Never declare `sceneHistory` yourself.** Read it
 as `sceneHistory.history` and leave the declaration alone.
+
+`builtin.spriteBounds` and `builtin.spriteHeightRange` are grids laid over the block atlas rather
+than screen images. Give an atlas coordinate, get the value for whichever sprite is there. Parallax
+needs them: a block model can map a face onto part of its texture, so the quad's own UV range is not
+the sprite's.
+
+**Read them with the engine's helper, never with your own index.**
+
+```glsl
+#moj_import <fornax:block_atlas.glsl>
+
+vec4 bounds = fornax_spriteGridCell(u_Input0, v_TexCoord);
+vec4 range  = fornax_spriteGridCell(u_Input1, v_TexCoord);
+```
+
+The grid's resolution is the engine's, and it changes: a pack with many sprites gets a finer grid,
+because the same grid decides how tightly the atlas can be packed. A shader that computes the cell
+from its own constant reads the wrong cell as soon as the two disagree, and nothing reports it. The
+rectangle simply stops containing the coordinate that looked it up, and whatever depended on it
+turns off.
 
 ### `enabled_if`
 
@@ -433,6 +455,9 @@ Collected here because each of these has cost someone an afternoon.
 change. See section 4.
 
 **A pass cannot read what it writes**, except through `.history`.
+
+**Never hardcode a size the engine owns.** Atlas grids, page counts and atlas dimensions
+all change with the pack. Read them from the texture, or use the helper that does.
 
 **`history` and `mipchain` are mutually exclusive.** A target with mip levels is owned by the mipchain
 machinery, which does not keep a previous-frame copy. Declaring both gets you one of them.

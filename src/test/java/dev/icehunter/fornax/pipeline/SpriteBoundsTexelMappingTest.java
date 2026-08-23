@@ -17,11 +17,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class SpriteBoundsTexelMappingTest {
     /** Mirrors the fill loop's cell range for a sprite spanning [u0,u1). */
     private static int firstCell(float u) {
-        return Math.max(0, (int) Math.floor(u * SpriteBoundsTexture.SIZE));
+        return Math.max(0, (int) Math.floor(u * SpriteBoundsTexture.size()));
     }
 
     private static int lastCell(float u) {
-        return Math.min(SpriteBoundsTexture.SIZE - 1, (int) Math.ceil(u * SpriteBoundsTexture.SIZE) - 1);
+        return Math.min(SpriteBoundsTexture.size() - 1, (int) Math.ceil(u * SpriteBoundsTexture.size()) - 1);
     }
 
     @Test
@@ -31,7 +31,7 @@ public class SpriteBoundsTexelMappingTest {
         float u0 = 0.0f, u1 = 1.0f / 16.0f;
         int first = firstCell(u0), last = lastCell(u1);
         for (float u = u0; u < u1; u += (u1 - u0) / 64.0f) {
-            int cell = (int) (u * SpriteBoundsTexture.SIZE);
+            int cell = (int) (u * SpriteBoundsTexture.size());
             assertTrue(cell >= first && cell <= last,
                     "coordinate " + u + " maps to cell " + cell + ", outside the filled range "
                             + first + ".." + last);

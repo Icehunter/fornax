@@ -130,17 +130,6 @@ public class FornaxSettings {
     public boolean voxelReachIgnoresRenderDistance = false;
 
     /**
-     * Gates the multi-page block atlas (M13): a resource pack whose combined sprites exceed the
-     * device's single-atlas dimension ceiling spills overflow sprites onto additional {@code
-     * dev.icehunter.fornax.atlas.BlockAtlasPaging}-allocated pages instead of the reload aborting
-     * with {@code StitcherException}. Read by {@code SpriteLoaderPagedStitchMixin}, which as of
-     * Phase 2 runs a measurement-and-log pass only (plans pages, alters nothing). Off by default:
-     * with the flag off, or once it does gate something, behavior for a pack that already fit one
-     * page must stay bit-for-bit identical to today.
-     */
-    public boolean pagedBlockAtlasEnabled = false;
-
-    /**
      * How much of a pack's authored labPBR sidecar resolution to keep -- see
      * {@link SidecarMapResolution} for the tiers and for why HALF is the default.
      *

@@ -34,11 +34,66 @@ import java.nio.ByteBuffer;
  */
 public final class SpriteBoundsTexture {
     /**
-     * Grid resolution. Each cell is one atlas texel at 512px, or 8 texels on a 4096px atlas -- fine
-     * enough for any block sprite, since the smallest is 16px and still spans two cells there.
+     * Starting grid resolution. One cell is one atlas texel at 1024px, four texels at 4096px.
+     *
+     * <p>This also sets how coarsely a paged stitch has to place sprites, which is not obvious from
+     * here. One rect per cell means two sprites sharing a cell lose one of them, so placements are
+     * aligned to whole cells (four cells for overflow pages, whose ghosts are quarter scale). The
+     * coarser the grid, the more of each page the stitcher wastes:
+     *
+     * <pre>
+     *   cell   overflow align   256px sprites per 16384 page   (perfect packing: 4096)
+     *     32        128                   1024
+     *     16         64                   1726
+     *      8         32                   2484
+     *      4         16                   3122
+     * </pre>
+     *
+     * <p>A 512x pack measured at cell 32 needed 3 overflow pages; at cell 16 it needs 2. Two grids
+     * are allocated, bounds and ranges, so this default costs 32 MB against a 1365 MB page saved.
+     * A pack this resolution cannot hold walks up {@link #SIZE_LADDER}.
      */
-    public static final int SIZE = 512;
-    private static final int BYTES = SIZE * SIZE * 4 * Float.BYTES;
+    public static final int DEFAULT_SIZE = 1024;
+
+    /**
+     * Resolutions to try, cheapest first. Stops at 4096: a four-texel cell already puts overflow
+     * alignment at vanilla's own mip granularity, so a finer grid costs memory and places nothing
+     * extra.
+     */
+    public static final int[] SIZE_LADDER = {DEFAULT_SIZE, 2048, 4096};
+
+    private static int gridSize = DEFAULT_SIZE;
+
+    /** Bytes one grid needs at the current resolution; two are allocated, bounds and ranges. */
+    private static int bytes() {
+        return gridSize * gridSize * 4 * Float.BYTES;
+    }
+
+    /** The live grid resolution. Not a constant: {@link #useGridSize} raises it for a paged pack. */
+    public static synchronized int size() {
+        return gridSize;
+    }
+
+    /**
+     * Sets the grid resolution, rebuilding at the new size when it differs.
+     *
+     * <p>Called by the paged stitch once it knows which resolution holds the pack, so only packs
+     * that need a big grid pay for one. A pack that fits a single page never gets here.
+     *
+     * <p>Both textures are destroyed rather than reused. {@link #build} only creates one when the
+     * handle is null, so a resize without this would write the new grid's texels into the old
+     * grid's dimensions and read back garbage.
+     */
+    public static synchronized void useGridSize(int newSize) {
+        if (newSize == gridSize) {
+            return;
+        }
+        if (newSize < 1 || Integer.bitCount(newSize) != 1) {
+            throw new IllegalArgumentException("grid size must be a power of two, got " + newSize);
+        }
+        destroy();
+        gridSize = newSize;
+    }
 
     private static @Nullable GpuTexture texture;
     private static @Nullable GpuTextureView view;
@@ -115,8 +170,8 @@ public final class SpriteBoundsTexture {
             return;
         }
 
-        ByteBuffer pixels = MemoryUtil.memAlloc(BYTES);
-        ByteBuffer ranges = MemoryUtil.memAlloc(BYTES);
+        ByteBuffer pixels = MemoryUtil.memAlloc(bytes());
+        ByteBuffer ranges = MemoryUtil.memAlloc(bytes());
         try {
             // Zeroed, so a cell no sprite claims reads a degenerate rectangle. Shaders treat that as
             // "no bounds" and skip; uninitialized memory would instead give them a plausible-looking
@@ -154,7 +209,7 @@ public final class SpriteBoundsTexture {
                 int y1 = lastCell(v1);
                 for (int y = y0; y <= y1; y++) {
                     for (int x = x0; x <= x1; x++) {
-                        int offset = (y * SIZE + x) * 4 * Float.BYTES;
+                        int offset = (y * gridSize + x) * 4 * Float.BYTES;
                         pixels.putFloat(offset, animated ? 0.0f : u0);
                         pixels.putFloat(offset + 4, animated ? 0.0f : v0);
                         pixels.putFloat(offset + 8, animated ? 0.0f : u1);
@@ -167,25 +222,25 @@ public final class SpriteBoundsTexture {
             if (texture == null) {
                 texture = device.createTexture("Fornax Sprite Bounds",
                         GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
-                        GpuFormat.RGBA32_FLOAT, SIZE, SIZE, 1, 1);
+                        GpuFormat.RGBA32_FLOAT, gridSize, gridSize, 1, 1);
                 view = device.createTextureView(texture);
             }
             if (rangeTexture == null) {
                 rangeTexture = device.createTexture("Fornax Sprite Height Ranges",
                         GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
-                        GpuFormat.RGBA32_FLOAT, SIZE, SIZE, 1, 1);
+                        GpuFormat.RGBA32_FLOAT, gridSize, gridSize, 1, 1);
                 rangeView = device.createTextureView(rangeTexture);
             }
             CommandEncoder encoder = device.createCommandEncoder();
-            encoder.writeToTexture(texture, pixels, 0, 0, 0, 0, SIZE, SIZE);
-            encoder.writeToTexture(rangeTexture, ranges, 0, 0, 0, 0, SIZE, SIZE);
+            encoder.writeToTexture(texture, pixels, 0, 0, 0, 0, gridSize, gridSize);
+            encoder.writeToTexture(rangeTexture, ranges, 0, 0, 0, 0, gridSize, gridSize);
             built = true;
             // Coverage, not just success. A grid that built from a handful of sprites is a different
             // failure from one that never built, and both look identical in the world -- the first
             // leaves most surfaces without bounds, the second leaves the shader reading noise.
             int covered = 0;
             int rangeCovered = 0;
-            for (int cell = 0; cell < SIZE * SIZE; cell++) {
+            for (int cell = 0; cell < gridSize * gridSize; cell++) {
                 if (pixels.getFloat(cell * 4 * Float.BYTES + 8) > 0.0f) {
                     covered++;
                 }
@@ -216,9 +271,9 @@ public final class SpriteBoundsTexture {
             FornaxMod.LOGGER.info("[Fornax] Sprite bounds grid: {} sprites, {}% of the atlas covered,"
                     + " {} height ranges ({} with a usable trimmed range) covering {}% of the grid",
                     written,
-                    Math.round(100.0 * covered / (SIZE * (double) SIZE)),
+                    Math.round(100.0 * covered / (gridSize * (double) gridSize)),
                     ranges_.size(), trimmed,
-                    Math.round(100.0 * rangeCovered / (SIZE * (double) SIZE)));
+                    Math.round(100.0 * rangeCovered / (gridSize * (double) gridSize)));
         } catch (RuntimeException e) {
             if (!reportedFailure) {
                 reportedFailure = true;
@@ -248,16 +303,16 @@ public final class SpriteBoundsTexture {
      */
     static int firstCell(float uv) {
         // Clamped at BOTH ends, so this is the same total function the shader's
-        // `texelFetch(grid, ivec2(v_TexCoord * SIZE))` is. An unclamped floor returns SIZE at uv 1.0
+        // `texelFetch(grid, ivec2(v_TexCoord * gridSize))` is. An unclamped floor returns gridSize at uv 1.0
         // -- harmless in the write loops, which simply never run, but it means the first cell a
         // sprite claims and the cell a fragment on that same edge fetches can disagree, and that
         // disagreement is precisely the class of defect this pair of methods was extracted to make
         // impossible to have twice.
-        return Math.min(SIZE - 1, Math.max(0, (int) Math.floor(uv * SIZE)));
+        return Math.min(gridSize - 1, Math.max(0, (int) Math.floor(uv * gridSize)));
     }
 
     static int lastCell(float uv) {
-        return Math.min(SIZE - 1, (int) Math.ceil(uv * SIZE) - 1);
+        return Math.min(gridSize - 1, (int) Math.ceil(uv * gridSize) - 1);
     }
 
     /**
@@ -277,7 +332,7 @@ public final class SpriteBoundsTexture {
             int ry1 = lastCell(range.v1());
             for (int y = ry0; y <= ry1; y++) {
                 for (int x = rx0; x <= rx1; x++) {
-                    int offset = (y * SIZE + x) * 4 * Float.BYTES;
+                    int offset = (y * gridSize + x) * 4 * Float.BYTES;
                     ranges.putFloat(offset, range.minAlpha() / 255.0f);
                     ranges.putFloat(offset + 4, range.maxAlpha() / 255.0f);
                     ranges.putFloat(offset + 8, range.robustMinAlpha() / 255.0f);

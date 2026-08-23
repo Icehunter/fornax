@@ -96,19 +96,60 @@ public final class BlockAtlasPagedStitch {
      */
     public static Takeover takeover(Identifier atlasLocation, List<SpriteContents> contents,
                                     int canvasSize, int mipLevel, int anisotropicLevel,
-                                    Executor executor) {
+                                    long budgetBytes, Executor executor) {
         // Placement alignment boosted to the sprite-bounds grid's cell size (and 4x that for
         // overflow pages, so quarter-scale ghost rects land on cell boundaries too) -- see
         // BlockAtlasPaging.planWithReservedStrip's doc for the one-rect-per-cell collision this
         // makes impossible. The REAL mip level still flows into Preparations unchanged below.
-        int cellTexels = Math.max(1, canvasSize / dev.icehunter.fornax.pipeline.SpriteBoundsTexture.SIZE);
-        int pageZeroAlignMip = Mth.log2(Math.max(1 << mipLevel, cellTexels));
-        int overflowAlignMip = Mth.log2(Math.max(1 << mipLevel,
-                cellTexels << BlockAtlasGhostLayout.GHOST_SHIFT));
-        BlockAtlasPaging.Result<SpriteContents> result = BlockAtlasPaging.planWithReservedStrip(
-                contents, canvasSize, BlockAtlasGhostLayout.pageZeroStitchHeight(canvasSize),
-                pageZeroAlignMip, overflowAlignMip, anisotropicLevel,
-                1 + BlockAtlasGhostLayout.MAX_OVERFLOW_PAGES);
+        //
+        // The grid resolution is picked here rather than fixed, because that alignment decides how
+        // much of each page gets filled: a 32-texel cell fits 1024 sprites of 256px where perfect
+        // packing fits 4096, a 4-texel cell fits 3122. Trying the cheap grid first means only packs
+        // that need the expensive one pay for it.
+        int gridSize = 0;
+        BlockAtlasPaging.Result<SpriteContents> result = null;
+        BlockAtlasPaging.PagingException lastFailure = null;
+        for (int candidate : dev.icehunter.fornax.pipeline.SpriteBoundsTexture.SIZE_LADDER) {
+            int cellTexels = Math.max(1, canvasSize / candidate);
+            int pageZeroAlignMip = Mth.log2(Math.max(1 << mipLevel, cellTexels));
+            int overflowAlignMip = Mth.log2(Math.max(1 << mipLevel,
+                    cellTexels << BlockAtlasGhostLayout.GHOST_SHIFT));
+            // The grid comes out of the same budget as the pages, so a finer grid leaves room for
+            // fewer of them. Without this the ladder would trade a 1536 MB page for a 512 MB grid
+            // and call it a saving.
+            long gridBytes = (long) candidate * candidate * 4 * Float.BYTES * 2;
+            // The budget buys OVERFLOW pages. Page 0 is the atlas vanilla allocates with or without
+            // paging, so charging it here would refuse a pack over memory it was going to spend
+            // either way. planWithReservedStrip counts page 0 in its cap, hence the +1.
+            int allowedPages = 1 + BlockAtlasPageBudget.maxPages(
+                    Math.max(0L, budgetBytes - gridBytes), 1.0, canvasSize, canvasSize,
+                    BlockAtlasGhostLayout.MAX_OVERFLOW_PAGES);
+            try {
+                result = BlockAtlasPaging.planWithReservedStrip(
+                        contents, canvasSize, BlockAtlasGhostLayout.pageZeroStitchHeight(canvasSize),
+                        pageZeroAlignMip, overflowAlignMip, anisotropicLevel, allowedPages);
+                gridSize = candidate;
+                break;
+            } catch (BlockAtlasPaging.PagingException tooCoarse) {
+                lastFailure = tooCoarse;
+            }
+        }
+        if (result == null) {
+            // Nothing held it. Rethrow the finest grid's failure: the coarser ones overstate how
+            // far short the pack fell.
+            throw lastFailure;
+        }
+        // Set before anything reads the grid. The reload rebuilds it after this, and a stale value
+        // would align placements to one cell size and index them by another.
+        dev.icehunter.fornax.pipeline.SpriteBoundsTexture.useGridSize(gridSize);
+        if (gridSize != dev.icehunter.fornax.pipeline.SpriteBoundsTexture.DEFAULT_SIZE) {
+            // Worth a line: this is where one pack quietly costs hundreds of MB more than another
+            // at the same resolution, and the reason is sprite count, not sprite size.
+            FornaxMod.LOGGER.info("[Fornax] Paged block atlas: sprite-bounds grid raised to {}"
+                            + " ({} MB). {} sprite(s) need a finer placement pitch than {} allows",
+                    gridSize, (long) gridSize * gridSize * 16 * 2 / (1024 * 1024), contents.size(),
+                    dev.icehunter.fornax.pipeline.SpriteBoundsTexture.DEFAULT_SIZE);
+        }
         int overflowPages = result.pages().size() - 1;
         if (overflowPages < 1) {
             throw new IllegalArgumentException(
@@ -134,7 +175,7 @@ public final class BlockAtlasPagedStitch {
                 ghosts.add(ghost);
             });
         }
-        placeAnimatedGhosts(atlasLocation, spilledAnimated, canvasSize, mipLevel, anisotropicLevel,
+        placeAnimatedGhosts(atlasLocation, spilledAnimated, canvasSize, mipLevel, anisotropicLevel, gridSize,
                 regions, ghosts);
 
         TextureAtlasSprite missing = regions.get(MissingTextureAtlasSprite.getLocation());
@@ -178,6 +219,7 @@ public final class BlockAtlasPagedStitch {
      */
     private static void placeAnimatedGhosts(Identifier atlasLocation, List<SpriteContents> spilledAnimated,
                                             int canvasSize, int mipLevel, int anisotropicLevel,
+                                            int boundsGridSize,
                                             Map<Identifier, TextureAtlasSprite> regions,
                                             List<BlockAtlasGhostSprite> ghosts) {
         if (spilledAnimated.isEmpty()) {
@@ -188,8 +230,7 @@ public final class BlockAtlasPagedStitch {
         // that record's doc), so the placement origin IS the ghost origin. Alignment boosted to
         // the sprite-bounds grid's cell size (these placements are direct strip coordinates) --
         // same collision rationale as the page stitchers above.
-        int boundsCellTexels = Math.max(1,
-                canvasSize / dev.icehunter.fornax.pipeline.SpriteBoundsTexture.SIZE);
+        int boundsCellTexels = Math.max(1, canvasSize / boundsGridSize);
         int cellAlignMip = Mth.log2(Math.max(
                 1 << Math.max(0, mipLevel - BlockAtlasGhostLayout.GHOST_SHIFT), boundsCellTexels));
         Stitcher<GhostCellEntry> cellStitcher = new Stitcher<>(cellSize, cellSize, cellAlignMip, 0);

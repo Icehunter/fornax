@@ -34,7 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the shader actually depends on.
  */
 class SpriteBoundsRangeGridTest {
-    private static final int SIZE = SpriteBoundsTexture.SIZE;
+    private static final int SIZE = SpriteBoundsTexture.size();
 
     private static ByteBuffer grid() {
         return ByteBuffer.allocate(SIZE * SIZE * 4 * Float.BYTES);
