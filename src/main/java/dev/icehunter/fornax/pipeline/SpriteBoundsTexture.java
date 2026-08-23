@@ -268,8 +268,10 @@ public final class SpriteBoundsTexture {
             var ranges_ = dev.icehunter.fornax.atlas.SpriteHeightRanges.all();
             long trimmed = ranges_.stream()
                     .filter(r -> r.robustMaxAlpha() > r.robustMinAlpha()).count();
-            FornaxMod.LOGGER.info("[Fornax] Sprite bounds grid: {} sprites, {}% of the atlas covered,"
-                    + " {} height ranges ({} with a usable trimmed range) covering {}% of the grid",
+            FornaxMod.LOGGER.info("[Fornax] Sprite bounds grid: {}x{} ({} MB), {} sprites, {}% of the"
+                    + " atlas covered, {} height ranges ({} with a usable trimmed range) covering"
+                    + " {}% of the grid",
+                    gridSize, gridSize, 2L * bytes() / (1024 * 1024),
                     written,
                     Math.round(100.0 * covered / (gridSize * (double) gridSize)),
                     ranges_.size(), trimmed,
