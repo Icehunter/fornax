@@ -1,6 +1,6 @@
 # Fornax
 
-<img src="docs/icon.png" width="96" height="96" alt="Fornax icon" align="right">
+<img src="docs/icon.png" width="96" height="96" alt="Fornax icon" align="left">
 
 Fornax is a rendering engine for Minecraft: it controls how a scene is actually drawn to the
 screen. It runs as a companion mod to Sodium, Minecraft's Vulkan-based renderer, through the Fabric
