@@ -1,0 +1,47 @@
+# Sample-pack material categories. Named categories -> dense ids the vertex channel
+# carries; unmapped blocks stay id 0 (pure labPBR). Tier legend: T2 = albedo synthesis fill/override,
+# T3 = per-category GLSL snippet.
+
+[categories.polished_metal]              # T2 force-override: guaranteed metal smoothness + F0
+blocks = ["minecraft:iron_block", "minecraft:gold_block", "#c:storage_blocks/iron"]
+force_override = true
+smoothness = { source = "albedo_luma", curve = 2.0, min = 0.6 }
+f0 = "metal_albedo"
+
+[categories.emissive_strong]             # complements block-light emission (no _s alpha authored)
+blocks = ["minecraft:glowstone", "minecraft:sea_lantern"]
+emissive = { source = "albedo_luma", strength = 1.0 }
+
+[categories.glass]                       # T2 gap-fill: smooth where the pack left _s unauthored
+blocks = ["minecraft:glass", "minecraft:tinted_glass", "minecraft:white_stained_glass"]
+smoothness = { source = "albedo_luma", curve = 1.0, min = 0.5 }
+
+[categories.ice]                         # T2 gap-fill: high smoothness
+blocks = ["minecraft:ice", "minecraft:packed_ice", "minecraft:blue_ice"]
+smoothness = { source = "albedo_luma", curve = 1.5, min = 0.55 }
+
+[categories.polished_stone]              # T2 gap-fill: moderate smoothness
+blocks = ["minecraft:polished_andesite", "minecraft:polished_diorite", "minecraft:polished_granite"]
+smoothness = { source = "albedo_luma", curve = 2.0, min = 0.3 }
+
+[categories.gem_block]                   # T3: snippet nudges F0/smoothness for cut-gem sparkle
+blocks = ["minecraft:diamond_block", "minecraft:emerald_block"]
+smoothness = { source = "albedo_luma", curve = 2.0, min = 0.5 }
+glsl = "shaders/materials/gem.glsl"
+
+[categories.metal_raw]                   # T2 gap-fill, non-override (respects _s where present)
+blocks = ["minecraft:raw_iron_block", "minecraft:raw_gold_block", "minecraft:raw_copper_block"]
+smoothness = { source = "albedo_luma", curve = 2.5, min = 0.2 }
+
+[categories.copper]                      # T2 force-override polished copper family
+blocks = ["minecraft:copper_block", "minecraft:cut_copper"]
+force_override = true
+smoothness = { source = "albedo_luma", curve = 2.0, min = 0.5 }
+f0 = "metal_albedo"
+
+[categories.foliage]                     # groundwork: id-only (flag for future foliage handling)
+blocks = ["minecraft:oak_leaves", "minecraft:spruce_leaves", "minecraft:birch_leaves"]
+
+[categories.lamp]                        # emissive complement for redstone lamp
+blocks = ["minecraft:redstone_lamp", "minecraft:shroomlight"]
+emissive = { source = "albedo_luma", strength = 0.8 }

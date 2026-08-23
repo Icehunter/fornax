@@ -1,0 +1,11 @@
+[targets.ssr]
+format = "rgba16f"
+scale = 1.0
+enabled_if = "SSR_QUALITY"
+
+[[pass]]
+name = "ssr_trace"
+type = "fullscreen"
+shader = "shaders/post/ssr_trace.fsh"
+inputs = ["builtin.depth"]
+outputs = ["ssr"]

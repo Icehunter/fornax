@@ -1,0 +1,21 @@
+[targets.a]
+format = "rgba8"
+scale = 1.0
+
+[targets.b]
+format = "rgba8"
+scale = 1.0
+
+[[pass]]
+name = "passA"
+type = "fullscreen"
+shader = "shaders/post/passA.fsh"
+inputs = ["b"]
+outputs = ["a"]
+
+[[pass]]
+name = "passB"
+type = "fullscreen"
+shader = "shaders/post/passB.fsh"
+inputs = ["a"]
+outputs = ["b"]

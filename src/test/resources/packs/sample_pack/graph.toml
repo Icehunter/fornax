@@ -1,0 +1,145 @@
+# Sample-pack render graph, shaped like a full deferred pipeline so the loader is exercised
+# against a realistic graph rather than a toy one:
+# terrain (opaque G-buffer write) -> SSAO -> Hi-Z -> SSR -> resolve -> (engine-owned scene-history
+# copy + SSAA downsample, neither a pack pass). Three adaptations from a hardcoded pipeline
+# commit-copy model to this engine's history-target ping-pong semantics:
+#   1. `ssr` gained `history = true` (ssr_blur's own temporal blend needs a previous-frame read,
+#      exactly like ssao already has).
+#   2. SSR's Fast-preset half-res raw trace is upsampled to full resolution inside ssr_blur_fast
+#      (ordinary hardware bilinear, not the original's bespoke depth-aware bilateral filter), so the
+#      resolve pass always plain-samples a single, always-full-res "ssr" target regardless of quality.
+#   3. This pack no longer owns any TAA passes or targets. `sceneHistory` is an engine-guaranteed
+#      target -- never declared here -- that the engine writes once, unconditionally, from the
+#      final native frame under every AA/upscale method (OFF included), not just when a temporal
+#      resolve happens to run. SSR reads `sceneHistory.history` and is gated purely on
+#      `SSR_QUALITY`; the old `TAA_ENABLED` pack option is retired (annotation removed) since the
+#      engine's own AA/upscale method selector is now the only source of that fact.
+
+[targets.ssaoRaw]
+format = "r8"
+scale = 1.0
+
+[targets.ssao]
+format = "r8"
+scale = 1.0
+history = true
+
+[targets.hiz]
+format = "r32f"
+scale = 1.0
+enabled_if = "SSR_QUALITY != 0 && (SSR_SURFACE_MODE == 2 || SSR_WATER_MODE > 1)"
+
+# Half-res only in Fast -- matches the original SsrManager's half-res FAST rule. Mutually exclusive
+# with ssrRawFull (only one is ever enabled for a given SSR_QUALITY value), and only ever referenced
+# by their own quality-matched ssr_trace_*/ssr_blur_* pass pair below.
+[targets.ssrRawFull]
+format = "rgba16f"
+scale = 1.0
+enabled_if = "SSR_QUALITY == 1 && (SSR_SURFACE_MODE == 2 || SSR_WATER_MODE > 1)"
+
+[targets.ssrRaw]
+format = "rgba16f"
+scale = 0.5
+enabled_if = "SSR_QUALITY == 2 && (SSR_SURFACE_MODE == 2 || SSR_WATER_MODE > 1)"
+
+# Always full-res and always allocated (not enabled_if-gated): the resolve pass unconditionally
+# samples this target every frame, so it must exist even when SSR is off/disabled this session
+# (resolve's own SSR_QUALITY compile guard skips compositing from it in that case, exactly like the
+# original build zeroed u_SsrStrength instead of skipping the sample).
+[targets.ssr]
+format = "rgba16f"
+scale = 1.0
+history = true
+
+# Fixture-exercise target/pass pair, present only to cover the compute path: a minimal 1x1x1
+# compute dispatch that proves ComputePassRunner and GraphRunner's compute switch arm actually run
+# through a real, TOML-parsed, validated graph -- not just Task 1/2's isolated unit tests. No other
+# pass reads this target, so it's a pure sink with zero effect on existing pass behavior/ordering.
+[targets.computeProbe]
+format = "r8"
+scale = 1.0
+
+[[pass]]
+name = "compute_probe"
+type = "compute"
+shader = "shaders/compute/probe.comp"
+dispatch = [1, 1, 1]
+outputs = ["computeProbe"]
+
+# terrain_opaque.inputs, kept representative of a real pipeline's shape so the fixture does not
+# drift into testing a graph nobody ships. slot 0 depth_opaque, slot 1 noise,
+# slot 2 sceneHistory.history (the terrain water march's reflection source, replacing the old
+# opaque-surface-only "ssr" slot) -- engine-written, never enabled_if-gated, and special-cased as
+# always final-for-frame by checkGeometryInputFinality (no writer-search needed, unlike ssr's own
+# compile-gated writers).
+[[pass]]
+name = "terrain_opaque"
+type = "geometry"
+slot = "terrain"
+program = "shaders/blocks/terrain"
+inputs = ["builtin.depth_opaque", "builtin.noise", "sceneHistory.history"]
+outputs = []
+
+[[pass]]
+name = "ssao_raw"
+type = "fullscreen"
+shader = "shaders/post/ssao.fsh"
+enabled_if = "SSAO_ENABLED"
+inputs = ["builtin.gNormal", "builtin.depth"]
+outputs = ["ssaoRaw"]
+
+[[pass]]
+name = "ssao_blur"
+type = "fullscreen"
+shader = "shaders/post/ssao_blur.fsh"
+enabled_if = "SSAO_ENABLED"
+inputs = ["ssaoRaw", "ssao.history", "builtin.gMotion", "builtin.depth"]
+outputs = ["ssao"]
+
+[[pass]]
+name = "hiz"
+type = "mipchain"
+shader = "shaders/post/hiz_downsample.fsh"
+target = "hiz"
+enabled_if = "SSR_QUALITY != 0 && (SSR_SURFACE_MODE == 2 || SSR_WATER_MODE > 1)"
+inputs = ["builtin.depth"]
+outputs = []
+
+[[pass]]
+name = "ssr_trace_fancy"
+type = "fullscreen"
+shader = "shaders/post/ssr_trace.fsh"
+enabled_if = "SSR_QUALITY == 1 && (SSR_SURFACE_MODE == 2 || SSR_WATER_MODE > 1)"
+inputs = ["builtin.gNormal", "builtin.depth", "builtin.gMaterial", "builtin.gMotion", "sceneHistory.history", "hiz"]
+outputs = ["ssrRawFull"]
+
+[[pass]]
+name = "ssr_trace_fast"
+type = "fullscreen"
+shader = "shaders/post/ssr_trace.fsh"
+enabled_if = "SSR_QUALITY == 2 && (SSR_SURFACE_MODE == 2 || SSR_WATER_MODE > 1)"
+inputs = ["builtin.gNormal", "builtin.depth", "builtin.gMaterial", "builtin.gMotion", "sceneHistory.history", "hiz"]
+outputs = ["ssrRaw"]
+
+[[pass]]
+name = "ssr_blur_fancy"
+type = "fullscreen"
+shader = "shaders/post/ssr_blur.fsh"
+enabled_if = "SSR_QUALITY == 1 && (SSR_SURFACE_MODE == 2 || SSR_WATER_MODE > 1)"
+inputs = ["ssrRawFull", "ssr.history", "builtin.gMotion", "builtin.depth", "builtin.gMaterial"]
+outputs = ["ssr"]
+
+[[pass]]
+name = "ssr_blur_fast"
+type = "fullscreen"
+shader = "shaders/post/ssr_blur.fsh"
+enabled_if = "SSR_QUALITY == 2 && (SSR_SURFACE_MODE == 2 || SSR_WATER_MODE > 1)"
+inputs = ["ssrRaw", "ssr.history", "builtin.gMotion", "builtin.depth", "builtin.gMaterial"]
+outputs = ["ssr"]
+
+[[pass]]
+name = "resolve"
+type = "fullscreen"
+shader = "shaders/post/gbuffer_resolve.fsh"
+inputs = ["builtin.gNormal", "builtin.gAlbedo", "builtin.gMaterial", "builtin.gAo", "builtin.gMotion", "builtin.depth", "ssao", "sceneHistory.history", "ssr"]
+outputs = ["builtin.output"]

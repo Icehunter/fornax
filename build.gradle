@@ -1,0 +1,78 @@
+plugins {
+    id "net.fabricmc.fabric-loom" version "1.16.1"
+}
+
+group = "dev.icehunter"
+version = "${project.mod_version}+mc${project.minecraft_version}"
+base { archivesName = "fornax" }
+
+repositories {
+    maven { url = "https://api.modrinth.com/maven" } // official Sodium artifacts
+    maven { url = "https://maven.terraformersmc.com/releases" } // ModMenu, compile-only
+    maven { url = "https://maven.isxander.dev/releases" } // YACL (isXander's own maven; curl-verified 2026-07-12)
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    // No `mappings` block: MC 26.2 ships already-named (unobfuscated) client jars,
+    // so Loom's official-Mojang-mappings path doesn't apply (mirrors the scaffolding,
+    // which likewise configures no mappings for this MC version).
+    // Plain `implementation`, not `modImplementation`: with obfuscation disabled
+    // (see gradle.properties), Loom does not create the mod-remapping configurations,
+    // since there's nothing to remap against on an already-named MC 26.2 client jar.
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    // VERIFIED coordinate (POM fetched from the Modrinth maven, 2026-07-03):
+    implementation "maven.modrinth:sodium:${project.sodium_maven_version}"
+    // Optional integration only -- compileOnly so a player without ModMenu installed still runs
+    // fine; ModMenuEntry is only ever classloaded by ModMenu's own entrypoint lookup.
+    // VERIFIED coordinate (jar fetched from the ModMenu maven, 2026-07-03; matches the
+    // 20.0.0-beta.4 build already deployed in the test profile, first MC 26.2-compatible release).
+
+    // YACL: settings-UI dependency (REQUIRED, not compileOnly -- fabric.mod.json declares a hard
+    // depends on it). group/artifact/version VERIFIED against the jar's own bundled POM (fetched
+    // live from maven.isxander.dev, 2026-07-12) -- matches the 3.9.5+26.2-fabric build already
+    // deployed in the test profile. Plain `implementation`, same reasoning as fabric-api/sodium
+    // above: no Loom mod-remapping configs exist for this already-named MC 26.2 client jar, and
+    // YACL's own bundled dependencies (imageio/gson/json forks, JiJ'd) are loaded by Fabric Loader
+    // itself from its fabric.mod.json "jars" list, independent of how Gradle resolves this artifact.
+    implementation "dev.isxander:yet-another-config-lib:${project.yacl_version}"
+
+    // TOML parsing for shaderpack manifests. Pure-Java library, nested into the shipped jar (JiJ);
+    // `include` is not transitive, so `core` (which `toml` depends on) is listed explicitly too.
+    implementation "com.electronwill.night-config:toml:3.8.1"
+    implementation "com.electronwill.night-config:core:3.8.1"
+    include "com.electronwill.night-config:toml:3.8.1"
+    include "com.electronwill.night-config:core:3.8.1"
+
+    testImplementation "org.junit.jupiter:junit-jupiter:5.11.3"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+java {
+    // Bumped from 21 -> 25: ModMenu's 26.2-compatible build (20.0.0-beta.4, the version already
+    // deployed in the test profile) is itself compiled for Java 25, and Gradle's variant-aware
+    // resolution enforces that a compileOnly dependency's minimum JVM version can't exceed ours.
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
+}
+
+test {
+    useJUnitPlatform()
+    // ComputeShaderCompilerTest (Task 5) is the first test to load a real native library
+    // (shaderc, via LWJGL's System::load) -- JDK 25 warns loudly on this without opting in,
+    // and says restricted native access will be a hard error in a future release.
+    jvmArgs "--enable-native-access=ALL-UNNAMED"
+}
+
+tasks.named("runClient") {
+    // MetalFxSupport/Objc (the FFM ObjC/Metal bridge, loaded whenever aaMethod == METALFX) hits
+    // the same restricted-native-access warning the test task above already opts out of --
+    // runClient never did, so every local dev/test launch printed it. Same flag, same reason.
+    jvmArgs "--enable-native-access=ALL-UNNAMED"
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("fabric.mod.json") { expand "version": project.version }
+}

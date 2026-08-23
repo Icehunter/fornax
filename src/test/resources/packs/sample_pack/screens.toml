@@ -1,0 +1,109 @@
+# Sample-pack settings UI: PBR/SSAO/Reflections groups. Resolution and AA are
+# engine domain -- the AA/upscale method, SSAA factor, and G-buffer debug view all live on Fornax's
+# Sodium-hosted Engine page, never here.
+
+sliders = [
+    "u_SsaoStrength", "u_SsaoRadius", "u_SsaoBias",
+    "u_SsrStrength", "u_SsrMaxDistance", "u_SsrTraceQuality",
+    "u_BumpStrength", "u_AOStrength", "u_EmissiveStrength",
+    
+]
+
+# A pack that has migrated every bespoke page to native YACL leaves [main] holding only the
+# "<profile>" cycler, since YaclPackRows cannot render ProfileCycler in v1. Reproduced here at
+# fixture scale: LIGHTING/REFLECTIONS sit in [yacl].pages below, not [main].elements.
+
+[screens.LIGHTING]
+title = "Lighting"
+elements = ["u_BumpStrength", "u_AOStrength", "u_EmissiveStrength", "SSAO_ENABLED", "u_SsaoStrength", "u_SsaoRadius", "u_SsaoBias"]
+
+[screens.REFLECTIONS]
+title = "Reflections"
+elements = ["SSR_QUALITY", "u_SsrStrength", "u_SsrMaxDistance", "u_SsrTraceQuality"]
+
+# Ultra reproduces today's live-tuned look exactly (Fancy SSR at the default 48 trace steps -- the
+# pack's own declared default, unchanged; TAA itself is an engine-owned AA/upscale method now, not
+# a pack setting). Potato is the cheapest tier: every optional pass off. Medium steps up to Fast
+# (half-res) reflections; High steps up to Fancy (full-res) reflections but pins the runtime trace
+# quality down to 32 steps, giving the ladder a real quality/perf gradient below Ultra's default-48
+# trace: Fast half-res -> Fancy@32 -> Fancy@48.
+#
+# Gate invariant (graph.toml): every SSR trace/blur pass is enabled_if "SSR_QUALITY == x" alone.
+# SSR's reflection source is the engine-guaranteed sceneHistory target, written every frame under
+# every AA/upscale method (including OFF) -- so reflections no longer depend on TAA being on. The
+# old rule ("any profile with TAA off must also set SSR_QUALITY = 0") is retired: TAA is an engine
+# selection this file can't see, let alone gate on.
+[profiles.Potato]
+values = { SSR_QUALITY = 0, SSAO_ENABLED = false }
+
+[profiles.Low]
+values = { SSR_QUALITY = 0, SSAO_ENABLED = true }
+
+[profiles.Medium]
+values = { SSR_QUALITY = 2, SSAO_ENABLED = true }
+
+[profiles.High]
+values = { SSR_QUALITY = 1, SSAO_ENABLED = true, u_SsrTraceQuality = 32.0 }
+
+[profiles.Ultra]
+values = { SSR_QUALITY = 1, SSAO_ENABLED = true }
+
+# A full-size Quality page and its six metas, written against this
+# fixture's own option table (quality_stub.fsh + the pre-existing ssao.fsh/gbuffer_resolve.fsh/
+# ssr_trace.fsh declarations) -- proves PackTomlLoader.loadScreens, MetaValidator.validate and
+# PackDiscovery.loadFrom all accept a real, full-size metas+yacl+quality-page pack, not just the
+# smaller synthetic snippets ScreensMetaLoaderTest/MetaValidatorTest already unit-test in isolation.
+[screens.quality]
+title = "Quality"
+elements = [
+    "<meta:WATER_REFLECTIONS>",
+    "<meta:SURFACE_REFLECTIONS>",
+    "<meta:AMBIENT_SHADING>",
+]
+
+[yacl]
+pages = ["quality", "LIGHTING", "REFLECTIONS"]
+
+[metas.WATER_REFLECTIONS]
+label = "Water Reflections"
+description = "Reflections on water, glass, ice and other smooth non-metal surfaces. Highlights adds a cheap sun and moon glint with no ray tracing; Traced ray-marches real reflections at a lighter step budget; High traces at full resolution with the full step count."
+values = ["Off", "Highlights", "Traced", "High"]
+[metas.WATER_REFLECTIONS.assign.Off]
+SSR_WATER_MODE = 0
+[metas.WATER_REFLECTIONS.assign.Highlights]
+SSR_WATER_MODE = 1
+[metas.WATER_REFLECTIONS.assign.Traced]
+SSR_WATER_MODE = 2
+SSR_QUALITY = 2
+u_SsrTraceQuality = 48.0
+[metas.WATER_REFLECTIONS.assign.High]
+SSR_WATER_MODE = 3
+SSR_QUALITY = 1
+u_SsrTraceQuality = 48.0
+
+[metas.SURFACE_REFLECTIONS]
+label = "Surface Reflections"
+description = "Reflections on metal and other solid shiny blocks. Highlights adds a sun and moon glint with no ray tracing; Full ray-marches real screen-space reflections at whatever trace budget Water Reflections sets."
+values = ["Off", "Highlights", "Full"]
+[metas.SURFACE_REFLECTIONS.assign.Off]
+SSR_SURFACE_MODE = 0
+[metas.SURFACE_REFLECTIONS.assign.Highlights]
+SSR_SURFACE_MODE = 1
+[metas.SURFACE_REFLECTIONS.assign.Full]
+SSR_SURFACE_MODE = 2
+
+[metas.AMBIENT_SHADING]
+label = "Ambient Shading"
+description = "Soft contact shadowing in corners and creases (ambient occlusion). Higher tiers take more samples per pixel for smoother, less noisy shading at more GPU cost."
+values = ["Off", "Fast", "Balanced", "Very Rich"]
+[metas.AMBIENT_SHADING.assign.Off]
+SSAO_ENABLED = false
+[metas.AMBIENT_SHADING.assign.Fast]
+SSAO_ENABLED = true
+SSAO_TAPS = 4
+[metas.AMBIENT_SHADING.assign.Balanced]
+SSAO_ENABLED = true
+SSAO_TAPS = 8
+[metas.AMBIENT_SHADING.assign."Very Rich"]
+SSAO_ENABLED = true
+SSAO_TAPS = 16

@@ -1,0 +1,249 @@
+#version 450
+
+// Engine-owned voxel brick-grid debug raymarch.
+//
+// Standard Amanatides-Woo 3D DDA grid traversal ("A Fast Voxel Traversal Algorithm for Ray Tracing",
+// Amanatides & Woo, 1987) -- generic, textbook ray-marching technique, not derived from any specific
+// reference shaderpack. Each invocation shoots one camera ray per output pixel, steps voxel-by-voxel
+// through the toroidal brick window, and stops at the first ray-occluding voxel.
+//
+// Task 12 proved ONLY the grid's SHAPE (occupancy + DDA) and shaded every hit flat gray by entered
+// face. Task 13 (this file) reads the real harvested palette: on a hit it emits the block's REAL
+// per-face color, and for PARTIAL-shape voxels (slabs, stairs, fences, torches, ...) it runs a real
+// ray-AABB slab test against the cell's stored sub-boxes, so a ray genuinely passes THROUGH the empty
+// half of a slab / the gaps of a fence / the space around a torch instead of stopping at the whole
+// cell. Cross-billboard (plant/torch quad) and alpha-porous (leaves) handling are deliberately still
+// out of scope here -- see the task-13 report.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// One bit per voxel, 4096 bits (512 bytes) per toroidal slot, laid out exactly as BrickGridUpload
+// writes it: bit index within a slot == voxelIndex == (y<<8)|(z<<4)|x (verified against
+// SectionHarvester's own voxel loop ordering and BrickGridUpload.uploadSlot's bit packing).
+layout(set = 0, binding = 0, std430) readonly buffer Occupancy { uint occupancy[]; };
+// One RGBA8 pixel per output texel (little-endian: byte0=R,1=G,2=B,3=A), row-major, row 0 == top.
+layout(set = 0, binding = 1, std430) writeonly buffer OutputPixels { uint pixels[]; };
+// One palette-index BYTE per voxel (4096 bytes/slot), packed 4-per-uint little-endian, laid out
+// exactly as BrickGridUpload.uploadSlot writes it (byteIndex == slot*4096 + voxelIndex).
+layout(set = 0, binding = 2, std430) readonly buffer Payload { uint payload[]; };
+// Fixed-stride palette table, PALETTE_ENTRY_WORDS uints per entry, MAX_PALETTE_ENTRIES entries per
+// slot -- byte-for-byte the layout BrickGridUpload documents (see its PALETTE_ENTRY_WORDS comment):
+//   word 0      : boxCount (0 => FULL/solid; 1..8 => PARTIAL, box-test required)
+//   words 1..6  : per-face color 0xAARRGGBB, indexed by Direction.get3DDataValue() (0..5)
+//   words 7..14 : up to 8 packed boxes, 5 bits per coordinate (see unpackBox)
+//   word 15     : emission -- bits 0-7 intensity, bits 8-31 authored 0x00RRGGBB cast-light color (0
+//                 = none authored) -- unused by this debug shader
+layout(set = 0, binding = 3, std430) readonly buffer Palette { uint palette[]; };
+
+const int PALETTE_ENTRY_WORDS = 16; // MUST match BrickGridUpload.PALETTE_ENTRY_WORDS (word 15 =
+                                    // emission -- unused by this debug shader, but the stride is
+                                    // load-bearing for every entryBase computation below)
+const int PALETTE_ENTRIES_PER_SLOT = 96;                                           // == MAX_PALETTE_ENTRIES (2026-07-20: 256 -> 96, real-world palette-size census)
+const int PALETTE_WORDS_PER_SLOT = PALETTE_ENTRY_WORDS * PALETTE_ENTRIES_PER_SLOT; // 1536
+
+// std140/std430-unambiguous: padding every member to a 16-byte-aligned vec4/ivec4 sidesteps the
+// project's "scalar-after-vec3 lands at the next 16-byte boundary" law entirely -- there is no bare
+// scalar following a vec3 here, so no packing ambiguity between glslang and the Java-side write.
+layout(push_constant) uniform PushConstants {
+    mat4 invViewProj;   // offset  0, size 64 -- inverse(projection * cameraRelativeModelView)
+    vec4 cameraPos;     // offset 64, size 16 -- world camera position (xyz; w unused)
+    ivec4 params;       // offset 80, size 16 -- x=windowDiameter, y=outputWidth, z=outputHeight, w=maxSteps
+    ivec4 windowCenter; // offset 96, size 16 -- x/y/z = window center SECTION coords (w unused)
+} pc;
+
+uint packRGBA(vec3 c) {
+    uvec3 q = uvec3(clamp(c, 0.0, 1.0) * 255.0 + 0.5);
+    return (255u << 24) | (q.b << 16) | (q.g << 8) | q.r;
+}
+
+// floorMod: matches VoxelWindow.slotFor's Math.floorMod exactly. GLSL's built-in `%` is
+// truncated (can be negative) for negative operands, so it is NOT used for the toroidal wrap.
+int floorMod(int a, int m) {
+    return ((a % m) + m) % m;
+}
+
+// The palette-index byte for a voxel, read out of the 4-bytes-per-uint payload buffer.
+uint paletteIndexOf(int slot, int voxelIndex) {
+    int byteIndex = slot * 4096 + voxelIndex;
+    uint word = payload[byteIndex >> 2];
+    return (word >> uint((byteIndex & 3) * 8)) & 0xFFu;
+}
+
+vec3 unpackColor(uint c) {
+    return vec3(float((c >> 16) & 0xFFu), float((c >> 8) & 0xFFu), float(c & 0xFFu)) / 255.0;
+}
+
+// Unpacks a 5-bit-per-coordinate box word into cell-local 0..16 (1/16-block) min/max.
+void unpackBox(uint w, out vec3 boxMin, out vec3 boxMax) {
+    boxMin = vec3(float(w & 0x1Fu), float((w >> 5) & 0x1Fu), float((w >> 10) & 0x1Fu));
+    boxMax = vec3(float((w >> 15) & 0x1Fu), float((w >> 20) & 0x1Fu), float((w >> 25) & 0x1Fu));
+}
+
+// Face index in Direction.get3DDataValue() order (DOWN0 UP1 NORTH2 SOUTH3 WEST4 EAST5), given the
+// entry axis (0=X,1=Y,2=Z) and the ray-direction sign: a ray moving +axis enters through the cell's
+// NEGATIVE face on that axis (and vice-versa).
+int faceIndexFor(int axis, ivec3 s) {
+    if (axis == 0) return s.x > 0 ? 4 : 5; // WEST(-x) : EAST(+x)
+    if (axis == 1) return s.y > 0 ? 0 : 1; // DOWN(-y) : UP(+y)
+    return s.z > 0 ? 2 : 3;                // NORTH(-z) : SOUTH(+z)
+}
+
+// A mild directional relief multiplier so real color keeps its 3D shape readability (tops brightest,
+// bottoms darkest, sides mid) -- the classic voxel cue, applied lightly so the real hue still reads.
+float relief(int face) {
+    if (face == 1) return 1.00; // UP
+    if (face == 0) return 0.62; // DOWN
+    return 0.82;                // sides (N/S/E/W)
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    int W = pc.params.y;
+    int H = pc.params.z;
+    if (pixel.x >= W || pixel.y >= H) {
+        return;
+    }
+
+    int diameter = pc.params.x;
+    int maxSteps = pc.params.w;
+    int radius = (diameter - 1) >> 1; // window half-extent in sections; camera sits at windowCenter
+
+    // Screen pixel -> clip space, IDENTICAL to the pack's own gbuffer_resolve.fsh reconstruction so
+    // the orientation matches the real frame: a texel's screenquad texCoord is (pixel+0.5)/size, and
+    // NDC.xy = texCoord*2-1 (no y-flip -- resolve does none, and it renders right-side-up). Blaze3D's
+    // Vulkan/GL backends use [0,1] NDC-z with REVERSED-Z depth: near plane is z=1, far plane z=0. Two
+    // distinct clip-z values on the same pixel are collinear in world space, so near->far gives the
+    // outward ray direction; rayDir is invariant to any translation baked into the view matrix (a
+    // translation shifts near and far equally), so only rayOrigin needs to be the true world camera.
+    vec2 texCoord = (vec2(pixel) + 0.5) / vec2(W, H);
+    vec2 ndc = texCoord * 2.0 - 1.0;
+    vec4 nearP = pc.invViewProj * vec4(ndc, 1.0, 1.0); // reversed-Z near plane
+    vec4 farP = pc.invViewProj * vec4(ndc, 0.0, 1.0);  // reversed-Z far plane
+    vec3 nearW = nearP.xyz / nearP.w;
+    vec3 farW = farP.xyz / farP.w;
+    vec3 rayDir = normalize(farW - nearW);
+    vec3 rayOrigin = pc.cameraPos.xyz;
+
+    // Sky background gradient (miss color) -- a plain vertical blend so the horizon reads as sky, not
+    // as a rendering failure. Any recognizable non-gray tone here confirms "ray missed" vs "no output".
+    float skyT = clamp(rayDir.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 sky = mix(vec3(0.66, 0.74, 0.86), vec3(0.35, 0.52, 0.85), skyT);
+    uint outColor = packRGBA(sky);
+
+    ivec3 voxel = ivec3(floor(rayOrigin));
+    ivec3 stepDir = ivec3(sign(rayDir));
+    vec3 invDir = 1.0 / rayDir; // may be +/-inf on a zero axis; the slab test below tolerates it
+    vec3 tDelta = abs(invDir);
+    // Parametric distance to the first voxel boundary crossed on each axis.
+    vec3 nextBoundary = vec3(voxel) + vec3(max(stepDir, ivec3(0)));
+    vec3 tMax = (nextBoundary - rayOrigin) * invDir;
+    // An axis with zero direction never crosses a boundary -- keep it out of the min() forever.
+    if (stepDir.x == 0) { tMax.x = 1e30; }
+    if (stepDir.y == 0) { tMax.y = 1e30; }
+    if (stepDir.z == 0) { tMax.z = 1e30; }
+
+    int hitAxis = -1;      // 0=X,1=Y,2=Z; -1 == camera started inside this cell (no face crossed yet)
+    bool hit = false;
+    int hitEntryBase = -1; // palette word offset of the hit voxel's entry
+    int hitFace = -1;      // Direction.get3DDataValue() face the ray entered through
+    for (int i = 0; i < maxSteps; i++) {
+        int sx = voxel.x >> 4, sy = voxel.y >> 4, sz = voxel.z >> 4;
+        // Stop once the ray leaves the streamed window: slots outside it hold stale toroidal data
+        // (a different, no-longer-in-window section) that would otherwise raymarch as ghost geometry
+        // beyond the render distance. The camera is always at windowCenter, so a ray that exits never
+        // re-enters -- a clean break to sky.
+        if (abs(sx - pc.windowCenter.x) > radius
+                || abs(sy - pc.windowCenter.y) > radius
+                || abs(sz - pc.windowCenter.z) > radius) {
+            break;
+        }
+        int wx = floorMod(sx, diameter);
+        int wy = floorMod(sy, diameter);
+        int wz = floorMod(sz, diameter);
+        int slot = (wy * diameter + wz) * diameter + wx;
+
+        int lx = voxel.x & 15, ly = voxel.y & 15, lz = voxel.z & 15;
+        int voxelIndex = (ly << 8) | (lz << 4) | lx;
+        int bit = slot * 4096 + voxelIndex;
+        uint word = occupancy[bit >> 5];
+        if (((word >> uint(bit & 31)) & 1u) != 0u) {
+            int pIndex = int(paletteIndexOf(slot, voxelIndex));
+            int entryBase = slot * PALETTE_WORDS_PER_SLOT + pIndex * PALETTE_ENTRY_WORDS;
+            uint boxCount = palette[entryBase];
+            if (boxCount == 0u) {
+                // FULL cube: the whole cell occludes, exactly like Task 12. The face is whichever
+                // boundary the DDA just crossed to enter this cell.
+                hit = true;
+                hitEntryBase = entryBase;
+                hitFace = (hitAxis >= 0) ? faceIndexFor(hitAxis, stepDir) : -1;
+                break;
+            }
+            // PARTIAL shape: a real ray-AABB slab test against each stored sub-box. The ray only
+            // truly hits if it actually enters one of the boxes; otherwise it passes THROUGH this
+            // cell (a torch's usual miss, a slab's empty upper half) and the DDA keeps stepping.
+            vec3 cellOrigin = vec3(voxel);
+            float bestT = 1e30;
+            int bestAxis = -1;
+            for (int b = 0; b < int(boxCount); b++) {
+                vec3 bMin16, bMax16;
+                unpackBox(palette[entryBase + 7 + b], bMin16, bMax16);
+                vec3 bMin = cellOrigin + bMin16 * (1.0 / 16.0);
+                vec3 bMax = cellOrigin + bMax16 * (1.0 / 16.0);
+                vec3 t0 = (bMin - rayOrigin) * invDir;
+                vec3 t1 = (bMax - rayOrigin) * invDir;
+                vec3 tsmall = min(t0, t1);
+                vec3 tbig = max(t0, t1);
+                float tNear = max(max(tsmall.x, tsmall.y), tsmall.z);
+                float tFar = min(min(tbig.x, tbig.y), tbig.z);
+                if (tFar >= max(tNear, 0.0) && tNear < bestT) {
+                    bestT = tNear;
+                    // Entry axis = whichever slab's near-t is the tightest (the last plane crossed
+                    // going in). Sub-boxes lie within the cell, so tNear is already ordered along the
+                    // ray -- the nearest box wins.
+                    bestAxis = (tsmall.x >= tsmall.y && tsmall.x >= tsmall.z)
+                            ? 0 : (tsmall.y >= tsmall.z ? 1 : 2);
+                }
+            }
+            if (bestAxis >= 0) {
+                hit = true;
+                hitEntryBase = entryBase;
+                hitFace = faceIndexFor(bestAxis, stepDir);
+                break;
+            }
+            // No box hit -- fall through to the DDA step and continue through this cell.
+        }
+
+        // Advance to the next voxel along whichever axis has the nearest boundary.
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            voxel.x += stepDir.x;
+            tMax.x += tDelta.x;
+            hitAxis = 0;
+        } else if (tMax.y < tMax.z) {
+            voxel.y += stepDir.y;
+            tMax.y += tDelta.y;
+            hitAxis = 1;
+        } else {
+            voxel.z += stepDir.z;
+            tMax.z += tDelta.z;
+            hitAxis = 2;
+        }
+    }
+
+    if (hit) {
+        // Real per-face color out of the palette. The entered face's color is the natural pick; if it
+        // was never resolved (0 == a buried/degenerate face), fall back to the entry's first resolved
+        // face so the block still shows its real hue, and only then to a neutral gray as a last resort.
+        uint packed = (hitFace >= 0) ? palette[hitEntryBase + 1 + hitFace] : 0u;
+        if (packed == 0u) {
+            for (int f = 0; f < 6; f++) {
+                uint c = palette[hitEntryBase + 1 + f];
+                if (c != 0u) { packed = c; break; }
+            }
+        }
+        vec3 col = (packed != 0u) ? unpackColor(packed) : vec3(0.72);
+        col *= (hitFace >= 0) ? relief(hitFace) : 0.90;
+        outColor = packRGBA(col);
+    }
+
+    pixels[pixel.y * W + pixel.x] = outColor;
+}

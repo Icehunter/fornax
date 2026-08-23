@@ -1,0 +1,56 @@
+# Build and test on every push and pull request.
+#
+# This is the net under the release workflow: if this is red, a tag will not produce a jar worth
+# shipping. It runs the suite TWICE, because Gradle replays stale up-to-date results and a single
+# green run is not evidence -- the same reason .claude/rules/testing.md gives for running it twice
+# by hand.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:        # so it can be run by hand from the Actions tab
+
+# A newer push to the same branch cancels the older run rather than queueing behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Java 25: build.gradle sets source and target compatibility to 25, so an older JDK cannot
+      # compile this and a newer one is fine.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build and test
+        run: ./gradlew clean build --no-daemon
+
+      - name: Test again
+        run: ./gradlew clean test --no-daemon
+
+      # Kept whether or not the run passed: a failure is exactly when the reports are wanted.
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: build/reports/tests/
+          retention-days: 14
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: fornax-jar
+          path: build/libs/*.jar
+          retention-days: 14

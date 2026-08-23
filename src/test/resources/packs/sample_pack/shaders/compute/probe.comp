@@ -1,0 +1,6 @@
+#version 450
+// Task 8 fixture stub: no real compute logic exists for this milestone (no storage-target binding
+// is wired yet -- see ComputePassRunner's class Javadoc), this just needs to exist as a valid,
+// resolvable compute shader for the "compute_probe" pass in graph.toml.
+layout(local_size_x = 1) in;
+void main() {}

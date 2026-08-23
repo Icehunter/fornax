@@ -1,0 +1,10 @@
+[targets.gAlbedo]
+format = "rgba8"
+scale = 1.0
+
+[[pass]]
+name = "terrain"
+type = "geometry"
+slot = "terrain"
+program = "shaders/terrain"
+outputs = ["gAlbedo", "ghost"]

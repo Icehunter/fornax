@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "fornax",
+  "version": "${version}",
+  "name": "Fornax",
+  "description": "Vulkan shaderpack loader and rendering engine. Loads Vulkan-native shader packs with deferred rendering, LabPBR materials, SSAO, TAA, SSR and supersampling.",
+  "authors": ["Icehunter"],
+  "license": "MIT",
+  "icon": "assets/fornax/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.icehunter.fornax.FornaxMod"],
+    "sodium:config_api_user": ["dev.icehunter.fornax.compat.SodiumConfigEntry"]
+  },
+  "mixins": ["fornax.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.19.2",
+    "minecraft": "26.2",
+    "sodium": ">=0.9.1 <0.9.3",
+    "yet_another_config_lib_v3": ">=3.9"
+  }
+}

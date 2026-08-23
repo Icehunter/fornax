@@ -1,0 +1,6 @@
+[pack]
+name = "Fornax Example"
+version = "0.1.0"
+authors = ["Icehunter"]
+license = "MIT"
+format = 1

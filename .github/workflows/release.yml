@@ -1,0 +1,85 @@
+# Cut a release when a version tag is pushed.
+#
+# Nothing here decides what the version is. gradle.properties' `mod_version` is the only place it
+# lives, and this workflow REFUSES a tag that disagrees with it -- so `v0.1.2` on a tree that still
+# says 0.1.1 fails loudly instead of publishing a jar whose name contradicts its tag.
+#
+# Modrinth upload is deliberately NOT automated yet. The first release has to be made by hand
+# anyway: creating the project, writing the description, setting the icon, and ticking the
+# AI-content disclosure are all one-time steps no workflow should guess at. Once the project exists
+# and its settings are right, the upload step can be added here.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:        # a dry run, without tagging
+
+permissions:
+  contents: write           # needed to create the GitHub release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The guard. A tag that does not match the tree is a mistake worth stopping for, and it is
+      # cheaper to catch here than to unpublish a wrong version later.
+      - name: Check the tag matches gradle.properties
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          MOD_VERSION="$(grep -E '^mod_version=' gradle.properties | cut -d= -f2 | tr -d ' \r')"
+          echo "tag:             $TAG_VERSION"
+          echo "gradle.properties: $MOD_VERSION"
+          if [ "$TAG_VERSION" != "$MOD_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match mod_version=$MOD_VERSION."
+            echo "::error::Bump mod_version in gradle.properties, commit, then retag."
+            exit 1
+          fi
+
+      - name: Build and test
+        run: ./gradlew clean build --no-daemon
+
+      - name: Test again
+        run: ./gradlew clean test --no-daemon
+
+      # The jar carries the Minecraft version in its name, so the exact filename is read back rather
+      # than reconstructed. Sources and dev jars are excluded: only the mod itself is published.
+      - name: Find the jar
+        id: jar
+        run: |
+          JAR="$(ls build/libs/*.jar | grep -v -- '-sources' | grep -v -- '-dev' | head -1)"
+          [ -n "$JAR" ] || { echo "::error::No jar produced."; exit 1; }
+          echo "path=$JAR" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$JAR")" >> "$GITHUB_OUTPUT"
+          echo "Publishing $JAR"
+
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.jar.outputs.path }}
+          generate_release_notes: false
+          draft: true          # opens as a draft so the notes can be written before anyone sees it
+          body: |
+            Requires Minecraft 26.2, Fabric Loader 0.19.2 or newer, Sodium 0.9.1 or 0.9.2, and Java 25.
+
+            Fornax bundles no shaderpack. Shaders start off with none selected, so installing it
+            changes nothing until a pack is added and chosen. See `docs/PACK-FORMAT.md` for how to
+            write one.
+
+      - name: Upload the jar as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.jar.outputs.name }}
+          path: ${{ steps.jar.outputs.path }}
