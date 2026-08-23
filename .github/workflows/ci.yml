@@ -33,11 +33,17 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Build and test
-        run: ./gradlew clean build --no-daemon
+      # Tests first, twice, THEN the jar. `clean` on the second run is what makes it a real second
+      # run rather than a replay of cached results -- and it also wipes build/, so a jar built before
+      # it would be deleted. Build last and the artifact survives.
+      - name: Test
+        run: ./gradlew clean test --no-daemon
 
       - name: Test again
         run: ./gradlew clean test --no-daemon
+
+      - name: Build the jar
+        run: ./gradlew build -x test --no-daemon
 
       # Kept whether or not the run passed: a failure is exactly when the reports are wanted.
       - name: Upload test reports
