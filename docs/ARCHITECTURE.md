@@ -1814,3 +1814,10 @@ else entirely.
   device (`vkGetPhysicalDeviceMemoryProperties`), accurate on every platform this engine targets,
   bypassing Blaze3D's lack of a VRAM query entirely. Both still return `OptionalLong`; an empty
   result means unknown, never zero VRAM.
+- **A once-per-session lazy GPU resource must assign every field together, only after every
+  creation step succeeds.** `NoiseTexture.ensureCreated()` assigned `texture` before creating
+  `view`; a transient `createTextureView` failure left `texture` non-null while `view` stayed
+  null, so the method's own `if (texture != null) return;` guard skipped every later retry and
+  `getView()` silently returned `null` for the rest of the process. Fixed by holding the new
+  handles in locals and assigning both fields only after the last creation step succeeds,
+  freeing whatever partially succeeded on the way out.

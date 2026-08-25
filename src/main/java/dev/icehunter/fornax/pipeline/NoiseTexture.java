@@ -242,8 +242,18 @@ public final class NoiseTexture {
             CommandEncoder encoder = device.createCommandEncoder();
             encoder.writeToTexture(newTexture, image);
 
+            GpuTextureView newView;
+            try {
+                newView = device.createTextureView(newTexture);
+            } catch (RuntimeException e) {
+                // texture/view must assign together or not at all: a throw here left texture
+                // already non-null while view stayed null, so the guard above never retried and
+                // getView() silently returned null for the rest of the process.
+                newTexture.close();
+                throw e;
+            }
             texture = newTexture;
-            view = device.createTextureView(newTexture);
+            view = newView;
         }
     }
 }
