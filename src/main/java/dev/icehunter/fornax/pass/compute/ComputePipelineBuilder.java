@@ -66,10 +66,9 @@ public final class ComputePipelineBuilder {
                                                                     List<Integer> descriptorTypes,
                                                                     int pushConstantBytes) {
         // Handles hoisted out of the try so the catch can free whatever was created before the
-        // failure -- the same shape ParticlePipelineBuilder.build uses, and for the same reason:
-        // GraphRunner.ensureRunnersBuilt retries a failed compute-pass build every frame, so a
-        // mid-build throw that leaked (say) a shader module and a descriptor set layout would leak
-        // them again 60 times a second for as long as the pack stays broken, rather than once.
+        // failure, the same shape ParticlePipelineBuilder.build uses: GraphRunner.ensureRunnersBuilt
+        // retries a failed compute-pass build every frame, so a mid-build throw that leaked a handle
+        // would leak it again every retry for as long as the pack stays broken.
         long shaderModule = VK13.VK_NULL_HANDLE;
         long descriptorSetLayout = VK13.VK_NULL_HANDLE;
         long pipelineLayout = VK13.VK_NULL_HANDLE;

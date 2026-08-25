@@ -99,13 +99,20 @@ public final class PackSwitch {
         FornaxSettings settings = FornaxConfig.get();
         CompletableFuture<Void> sourcesVisible = CompletableFuture.completedFuture(null);
 
+        // The old pack's filesystem is only closed once the switch is known to proceed, never up
+        // front. Closing it unconditionally left GraphRunner.currentPack() pointing at a model backed
+        // by an already-closed zip FileSystem on the picked-pack-not-found path below (nothing else in
+        // that path touches GraphRunner, so the old pack is still meant to be active), throwing
+        // ClosedFileSystemException the next time anything re-read from it.
         PackModel oldModel = GraphRunner.currentPack();
         if (oldModel != null) {
             PackValuesFile.save(PackSettingsSupport.valuesPath(oldModel), PackSettingsSupport.mergedValues(oldModel));
-            closeIfCustomFileSystem(oldModel.root());
         }
 
         if (targetPackName.isEmpty()) {
+            if (oldModel != null) {
+                closeIfCustomFileSystem(oldModel.root());
+            }
             sourcesVisible = GraphRunner.unload();
             settings.activePack = "";
         } else {
@@ -119,6 +126,9 @@ public final class PackSwitch {
             }
             if (picked == null) {
                 settings.activePack = previousPackName;
+                FornaxMod.LOGGER.warn("[Fornax] Pack '{}' no longer discovers under shaderpacks/;"
+                        + " keeping '{}' active", targetPackName, previousPackName);
+                FornaxConfig.save();
                 return false;
             }
             try {
@@ -129,11 +139,33 @@ public final class PackSwitch {
                         PackSettingsSupport.compileIntMap(model, values),
                         PackSettingsSupport.runtimeFloatMap(model, values));
                 settings.activePack = picked.name();
+                if (oldModel != null) {
+                    closeIfCustomFileSystem(oldModel.root());
+                }
             } catch (FornaxPackError e) {
+                // GraphRunner.rebuild mutates its statics before its final resolve step, so a failure
+                // partway through can leave currentPack/registry/compileValues pointing at the broken
+                // new pack. unload() rolls GraphRunner back to inactive, matching PackReload.reload()'s
+                // identical catch; shadersEnabled is forced off below too, so closing the old pack's
+                // filesystem here is safe.
+                //
+                // The renderer reload must chain on unload()'s own future, never fire directly (RENDER-
+                // STATE LATCH LAW, this class's own doc): calling it directly resynced terrain pipelines
+                // against vanilla-override state that hadn't finished clearing, producing stale/ghosted
+                // geometry (live-caught testing this fix).
+                CompletableFuture<Void> unloaded = GraphRunner.unload();
+                if (oldModel != null) {
+                    closeIfCustomFileSystem(oldModel.root());
+                }
                 settings.activePack = previousPackName;
                 settings.shadersEnabled = false;
                 FornaxConfig.save();
-                RendererReload.request();
+                unloaded.thenRunAsync(RendererReload::request, Minecraft.getInstance())
+                        .exceptionally(t -> {
+                            FornaxMod.LOGGER.error("[Fornax] Resource reload failed after a pack"
+                                    + " error fallback; renderer reload skipped", t);
+                            return null;
+                        });
                 closeQuietly(picked);
                 Minecraft.getInstance().gui.setScreen(new AlertScreen(
                         () -> Minecraft.getInstance().gui.setScreen(alertParent),

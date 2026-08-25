@@ -1760,6 +1760,12 @@ else entirely.
   save callback runs, so it takes effect immediately regardless of what `route()` reports. Missed
   there, `SAVE_ONLY` never fires and the change reverts on the next config load with no error.
   Found via `sunPathRotation`.
+- **`GraphRunner.rebuild` mutates its statics before its final resolve step, so a catch around it
+  must call `GraphRunner.unload()` on failure, not just revert config.** A rebuild that throws
+  partway through can leave `currentPack`/`registry`/`compileValues` pointing at the half-built
+  broken pack even though the caller reverted `activePack` back to the old name; `unload()` rolls
+  GraphRunner back to the same inactive state a missing pack leaves behind. `PackReload.reload`'s
+  catch does this; `PackSwitch.apply`'s didn't.
 - **Some Vulkan backends do not zero-fill new VRAM.** A freshly allocated texture can contain
   arbitrary previously-resident memory rather than zeros; every engine-managed target is cleared
   explicitly at allocation rather than relying on any backend's allocator behaviour.

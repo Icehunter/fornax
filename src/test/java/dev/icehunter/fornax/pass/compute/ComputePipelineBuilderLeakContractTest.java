@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
  * needed to exercise a mid-sequence failure directly (the same constraint that makes
  * {@code BuiltinResolutionContractTest} a source-level test), so this pins the exception-safety
  * shape instead: handles hoisted above the {@code try}, and a {@code catch (RuntimeException)}
- * that frees whatever was already created before rethrowing -- the same shape
+ * that frees whatever was already created before rethrowing, the same shape
  * {@code ParticlePipelineBuilder.build} uses.
  */
 class ComputePipelineBuilderLeakContractTest {
