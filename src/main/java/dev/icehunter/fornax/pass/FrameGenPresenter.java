@@ -432,6 +432,19 @@ public final class FrameGenPresenter {
         stagingPrepared = false;
     }
 
+    /**
+     * Releases every frame-generation resource across all three owning classes; safe to call
+     * anytime. The one shared implementation both {@code FornaxSettingsScreen}'s
+     * {@code FRAMEGEN_DEACTIVATE} action and {@code GraphRunner.closeCurrent()} call, since frame
+     * generation presents every frame regardless of pack state and must deactivate on pack teardown
+     * too (live-caught: crashed MoltenVK when it didn't).
+     */
+    public static void deactivateAll() {
+        FrameGenPass.deactivate();
+        UiLayerCapture.deactivate();
+        deactivate();
+    }
+
     private static boolean isVsyncFifo(GpuSurface.PresentMode mode) {
         return mode == GpuSurface.PresentMode.FIFO || mode == GpuSurface.PresentMode.FIFO_RELAXED;
     }

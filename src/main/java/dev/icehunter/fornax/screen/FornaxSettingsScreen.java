@@ -287,13 +287,12 @@ public final class FornaxSettingsScreen {
                 .build();
     }
 
-    /** Releases every frame-generation resource; safe to call anytime, mirrors each pass's own doc.
-     * Called ONLY from {@link #applyRoutedChanges}, on {@code SettingsApplyRouter.Action
-     * #FRAMEGEN_DEACTIVATE} -- never from a YACL option listener, see that action's javadoc. */
+    /** Called ONLY from {@link #applyRoutedChanges}, on {@code SettingsApplyRouter.Action
+     * #FRAMEGEN_DEACTIVATE}, never from a YACL option listener, see that action's javadoc.
+     * {@code GraphRunner.closeCurrent()} calls the same shared {@code FrameGenPresenter.deactivateAll()}
+     * on pack teardown. */
     private static void deactivateFrameGeneration() {
-        dev.icehunter.fornax.metalfx.FrameGenPass.deactivate();
-        dev.icehunter.fornax.pass.UiLayerCapture.deactivate();
-        dev.icehunter.fornax.pass.FrameGenPresenter.deactivate();
+        dev.icehunter.fornax.pass.FrameGenPresenter.deactivateAll();
     }
 
     private static Option<SsaaPreset> buildSsaaPresetOption() {

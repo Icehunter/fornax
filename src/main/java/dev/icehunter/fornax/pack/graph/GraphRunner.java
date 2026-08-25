@@ -33,6 +33,7 @@ import dev.icehunter.fornax.pack.material.MaterialResolution;
 import dev.icehunter.fornax.pack.material.MaterialSnippets;
 import dev.icehunter.fornax.pack.option.OptionType;
 import dev.icehunter.fornax.pack.option.PackOption;
+import dev.icehunter.fornax.pass.FrameGenPresenter;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
@@ -2455,6 +2456,11 @@ public final class GraphRunner {
         // (opaqueDepth, WaterSurfaceManager, mipchain/compute runners, the registry itself) funnels
         // through. Rare-path cost only (pack rebuild/unload, or a pack switch); never per-frame.
         VulkanComputeBackend.waitForGpuIdleBeforeDestroy();
+
+        // Frame generation presents every frame regardless of pack state, so it must deactivate on
+        // every pack teardown too, not just on its own settings toggle. Without this, it can submit
+        // against the GPU state this method is about to free (live-caught: crashed MoltenVK).
+        FrameGenPresenter.deactivateAll();
 
         // Engine-owned depth copy (see OpaqueDepth's own doc): freed here, on every pack teardown --
         // "None" unload, a pack switch, or a rebuild() mid-session -- so its GPU texture/view never
