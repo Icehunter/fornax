@@ -9,11 +9,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BlockAtlasPageBudgetTest {
     @Test
-    void bytesPerPageAccountsForAlbedoPlusTwoDownsampledSidecarsAndTheMipChain() {
-        // 4096x4096 albedo: 16,777,216 texels * 4 bytes = 67,108,864 bytes. Each sidecar is
-        // divisor^2 = 16x smaller in texel count, so two sidecars add 1/8 of the albedo's texels.
-        // The whole sum is then scaled by the 4/3 mip-chain factor.
-        long expected = Math.round((16_777_216L + 2 * (16_777_216L / 16)) * 4.0 * (4.0 / 3.0));
+    void bytesPerPageAccountsForAlbedoPlusTwoFullResolutionSidecarsAndTheMipChain() {
+        // 4096x4096 albedo: 16,777,216 texels. Neither atlas builder downsamples an overflow page's
+        // normal/material sidecars, so all three atlases cost the same texel count; the sum is then
+        // scaled by the 4/3 mip-chain factor.
+        long expected = Math.round(3 * 16_777_216L * 4.0 * (4.0 / 3.0));
 
         assertEquals(expected, BlockAtlasPageBudget.bytesPerPage(4096, 4096));
     }

@@ -1801,3 +1801,16 @@ else entirely.
   present submitted against that torn-down state, crashing MoltenVK with a near-null pointer
   (live-caught). Fixed via the shared `FrameGenPresenter.deactivateAll()`, called from both
   `SettingsApplyRouter`'s `FRAMEGEN_DEACTIVATE` action and `closeCurrent()`.
+- **A VRAM-budget estimate must match what the allocator actually builds, not what it once
+  planned to.** `BlockAtlasPageBudget.bytesPerPage` priced an overflow page's normal/material
+  sidecars at a quarter resolution each, but `NormalMapAtlasReloadListener`/
+  `MaterialMapAtlasReloadListener` allocate every overflow layer at full page resolution; no
+  downsample exists anywhere. The stale discount underestimated real cost by ~2.7x, letting
+  `maxPages` admit far more overflow pages than a machine could actually hold, defeating the
+  refuse-at-load guarantee the budget exists to provide.
+- **`GpuMemoryEstimator.detectedVramBytes()` (OSHI-based) is known to report 0/unavailable on
+  Apple Silicon under MoltenVK.** Prefer `detectedVramBytesFromDevice(GpuDevice)` when a live
+  device is available: it reads real device-local VRAM heaps straight from the Vulkan physical
+  device (`vkGetPhysicalDeviceMemoryProperties`), accurate on every platform this engine targets,
+  bypassing Blaze3D's lack of a VRAM query entirely. Both still return `OptionalLong`; an empty
+  result means unknown, never zero VRAM.

@@ -8,6 +8,7 @@ import dev.icehunter.fornax.atlas.BlockAtlasPagedLayout;
 import dev.icehunter.fornax.atlas.BlockAtlasPagedStitch;
 import dev.icehunter.fornax.atlas.BlockAtlasPaging;
 import dev.icehunter.fornax.atlas.LabPbrSidecarSurvey;
+import dev.icehunter.fornax.util.GpuMemoryEstimator;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.TextureFilteringMethod;
@@ -106,7 +107,7 @@ public class SpriteLoaderPagedStitchMixin {
 
             BlockAtlasPagedStitch.Takeover takeover = BlockAtlasPagedStitch.takeover(
                     this.location, contents, maxTextureSize, loweredMip, anisotropicLevel,
-                    fornax$atlasBudgetBytes(), executor);
+                    fornax$atlasBudgetBytes(device), executor);
 
             BlockAtlasPagedLayout.install(takeover.layout());
             long animatedGhosts = takeover.layout().ghosts().stream()
@@ -123,7 +124,7 @@ public class SpriteLoaderPagedStitchMixin {
             // guess: the page ceiling is fixed, the budget depends on the machine. Falling through
             // gives vanilla's StitcherException, a fast refusal. Building pages that do not fit
             // does not fail at all, it swaps.
-            long budget = fornax$atlasBudgetBytes();
+            long budget = fornax$atlasBudgetBytes(device);
             FornaxMod.LOGGER.warn(
                     "[Fornax] Paged block atlas: pack does not fit ({}). Ceiling is {} overflow"
                             + " page(s); this machine's budget is {} MB for overflow, {} MB per"
@@ -145,33 +146,37 @@ public class SpriteLoaderPagedStitchMixin {
     }
 
     /**
-     * Share of physical memory the overflow pages and the sprite-bounds grid may claim between
-     * them. An eighth gives a 16 GB laptop 2 GB, enough for one page, and a 48 GB machine 6 GB,
-     * enough for three.
-     *
-     * <p>Kept small because plenty sits outside this budget and is roughly as big again: page 0,
-     * the labPBR normal and material atlases (measured at 358 MB and 268 MB on one pack), and
-     * vanilla's own atlases. A pack shipping item textures brought a 16384x8192 shulker-box atlas
-     * with it, which nothing here can see or refuse.
+     * Share of real device-local VRAM the overflow pages and the sprite-bounds grid may claim
+     * between them, when {@link GpuMemoryEstimator#detectedVramBytesFromDevice} can answer. Kept
+     * well under 1 because plenty else sits on the same pool: page 0, the labPBR normal and
+     * material atlases (measured at 358 MB and 268 MB on one pack), vanilla's own atlases, and the
+     * rest of the engine's GPU-resident state.
      */
-    private static final double FORNAX_BUDGET_FRACTION = 1.0 / 8.0;
+    private static final double FORNAX_VRAM_BUDGET_FRACTION = 1.0 / 2.0;
 
     /**
-     * Physical memory times {@link #FORNAX_BUDGET_FRACTION}, or a 2 GB assumption when the JVM will
-     * not say.
-     *
-     * <p>Physical memory, not VRAM, and that is an approximation. Blaze3D exposes no VRAM query, so
-     * there is nothing better to ask. On Apple Silicon the two are the same pool. On a discrete GPU
-     * this overestimates, and a machine with far more system RAM than VRAM can still be handed a
-     * page its card cannot hold. Still better than a fixed constant, which is wrong everywhere
-     * rather than somewhere.
+     * Share of physical memory used only when a real VRAM reading is unavailable (GL backend, or
+     * the Vulkan query itself failed). System RAM is a much looser proxy for VRAM than a real
+     * device-local heap reading, so this fallback stays conservative: on Apple Silicon the two
+     * pools are the same, but on a discrete GPU this can overestimate.
      */
-    private static long fornax$atlasBudgetBytes() {
+    private static final double FORNAX_RAM_FALLBACK_FRACTION = 1.0 / 8.0;
+
+    /**
+     * The real device-local VRAM reading times {@link #FORNAX_VRAM_BUDGET_FRACTION} when available;
+     * otherwise physical memory times {@link #FORNAX_RAM_FALLBACK_FRACTION}, or a 2 GB assumption
+     * when neither can be read.
+     */
+    private static long fornax$atlasBudgetBytes(GpuDevice device) {
+        java.util.OptionalLong vram = GpuMemoryEstimator.detectedVramBytesFromDevice(device);
+        if (vram.isPresent()) {
+            return (long) (vram.getAsLong() * FORNAX_VRAM_BUDGET_FRACTION);
+        }
         try {
             java.lang.management.OperatingSystemMXBean os =
                     java.lang.management.ManagementFactory.getOperatingSystemMXBean();
             if (os instanceof com.sun.management.OperatingSystemMXBean sun) {
-                return (long) (sun.getTotalMemorySize() * FORNAX_BUDGET_FRACTION);
+                return (long) (sun.getTotalMemorySize() * FORNAX_RAM_FALLBACK_FRACTION);
             }
         } catch (RuntimeException | LinkageError unavailable) {
             // Falls through to the assumption below: a budget that is merely conservative beats a

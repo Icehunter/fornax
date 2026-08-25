@@ -15,25 +15,19 @@ package dev.icehunter.fornax.atlas;
  * <p>Target hardware for the paged atlas spans roughly a 10x VRAM range, from a high-end desktop
  * GPU down to a modest laptop's shared memory; a constant page ceiling either wastes headroom on
  * the former or crashes the latter. {@code maxPages} is instead computed from what a page actually
- * costs resident: its own albedo mip chain, plus a normal and a material sidecar atlas each
- * downsampled by {@link #OVERFLOW_PBR_DIVISOR} in both dimensions -- normals and specular tolerate
- * that where colour does not, and it still leaves substantial detail in each sidecar.
+ * costs resident: its own albedo mip chain, plus a normal and a material sidecar atlas at the SAME
+ * resolution ({@code NormalMapAtlasReloadListener}/{@code MaterialMapAtlasReloadListener} allocate
+ * every overflow layer at page 0's own {@code atlasWidth}x{@code atlasHeight}; neither builder
+ * downsamples an overflow page's sidecars).
  *
  * <p>Public since Phase 2 (package-private through Phase 1): {@code
- * dev.icehunter.fornax.mixin.vanilla.SpriteLoaderPagedStitchMixin} is the first live caller, feeding
- * it a hardcoded VRAM budget in {@code PbrSidecarAtlasScale.MAX_ATLAS_BYTES}'s style -- see that
- * mixin for why (no live VRAM query exists anywhere Blaze3D exposes).
+ * dev.icehunter.fornax.mixin.vanilla.SpriteLoaderPagedStitchMixin} is the first live caller,
+ * feeding it a budget derived from {@link dev.icehunter.fornax.util.GpuMemoryEstimator}'s real
+ * device-local VRAM reading (a system-memory fraction only as a fallback); see that mixin.
  */
 public final class BlockAtlasPageBudget {
     private BlockAtlasPageBudget() {
     }
-
-    /**
-     * Per-dimension downsample factor for an overflow page's normal/material sidecar atlases,
-     * relative to its albedo page. Applies to overflow pages only -- page 0's own sidecar atlases
-     * are sized independently by {@code PbrSidecarAtlasScale}, unaffected by this class.
-     */
-    static final int OVERFLOW_PBR_DIVISOR = 4;
 
     /**
      * A full mip chain's levels below the base sum to 1/3 of the base's own resident cost (matches
@@ -46,16 +40,15 @@ public final class BlockAtlasPageBudget {
 
     /**
      * Resident bytes one page costs across all three atlases it needs: its own albedo mip chain,
-     * plus a normal and a material sidecar chain each at {@code 1/OVERFLOW_PBR_DIVISOR^2} the
-     * albedo's texel count.
+     * plus a normal and a material sidecar chain, each at the SAME resolution as the albedo (see
+     * this class's own doc for why: neither atlas builder downsamples an overflow page's sidecars).
      */
     public static long bytesPerPage(int pageWidth, int pageHeight) {
         if (pageWidth <= 0 || pageHeight <= 0) {
             throw new IllegalArgumentException("page dimensions must be positive");
         }
         long albedoTexels = (long) pageWidth * pageHeight;
-        long sidecarTexels = albedoTexels / ((long) OVERFLOW_PBR_DIVISOR * OVERFLOW_PBR_DIVISOR);
-        long totalTexels = albedoTexels + 2 * sidecarTexels; // + normal + material
+        long totalTexels = 3 * albedoTexels; // albedo + normal + material, all full resolution
         return Math.round(totalTexels * BYTES_PER_TEXEL * MIP_CHAIN_FACTOR);
     }
 
