@@ -107,6 +107,16 @@ class SettingsApplyRouterTest {
     }
 
     @Test
+    void sunPathRotationChangeRoutesSaveOnly() {
+        FornaxSettings before = new FornaxSettings();
+        before.sunPathRotation = -25.0f;
+        FornaxSettings after = new FornaxSettings();
+        after.sunPathRotation = 40.0f;
+
+        assertEquals(Set.of(Action.SAVE_ONLY), SettingsApplyRouter.route(before, after));
+    }
+
+    @Test
     void metalHudEnabledRoutesSaveOnlyAndApply() {
         FornaxSettings before = new FornaxSettings();
         before.metalHud = false;

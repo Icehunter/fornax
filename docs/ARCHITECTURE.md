@@ -1755,6 +1755,14 @@ else entirely.
 - **A mixin absent from the mixin config fails silently.** A mixin class that exists in source
   but isn't listed in the config is never applied, with no error, warning, or log line of any kind
   distinguishing that from an intentional removal.
+- **A YACL-bound `FornaxSettings` field must appear in `SettingsApplyRouter.route`'s diff, or its
+  change is silently lost.** YACL writes a changed option's value straight into the live
+  `FornaxConfig.get()` before the save callback runs, so the setting visibly takes effect
+  immediately regardless of what the router reports. If the router's before/after diff doesn't
+  compare that field, `SAVE_ONLY` never fires, `FornaxConfig.save()` is never called, and the
+  in-memory change reverts on the next load/config reload with no error, log line, or other trace.
+  Found via `sunPathRotation`, which had a live slider (`FornaxSettingsScreen`) but was never
+  compared in `route()`.
 - **Some Vulkan backends do not zero-fill new VRAM.** A freshly allocated texture can contain
   arbitrary previously-resident memory rather than zeros; every engine-managed target is cleared
   explicitly at allocation rather than relying on any backend's allocator behaviour.

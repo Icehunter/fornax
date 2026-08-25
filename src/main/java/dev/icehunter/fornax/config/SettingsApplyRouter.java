@@ -107,7 +107,8 @@ public final class SettingsApplyRouter {
                 || before.debugView != after.debugView
                 || before.frameGeneration != after.frameGeneration
                 || before.metalHud != after.metalHud
-                || before.voxelReachIgnoresRenderDistance != after.voxelReachIgnoresRenderDistance;
+                || before.voxelReachIgnoresRenderDistance != after.voxelReachIgnoresRenderDistance
+                || before.sunPathRotation != after.sunPathRotation;
         boolean resourceReloadNeeded = before.sidecarMapResolution != after.sidecarMapResolution;
         boolean anythingChanged = packReapplyNeeded || plainSaveNeeded || resourceReloadNeeded;
         boolean framegenDeactivateNeeded = (before.frameGeneration && !after.frameGeneration)
