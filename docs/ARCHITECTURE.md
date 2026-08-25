@@ -1766,6 +1766,13 @@ else entirely.
 - **Some Vulkan backends do not zero-fill new VRAM.** A freshly allocated texture can contain
   arbitrary previously-resident memory rather than zeros; every engine-managed target is cleared
   explicitly at allocation rather than relying on any backend's allocator behaviour.
+- **A GPU-resource builder that creates several handles in sequence must hoist them above its
+  `try` and free whatever succeeded on a mid-sequence failure, or the leak compounds.** Several of
+  this engine's pass runners rebuild their pipeline on every frame until the build succeeds
+  (`GraphRunner.ensureRunnersBuilt`), so an unguarded builder does not leak once -- it leaks again
+  every frame for as long as the pack stays broken. `ParticlePipelineBuilder.build` and
+  `ComputePipelineBuilder.buildWithDescriptorLayout` both follow this shape (hoisted handles,
+  `catch (RuntimeException)`, a null-checked `destroy`); a new builder on this path should too.
 - **An unresolvable shader include fails silently downstream, so this engine validates eagerly.**
   The underlying shader-composition mechanism splices an error string into the composed source for
   a missing include rather than failing the load, which would otherwise surface only as a broken

@@ -65,13 +65,21 @@ public final class ComputePipelineBuilder {
     public static CompiledComputePipeline buildWithDescriptorLayout(VulkanDevice device, ByteBuffer spirv,
                                                                     List<Integer> descriptorTypes,
                                                                     int pushConstantBytes) {
+        // Handles hoisted out of the try so the catch can free whatever was created before the
+        // failure -- the same shape ParticlePipelineBuilder.build uses, and for the same reason:
+        // GraphRunner.ensureRunnersBuilt retries a failed compute-pass build every frame, so a
+        // mid-build throw that leaked (say) a shader module and a descriptor set layout would leak
+        // them again 60 times a second for as long as the pack stays broken, rather than once.
+        long shaderModule = VK13.VK_NULL_HANDLE;
+        long descriptorSetLayout = VK13.VK_NULL_HANDLE;
+        long pipelineLayout = VK13.VK_NULL_HANDLE;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkShaderModuleCreateInfo moduleInfo = VkShaderModuleCreateInfo.calloc(stack)
                     .sType$Default()
                     .pCode(spirv);
             LongBuffer moduleOut = stack.mallocLong(1);
             checkVk(VK13.vkCreateShaderModule(device.vkDevice(), moduleInfo, null, moduleOut), "vkCreateShaderModule");
-            long shaderModule = moduleOut.get(0);
+            shaderModule = moduleOut.get(0);
 
             VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(descriptorTypes.size(), stack);
             for (int i = 0; i < descriptorTypes.size(); i++) {
@@ -87,7 +95,7 @@ public final class ComputePipelineBuilder {
             LongBuffer setLayoutOut = stack.mallocLong(1);
             checkVk(VK13.vkCreateDescriptorSetLayout(device.vkDevice(), layoutInfo, null, setLayoutOut),
                     "vkCreateDescriptorSetLayout");
-            long descriptorSetLayout = setLayoutOut.get(0);
+            descriptorSetLayout = setLayoutOut.get(0);
 
             // PassParams (32-byte std140: vec2 texel + 2 scalars + vec3 sun dir) rides as a push constant
             // because a compute pass has no reserved uniform-buffer slot for it the way FULLSCREEN passes do.
@@ -104,7 +112,7 @@ public final class ComputePipelineBuilder {
             LongBuffer pipelineLayoutOut = stack.mallocLong(1);
             checkVk(VK13.vkCreatePipelineLayout(device.vkDevice(), pipelineLayoutInfo, null, pipelineLayoutOut),
                     "vkCreatePipelineLayout");
-            long pipelineLayout = pipelineLayoutOut.get(0);
+            pipelineLayout = pipelineLayoutOut.get(0);
 
             VkPipelineShaderStageCreateInfo stageInfo = VkPipelineShaderStageCreateInfo.calloc(stack)
                     .sType$Default()
@@ -122,6 +130,29 @@ public final class ComputePipelineBuilder {
                     "vkCreateComputePipelines");
 
             return new CompiledComputePipeline(pipelineOut.get(0), pipelineLayout, descriptorSetLayout, shaderModule);
+        } catch (RuntimeException e) {
+            destroy(device, VK13.VK_NULL_HANDLE, pipelineLayout, descriptorSetLayout, shaderModule);
+            throw e;
+        }
+    }
+
+    /** Destroys every handle in a {@link CompiledComputePipeline} (or the partial set a failed
+     * {@link #buildWithDescriptorLayout} produced). Null handles are skipped, so this is safe at
+     * any point mid-build. */
+    public static void destroy(VulkanDevice device, long pipeline, long pipelineLayout, long descriptorSetLayout,
+                               long shaderModule) {
+        var vkDevice = device.vkDevice();
+        if (pipeline != VK13.VK_NULL_HANDLE) {
+            VK13.vkDestroyPipeline(vkDevice, pipeline, null);
+        }
+        if (pipelineLayout != VK13.VK_NULL_HANDLE) {
+            VK13.vkDestroyPipelineLayout(vkDevice, pipelineLayout, null);
+        }
+        if (descriptorSetLayout != VK13.VK_NULL_HANDLE) {
+            VK13.vkDestroyDescriptorSetLayout(vkDevice, descriptorSetLayout, null);
+        }
+        if (shaderModule != VK13.VK_NULL_HANDLE) {
+            VK13.vkDestroyShaderModule(vkDevice, shaderModule, null);
         }
     }
 
