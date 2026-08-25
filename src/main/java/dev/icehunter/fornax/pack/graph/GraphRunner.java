@@ -156,6 +156,8 @@ public final class GraphRunner {
     // Pass names already reported by logMissingRunnerOnce() -- reset on every rebuild/teardown so a
     // NEW pack session's first miss is loud again. Render-thread only, like every runner map here.
     private static final Set<String> missingRunnerLogged = new HashSet<>();
+    // Same log-once/reset-on-rebuild shape as missingRunnerLogged, for logPassRunFailureOnce().
+    private static final Set<String> passRunFailureLogged = new HashSet<>();
     private static boolean packDeclaresDepthCopyback;
 
     // Pure-JVM rolling stats; the FrameProfiler OBJECT lives for the mod's whole session, independent
@@ -1213,12 +1215,22 @@ public final class GraphRunner {
                 case MIPCHAIN -> {
                     MipchainRunner runner = mipchainRunners.get(p.name());
                     if (runner != null) {
-                        runner.run(r, mipchainTargets);
+                        try {
+                            runner.run(r, mipchainTargets);
+                        } catch (RuntimeException e) {
+                            logPassRunFailureOnce(p.name(), e);
+                        }
                     } else {
                         logMissingRunnerOnce(p.name());
                     }
                 }
-                case COPY -> CopyRunner.run(p, r);
+                case COPY -> {
+                    try {
+                        CopyRunner.run(p, r);
+                    } catch (RuntimeException e) {
+                        logPassRunFailureOnce(p.name(), e);
+                    }
+                }
                 case COMPUTE -> {
                     ComputePassRunner runner = computeRunners.get(p.name());
                     if (runner != null) {
@@ -2431,6 +2443,23 @@ public final class GraphRunner {
         }
     }
 
+    /**
+     * {@code CopyRunner}/{@code MipchainRunner} resolve their inputs live, every frame, with no
+     * build()-time runner-abort safety net the other pass types get (see {@link #ensureRunnersBuilt}).
+     * A target genuinely not yet allocated (a transient mid-reload window) throws here; catching and
+     * skipping this frame lets it self-heal next frame once the allocation lands, rather than taking
+     * the whole render frame down. Logged at ERROR once per pass per pack session, same shape as
+     * {@link #logMissingRunnerOnce}, since a graph shaped so this fails every frame (not just
+     * transiently) would otherwise spam the log at frame rate forever.
+     */
+    private static void logPassRunFailureOnce(String passName, RuntimeException e) {
+        if (passRunFailureLogged.add(passName)) {
+            FornaxMod.LOGGER.error("[Fornax] GraphRunner: pass '{}' threw resolving or running this "
+                    + "frame ({}); skipping it this frame. Deferred output may be incomplete until "
+                    + "the underlying target becomes available", passName, e.toString(), e);
+        }
+    }
+
     private static void closeCurrent() {
         // Detach the voxel window from this soon-to-be-closed registry BEFORE freeing its buffers, so a
         // late Sodium-worker onSectionHarvested can't pick up a registry whose buffers are being torn
@@ -2523,6 +2552,7 @@ public final class GraphRunner {
         rebuildGeneration++;
         sourcesReady = false;
         missingRunnerLogged.clear();
+        passRunFailureLogged.clear();
 
         if (registry != null) {
             registry.close();

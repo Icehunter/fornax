@@ -1821,3 +1821,11 @@ else entirely.
   `getView()` silently returned `null` for the rest of the process. Fixed by holding the new
   handles in locals and assigning both fields only after the last creation step succeeds,
   freeing whatever partially succeeded on the way out.
+- **Every per-frame pass dispatch in `GraphRunner.finish()` must catch its own resolve/run
+  failure, or one bad pass crashes the whole render frame.** FULLSCREEN/COMPUTE/PARTICLES/
+  TEMPORAL each catch inside their own runner's `run()`; COPY and MIPCHAIN resolve live every
+  frame with no such guard and no build-time abort-and-retry safety net either (see
+  `ensureRunnersBuilt`), so a target genuinely not yet allocated (a transient mid-reload window)
+  threw straight out of `finish()`. Both dispatch cases now catch `RuntimeException` and log via
+  `logPassRunFailureOnce` (same log-once-per-pass-per-session shape as `logMissingRunnerOnce`),
+  skipping that pass for the frame rather than crashing it.
