@@ -150,7 +150,9 @@ public class SpriteLoaderPagedStitchMixin {
      * between them, when {@link GpuMemoryEstimator#detectedVramBytesFromDevice} can answer. Kept
      * well under 1 because plenty else sits on the same pool: page 0, the labPBR normal and
      * material atlases (measured at 358 MB and 268 MB on one pack), vanilla's own atlases, and the
-     * rest of the engine's GPU-resident state.
+     * rest of the engine's GPU-resident state. The two labPBR sidecar atlases claim their own share
+     * of the SAME real-VRAM pool this fraction reserves against; see
+     * {@code PbrSidecarAtlasScale#VRAM_SHARE_PER_ATLAS_FRACTION}'s doc for the coordinated split.
      */
     private static final double FORNAX_VRAM_BUDGET_FRACTION = 1.0 / 2.0;
 

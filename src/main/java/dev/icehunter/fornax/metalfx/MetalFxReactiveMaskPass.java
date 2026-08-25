@@ -76,12 +76,21 @@ final class MetalFxReactiveMaskPass {
             return;
         }
         GpuDevice device = RenderSystem.getDevice();
-        GpuTexture nextTexture = device.createTexture(
-                "Fornax MetalFX Reactive Mask",
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
-                        | GpuTexture.USAGE_COPY_SRC,
-                GpuFormat.R8_UNORM, requestedWidth, requestedHeight, 1, 1);
-        GpuTextureView nextView = device.createTextureView(nextTexture);
+        // Hoisted so a failure creating the view doesn't orphan the texture already created above
+        // it, with no reference left anywhere to close it.
+        GpuTexture nextTexture = null;
+        GpuTextureView nextView;
+        try {
+            nextTexture = device.createTexture(
+                    "Fornax MetalFX Reactive Mask",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
+                            | GpuTexture.USAGE_COPY_SRC,
+                    GpuFormat.R8_UNORM, requestedWidth, requestedHeight, 1, 1);
+            nextView = device.createTextureView(nextTexture);
+        } catch (RuntimeException e) {
+            if (nextTexture != null) nextTexture.close();
+            throw e;
+        }
 
         GpuTexture oldTexture = texture;
         GpuTextureView oldView = view;

@@ -1,5 +1,7 @@
 package dev.icehunter.fornax.atlas;
 
+import java.util.OptionalLong;
+
 /**
  * Sizes a labPBR sidecar atlas from the SIDECARS' own resolution rather than the albedo's.
  *
@@ -33,7 +35,11 @@ public final class PbrSidecarAtlasScale {
     public static final int PBR_ATLAS_LOG2_DIVISOR = 0;
 
     /**
-     * The most bytes one sidecar atlas may hold resident, including its mip chain.
+     * The most bytes one sidecar atlas may hold resident, including its mip chain, when a real VRAM
+     * reading is unavailable (GL backend, or the Vulkan query in {@link
+     * dev.icehunter.fornax.util.GpuMemoryEstimator#detectedVramBytesFromDevice} failed): the
+     * fallback path. {@link #effectiveMaxAtlasBytes} is the primary path once a live device is in
+     * hand, and derives the ceiling from that device's real memory instead of this fixed number.
      *
      * <p>Derived against the hardware this actually has to run on, not a round number. The user's
      * machines span an RTX 5090, an M5 Pro, a MacBook Air and a GTX 1060 with 3-6 GB, and the 1060 is
@@ -51,9 +57,46 @@ public final class PbrSidecarAtlasScale {
      */
     static final long MAX_ATLAS_BYTES = 512L * 1024L * 1024L;
 
+    /**
+     * Share of real device-local VRAM ONE sidecar atlas allocation may claim, when a live reading is
+     * available. Not 1/2 or 1/4: {@code SpriteLoaderPagedStitchMixin.FORNAX_VRAM_BUDGET_FRACTION}
+     * already claims up to 1/2 of the same real-VRAM pool for the block atlas's overflow pages and
+     * sprite-bounds grid, leaving 1/2 for everything else this engine and vanilla put on the GPU
+     * (vanilla's own atlases, the G-buffer, MetalFX interop images). Of that remaining half, this
+     * reserves half again for that non-sidecar overhead, leaving 1/4 of total real VRAM for BOTH
+     * sidecar lanes (normal + material) combined. Each lane can itself be briefly doubled during a
+     * resource-pack switch, per {@link LabPbrAtlasPair}'s own doc ("the replacement is visible before
+     * the previous GPU objects are closed"), so up to 4 atlas-sized allocations (old normal, new
+     * normal, old material, new material) can be resident at once. 1/4 total split 4 ways is 1/16
+     * per allocation.
+     */
+    private static final double VRAM_SHARE_PER_ATLAS_FRACTION = 1.0 / 16.0;
+
     private static final int BYTES_PER_TEXEL = 4; // RGBA8_UNORM
 
     private PbrSidecarAtlasScale() {
+    }
+
+    /**
+     * The resident-byte ceiling one sidecar atlas allocation should actually be built against: the
+     * tighter of what the user's {@code SidecarMapResolution} tier asked for and what this device's
+     * real VRAM can spare (see {@link #VRAM_SHARE_PER_ATLAS_FRACTION}). Falls back to {@link
+     * #MAX_ATLAS_BYTES} when {@code realVramBytes} is empty (VRAM detection unavailable), same as
+     * before this method existed.
+     *
+     * <p>This is what closes {@code SidecarMapResolution.FULL}'s own uncapped {@code Long.MAX_VALUE}:
+     * FULL means "don't cap below what the pack authored," not "ignore how much VRAM actually
+     * exists," and those are different claims: only the first one is FULL's to make.
+     *
+     * @param realVramBytes    {@link dev.icehunter.fornax.util.GpuMemoryEstimator#detectedVramBytesFromDevice},
+     *                         empty when unavailable
+     * @param tierMaxAtlasBytes the active {@code SidecarMapResolution} tier's own ceiling
+     */
+    public static long effectiveMaxAtlasBytes(OptionalLong realVramBytes, long tierMaxAtlasBytes) {
+        long fromVram = realVramBytes.isPresent()
+                ? (long) (realVramBytes.getAsLong() * VRAM_SHARE_PER_ATLAS_FRACTION)
+                : MAX_ATLAS_BYTES;
+        return Math.min(tierMaxAtlasBytes, fromVram);
     }
 
     /**

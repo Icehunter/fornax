@@ -9,6 +9,7 @@ import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.config.FornaxConfig;
+import dev.icehunter.fornax.util.GpuMemoryEstimator;
 import net.minecraft.client.renderer.texture.SpriteLoader;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
@@ -90,7 +91,9 @@ public final class MaterialMapAtlasReloadListener {
                     preparations.width(), preparations.height(), survey.maxRatio(),
                     LabPbrSidecarSurvey.maxTextureDimension(device), MIP_CHAIN_FACTOR,
                     FornaxConfig.get().sidecarMapResolution.log2ScaleOffset(),
-                    FornaxConfig.get().sidecarMapResolution.maxAtlasBytes());
+                    PbrSidecarAtlasScale.effectiveMaxAtlasBytes(
+                            GpuMemoryEstimator.detectedVramBytesFromDevice(device),
+                            FornaxConfig.get().sidecarMapResolution.maxAtlasBytes()));
         } catch (IllegalStateException noFittingScale) {
             FornaxMod.LOGGER.warn("[LabPBR] Skipping material map atlas build: {}", noFittingScale.getMessage());
             return null;

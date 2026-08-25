@@ -106,6 +106,17 @@ public final class MetalFxUpscalePass {
         try {
             run(lowRes, nativeDest, motionView, depthView, sceneHistory, jitterNdc);
             return true;
+        } catch (com.mojang.blaze3d.GpuDeviceLossException e) {
+            // The Vulkan device itself is gone (a real driver-level loss -- on this interop the
+            // observed cause is MoltenVK reporting VK_ERROR_DEVICE_LOST while this pass's own
+            // GPU-side wait on Metal's shared-event semaphore never got signaled, because the
+            // Metal command buffer failed with its own IOGPU "Invalid Resource" error). Nothing
+            // submitted to this device after that point can succeed, so falling back to TAAU and
+            // returning false would hand the very next unrelated submit() the same dead device --
+            // observed live as an unattributed native crash one frame later. Surface it here
+            // instead, where the cause is still named, rather than swallow it as a soft failure.
+            FornaxMod.LOGGER.error("[Fornax] MetalFX scaler: Vulkan device lost, unrecoverable", e);
+            throw e;
         } catch (Throwable t) {
             failed = true;
             FornaxMod.LOGGER.error("[Fornax] MetalFX scaler FAILED -- falling back to TAAU for this session", t);

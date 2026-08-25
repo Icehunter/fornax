@@ -119,40 +119,77 @@ public final class GBufferManager {
         // because HistoryBufferManager copies every G-buffer attachment into the history buffer
         // once per frame via CommandEncoder.copyTextureToTexture -- that flag is required on the
         // source texture of any copy, not only the depth attachment's use case.
-        GpuTexture normalTexture = device.createTexture("Sodium GBuffer Normal",
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
-                GpuFormat.RGBA16_SNORM, width, height, 1, 1);
-        GpuTexture albedoTexture = device.createTexture("Sodium GBuffer Albedo",
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
-                GpuFormat.RGBA8_UNORM, width, height, 1, 1);
-        GpuTexture materialTexture = device.createTexture("Sodium GBuffer Material",
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
-                GpuFormat.RGBA8_UNORM, width, height, 1, 1);
-        // RGBA8 since ecv2: R = baked AO (unchanged consumer contract -- resolve reads .r), GBA =
-        // intrinsic (unlit) raw albedo, packed here because a 6th color attachment's writes were
-        // lost on this stack (see ecv2-attachment saga in .superpowers/sdd/progress.md) while the
-        // proven 5-attachment layout ships the same data in the AO texture's unused channels.
-        GpuTexture aoTexture = device.createTexture("Sodium GBuffer AO",
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
-                GpuFormat.RGBA8_UNORM, width, height, 1, 1);
-        GpuTexture motionTexture = device.createTexture("Sodium GBuffer Motion",
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
-                GpuFormat.RG16_FLOAT, width, height, 1, 1);
-        // USAGE_COPY_SRC is required because the resolve copies this depth texture into the main
-        // target. Per-frame clearing now happens as a render-pass load operation, so COPY_DST is not
-        // required on this attachment.
-        GpuTexture depthTexture = device.createTexture("Sodium GBuffer Depth",
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
-                        | GpuTexture.USAGE_COPY_SRC,
-                DEPTH_FORMAT, width, height, 1, 1);
+        //
+        // Every handle below is hoisted into a local and only handed to the GBuffer/instance field
+        // once the whole sequence succeeds: a mid-sequence failure (VRAM pressure, a transient
+        // driver rejection) otherwise orphaned whatever textures/views had already been created,
+        // with no reference left anywhere to close them.
+        GpuTexture normalTexture = null;
+        GpuTextureView normalView = null;
+        GpuTexture albedoTexture = null;
+        GpuTextureView albedoView = null;
+        GpuTexture materialTexture = null;
+        GpuTextureView materialView = null;
+        GpuTexture aoTexture = null;
+        GpuTextureView aoView = null;
+        GpuTexture motionTexture = null;
+        GpuTextureView motionView = null;
+        GpuTexture depthTexture = null;
+        GpuTextureView depthView = null;
+        GBuffer next;
+        try {
+            normalTexture = device.createTexture("Sodium GBuffer Normal",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
+                    GpuFormat.RGBA16_SNORM, width, height, 1, 1);
+            normalView = device.createTextureView(normalTexture);
+            albedoTexture = device.createTexture("Sodium GBuffer Albedo",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
+                    GpuFormat.RGBA8_UNORM, width, height, 1, 1);
+            albedoView = device.createTextureView(albedoTexture);
+            materialTexture = device.createTexture("Sodium GBuffer Material",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
+                    GpuFormat.RGBA8_UNORM, width, height, 1, 1);
+            materialView = device.createTextureView(materialTexture);
+            // RGBA8 since ecv2: R = baked AO (unchanged consumer contract -- resolve reads .r), GBA =
+            // intrinsic (unlit) raw albedo, packed here because a 6th color attachment's writes were
+            // lost on this stack (see ecv2-attachment saga in .superpowers/sdd/progress.md) while the
+            // proven 5-attachment layout ships the same data in the AO texture's unused channels.
+            aoTexture = device.createTexture("Sodium GBuffer AO",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
+                    GpuFormat.RGBA8_UNORM, width, height, 1, 1);
+            aoView = device.createTextureView(aoTexture);
+            motionTexture = device.createTexture("Sodium GBuffer Motion",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
+                    GpuFormat.RG16_FLOAT, width, height, 1, 1);
+            motionView = device.createTextureView(motionTexture);
+            // USAGE_COPY_SRC is required because the resolve copies this depth texture into the main
+            // target. Per-frame clearing now happens as a render-pass load operation, so COPY_DST is
+            // not required on this attachment.
+            depthTexture = device.createTexture("Sodium GBuffer Depth",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
+                            | GpuTexture.USAGE_COPY_SRC,
+                    DEPTH_FORMAT, width, height, 1, 1);
+            depthView = device.createTextureView(depthTexture);
 
-        GBuffer next = new GBuffer(width, height,
-                normalTexture, device.createTextureView(normalTexture),
-                albedoTexture, device.createTextureView(albedoTexture),
-                materialTexture, device.createTextureView(materialTexture),
-                aoTexture, device.createTextureView(aoTexture),
-                motionTexture, device.createTextureView(motionTexture),
-                depthTexture, device.createTextureView(depthTexture));
+            next = new GBuffer(width, height,
+                    normalTexture, normalView, albedoTexture, albedoView,
+                    materialTexture, materialView, aoTexture, aoView,
+                    motionTexture, motionView, depthTexture, depthView);
+        } catch (RuntimeException e) {
+            closeIfNotNull(depthView);
+            closeIfNotNull(depthTexture);
+            closeIfNotNull(motionView);
+            closeIfNotNull(motionTexture);
+            closeIfNotNull(aoView);
+            closeIfNotNull(aoTexture);
+            closeIfNotNull(materialView);
+            closeIfNotNull(materialTexture);
+            closeIfNotNull(albedoView);
+            closeIfNotNull(albedoTexture);
+            closeIfNotNull(normalView);
+            closeIfNotNull(normalTexture);
+            throw e;
+        }
 
         instance = next;
         if (current != null) {
@@ -166,5 +203,17 @@ public final class GBufferManager {
         }
 
         FornaxMod.LOGGER.info("[GBuffer] (Re)built at {}x{}", width, height);
+    }
+
+    private static void closeIfNotNull(@Nullable GpuTexture texture) {
+        if (texture != null) {
+            texture.close();
+        }
+    }
+
+    private static void closeIfNotNull(@Nullable GpuTextureView view) {
+        if (view != null) {
+            view.close();
+        }
     }
 }

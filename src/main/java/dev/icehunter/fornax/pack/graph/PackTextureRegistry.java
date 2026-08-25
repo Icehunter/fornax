@@ -87,10 +87,15 @@ public final class PackTextureRegistry implements AutoCloseable {
 
     private void load(GpuDevice device, PackTextureSpec spec) {
         Path file = packRoot.resolve(spec.file());
+        // Hoisted above the try so the catch can free it: only put into textures/views once BOTH
+        // the texture and its view succeed, or a failure creating the view left the texture
+        // orphaned, with no reference anywhere to close it.
+        GpuTexture texture = null;
+        GpuTextureView view = null;
         try (InputStream in = Files.newInputStream(file);
              NativeImage image = NativeImage.read(NativeImage.Format.RGBA, in)) {
             int mipLevels = computeMipLevelCount(image.getWidth(), image.getHeight());
-            GpuTexture texture = device.createTexture("Fornax Pack Texture " + spec.name(),
+            texture = device.createTexture("Fornax Pack Texture " + spec.name(),
                     GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
                     GpuFormat.RGBA8_UNORM, image.getWidth(), image.getHeight(), 1, mipLevels);
             CommandEncoder encoder = device.createCommandEncoder();
@@ -114,14 +119,18 @@ public final class PackTextureRegistry implements AutoCloseable {
                 previous.close();
             }
 
+            view = device.createTextureView(texture);
             textures.put(spec.name(), texture);
-            views.put(spec.name(), device.createTextureView(texture));
+            views.put(spec.name(), view);
             FornaxMod.LOGGER.info("[Fornax] Pack texture '{}' loaded from {} ({}x{}, {} mips)",
                     spec.name(), spec.file(), image.getWidth(), image.getHeight(), mipLevels);
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
             // See this class's own doc: PackDiscovery already proved this file decodes at load time,
-            // so reaching this catch means the file changed on disk after validation -- logged, not
-            // thrown, since ensureLoaded() runs every frame and must never crash a live frame.
+            // so reaching this catch usually means the file changed on disk after validation, or a
+            // transient GPU failure. Logged, not thrown, since ensureLoaded() runs every frame and
+            // must never crash a live frame.
+            if (view != null) view.close();
+            if (texture != null) texture.close();
             FornaxMod.LOGGER.error("[Fornax] PackTextureRegistry: failed to (re)load texture '{}' from {}: {}",
                     spec.name(), spec.file(), e.getMessage());
         }

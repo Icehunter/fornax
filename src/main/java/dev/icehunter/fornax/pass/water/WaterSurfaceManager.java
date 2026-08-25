@@ -109,25 +109,39 @@ public final class WaterSurfaceManager {
         // later graph pass can sample or copy this as a regular input, USAGE_COPY_DST required by
         // clearColorTexture/clearDepthTexture (both the alloc-time clear below and every per-frame
         // clear() call).
-        GpuTexture nextNormalTexture = device.createTexture("Fornax Water Normal",
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
-                        | GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC,
-                GpuFormat.RGBA16_SNORM, width, height, 1, 1);
-        GpuTextureView nextNormalView = device.createTextureView(nextNormalTexture);
+        // Hoisted so a failure partway through this sequence doesn't orphan whatever already
+        // succeeded, with no reference left anywhere to close it.
+        GpuTexture nextNormalTexture = null;
+        GpuTextureView nextNormalView = null;
+        GpuTexture nextDepthTexture = null;
+        GpuTextureView nextDepthView = null;
+        try {
+            nextNormalTexture = device.createTexture("Fornax Water Normal",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
+                            | GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC,
+                    GpuFormat.RGBA16_SNORM, width, height, 1, 1);
+            nextNormalView = device.createTextureView(nextNormalTexture);
 
-        GpuTexture nextDepthTexture = device.createTexture("Fornax Water Depth",
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
-                        | GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC,
-                GpuFormat.D32_FLOAT, width, height, 1, 1);
-        GpuTextureView nextDepthView = device.createTextureView(nextDepthTexture);
+            nextDepthTexture = device.createTexture("Fornax Water Depth",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
+                            | GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC,
+                    GpuFormat.D32_FLOAT, width, height, 1, 1);
+            nextDepthView = device.createTextureView(nextDepthTexture);
 
-        // MoltenVK clear-at-alloc law: color -> transparent zero (a=0 == "no water" flag, matching
-        // the per-frame clear() semantics the pre-pass shader's discard relies on), depth -> the
-        // MAIN camera's reversed-Z far value 0.0 (see this class's own javadoc for why this differs
-        // from ShadowMapManager's forward-Z 1.0f).
-        device.createCommandEncoder().clearColorAndDepthTextures(
-                nextNormalTexture, new Vector4f(0.0f, 0.0f, 0.0f, 0.0f),
-                nextDepthTexture, RenderSystem.DEFAULT_DEPTH_CLEAR_VALUE);
+            // MoltenVK clear-at-alloc law: color -> transparent zero (a=0 == "no water" flag,
+            // matching the per-frame clear() semantics the pre-pass shader's discard relies on),
+            // depth -> the MAIN camera's reversed-Z far value 0.0 (see this class's own javadoc for
+            // why this differs from ShadowMapManager's forward-Z 1.0f).
+            device.createCommandEncoder().clearColorAndDepthTextures(
+                    nextNormalTexture, new Vector4f(0.0f, 0.0f, 0.0f, 0.0f),
+                    nextDepthTexture, RenderSystem.DEFAULT_DEPTH_CLEAR_VALUE);
+        } catch (RuntimeException e) {
+            if (nextDepthView != null) nextDepthView.close();
+            if (nextDepthTexture != null) nextDepthTexture.close();
+            if (nextNormalView != null) nextNormalView.close();
+            if (nextNormalTexture != null) nextNormalTexture.close();
+            throw e;
+        }
 
         GpuTexture oldNormalTexture = normalTexture;
         GpuTextureView oldNormalView = normalView;

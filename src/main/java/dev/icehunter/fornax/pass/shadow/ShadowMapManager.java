@@ -132,31 +132,46 @@ public final class ShadowMapManager {
         // CommandEncoder.clearDepthTexture (below and every per-frame clear() call); USAGE_COPY_SRC
         // and USAGE_TEXTURE_BINDING mirror that same precedent for a depth attachment that must also
         // be sampled by a later resolve pass.
-        GpuTexture nextTexture = device.createTexture("Fornax Sun Shadow Map",
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
-                        | GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC,
-                GpuFormat.D32_FLOAT, resolution, resolution, 1, 1);
-        GpuTextureView nextView = device.createTextureView(nextTexture);
+        // Hoisted so a failure partway through this sequence doesn't orphan whatever already
+        // succeeded, with no reference left anywhere to close it.
+        GpuTexture nextTexture = null;
+        GpuTextureView nextView = null;
+        GpuTexture nextDummyColorTexture = null;
+        GpuTextureView nextDummyColorView = null;
+        try {
+            nextTexture = device.createTexture("Fornax Sun Shadow Map",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
+                            | GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC,
+                    GpuFormat.D32_FLOAT, resolution, resolution, 1, 1);
+            nextView = device.createTextureView(nextTexture);
 
-        // MoltenVK garbage-VRAM law: clear at allocation rather than relying on the first shadow
-        // draw pass to fully cover every texel before anything ever samples it. This shadow map is
-        // forward-Z [0,1] (ShadowCamera uses setOrtho(..., zZeroToOne=true), far = 1.0), unlike the
-        // main camera's reversed-Z depth -- so empty/far must clear to literal 1.0f, NOT
-        // RenderSystem.DEFAULT_DEPTH_CLEAR_VALUE (that constant is 0.0, the reversed-Z far value,
-        // which would make every un-rasterized texel read as an occluder at the light itself).
-        device.createCommandEncoder().clearDepthTexture(nextTexture, 1.0f);
+            // MoltenVK garbage-VRAM law: clear at allocation rather than relying on the first shadow
+            // draw pass to fully cover every texel before anything ever samples it. This shadow map
+            // is forward-Z [0,1] (ShadowCamera uses setOrtho(..., zZeroToOne=true), far = 1.0),
+            // unlike the main camera's reversed-Z depth -- so empty/far must clear to literal 1.0f,
+            // NOT RenderSystem.DEFAULT_DEPTH_CLEAR_VALUE (that constant is 0.0, the reversed-Z far
+            // value, which would make every un-rasterized texel read as an occluder at the light
+            // itself).
+            device.createCommandEncoder().clearDepthTexture(nextTexture, 1.0f);
 
-        // See this class's javadoc: a real, unread RGBA8_UNORM color attachment matching the shadow
-        // pipeline's Blaze3D-forced single ColorTargetState.DEFAULT, required only to keep
-        // RenderPass.setPipeline's attachment-count invariant satisfied. Same resolution as depth --
-        // CommandEncoder.createRenderPass validates the render area against colorAttachments[0]'s
-        // own dimensions whenever the list is non-empty, not the depth attachment's, so it must be
-        // at least as large as the shadow render area. Not cleared at allocation: nothing ever reads
-        // it, unlike the depth target a later pass samples.
-        GpuTexture nextDummyColorTexture = device.createTexture("Fornax Shadow Dummy Color",
-                GpuTexture.USAGE_RENDER_ATTACHMENT,
-                GpuFormat.RGBA8_UNORM, resolution, resolution, 1, 1);
-        GpuTextureView nextDummyColorView = device.createTextureView(nextDummyColorTexture);
+            // See this class's javadoc: a real, unread RGBA8_UNORM color attachment matching the
+            // shadow pipeline's Blaze3D-forced single ColorTargetState.DEFAULT, required only to
+            // keep RenderPass.setPipeline's attachment-count invariant satisfied. Same resolution as
+            // depth -- CommandEncoder.createRenderPass validates the render area against
+            // colorAttachments[0]'s own dimensions whenever the list is non-empty, not the depth
+            // attachment's, so it must be at least as large as the shadow render area. Not cleared
+            // at allocation: nothing ever reads it, unlike the depth target a later pass samples.
+            nextDummyColorTexture = device.createTexture("Fornax Shadow Dummy Color",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT,
+                    GpuFormat.RGBA8_UNORM, resolution, resolution, 1, 1);
+            nextDummyColorView = device.createTextureView(nextDummyColorTexture);
+        } catch (RuntimeException e) {
+            if (nextDummyColorView != null) nextDummyColorView.close();
+            if (nextDummyColorTexture != null) nextDummyColorTexture.close();
+            if (nextView != null) nextView.close();
+            if (nextTexture != null) nextTexture.close();
+            throw e;
+        }
 
         GpuTexture oldTexture = texture;
         GpuTextureView oldView = view;

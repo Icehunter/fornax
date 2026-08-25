@@ -190,16 +190,24 @@ public final class BlockAtlasOverflow {
         long start = System.nanoTime();
         CommandEncoder encoder = device.createCommandEncoder();
         int composited = 0;
-        for (BlockAtlasGhostSprite ghost : layout.ghosts()) {
-            if (!ghost.hasOverflowCopy()) {
-                continue;
+        try {
+            for (BlockAtlasGhostSprite ghost : layout.ghosts()) {
+                if (!ghost.hasOverflowCopy()) {
+                    continue;
+                }
+                NativeImage[] mips = ((SpriteContentsAccessor) (Object) ghost.contents()).fornax$byMipLevel();
+                int levels = Math.min(layout.mipLevel() + 1, mips.length);
+                for (int mip = 0; mip < levels; mip++) {
+                    writeSpriteMip(encoder, albedo, ghost, mips[mip], mip);
+                }
+                composited++;
             }
-            NativeImage[] mips = ((SpriteContentsAccessor) (Object) ghost.contents()).fornax$byMipLevel();
-            int levels = Math.min(layout.mipLevel() + 1, mips.length);
-            for (int mip = 0; mip < levels; mip++) {
-                writeSpriteMip(encoder, albedo, ghost, mips[mip], mip);
-            }
-            composited++;
+        } catch (RuntimeException e) {
+            // albedo already succeeded above; rebuild()'s own catch has no reference to it and can
+            // only fall back to the previous atlas, so it must be freed here or a malformed sprite
+            // partway through this loop leaks the whole array-texture allocation.
+            albedo.close();
+            throw e;
         }
         FornaxMod.LOGGER.info(
                 "[Fornax] Paged block atlas: composited {} spilled sprite(s) onto {} overflow layer(s)"

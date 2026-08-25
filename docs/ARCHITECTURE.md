@@ -1829,3 +1829,34 @@ else entirely.
   threw straight out of `finish()`. Both dispatch cases now catch `RuntimeException` and log via
   `logPassRunFailureOnce` (same log-once-per-pass-per-session shape as `logMissingRunnerOnce`),
   skipping that pass for the frame rather than crashing it.
+- **A method creating several GPU handles in sequence must hoist every handle into a local
+  initialized to `null`, and free whatever succeeded in a `catch` before rethrowing.** Ten call
+  sites assigned straight to a field/map only after the whole sequence succeeded, so a
+  mid-sequence failure (VRAM pressure on a resize, a transient driver rejection, a malformed
+  sprite) orphaned whatever had already been created, with no reference left anywhere to close
+  it: `GBufferManager.ensureSize`, `TargetRegistry.reconcile`, `MipchainRunner.ensureSize`,
+  `ShadowMapManager.ensureSize`, `WaterSurfaceManager.ensureSize`,
+  `PackTextureRegistry.load`, `ArrayTextures.create`, `MetalFxReactiveMaskPass.ensureSize`,
+  `OpaqueDepth.ensureSize`, `BlockAtlasOverflow.build`. All ten now hoist-and-free; a new
+  multi-handle GPU-resource builder should follow the same shape.
+- **A real `GpuDeviceLossException` must never be swallowed as a soft, continuable failure.**
+  `MetalFxUpscalePass.runIfEnabled`'s catch used to treat every exception the same way (log, mark
+  `failed`, fall back to TAAU that frame). On an actual lost Vulkan device — live-caught as
+  MoltenVK reporting `VK_ERROR_DEVICE_LOST` while this pass's own GPU-side wait on Metal's
+  shared-event semaphore never got signaled, because the Metal command buffer itself failed with
+  an IOGPU "Invalid Resource" error — nothing submitted to that device afterward can succeed, so
+  falling back just handed the very next unrelated `submit()` the same dead device, surfacing one
+  frame later as an unattributed native crash with no Java stack trace. `GpuDeviceLossException`
+  is now caught ahead of the broad fallback and rethrown, so the real cause surfaces immediately
+  through Minecraft's own crash-report path instead.
+- **A VRAM budget that does not know about the other budgets sharing the same device is not a real
+  budget.** The block atlas's overflow-page budget (`SpriteLoaderPagedStitchMixin`, up to 1/2 of
+  real device-local VRAM) and the two labPBR sidecar atlases' budget (`PbrSidecarAtlasScale`, was a
+  fixed 512MB constant per atlas, and no ceiling at all (`Long.MAX_VALUE`) at the FULL resolution
+  tier) were sized completely independently, with neither aware of the other or of
+  `LabPbrAtlasPair`'s own documented old+new coexistence during a resource-pack switch (up to 4
+  atlas-sized sidecar allocations resident at once: old normal, new normal, old material, new
+  material). Live-caught as a `VK_ERROR_OUT_OF_DEVICE_MEMORY`/`Lost VkDevice` crash switching to a
+  large labPBR resource pack. Fixed via `PbrSidecarAtlasScale.effectiveMaxAtlasBytes`, which derives
+  the sidecar ceiling from the same real-VRAM query the block atlas budget already uses, reserving a
+  documented, coordinated share rather than each subsystem claiming its own independently.

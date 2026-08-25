@@ -121,7 +121,15 @@ public final class ArrayTextures {
         GpuTexture texture = vulkanDevice.createTexture(label,
                 GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
                 format, width, height, layers, mipLevels);
-        GpuTextureView view = new ArrayView(vulkanDevice, (VulkanGpuTexture) texture);
+        GpuTextureView view;
+        try {
+            view = new ArrayView(vulkanDevice, (VulkanGpuTexture) texture);
+        } catch (RuntimeException e) {
+            // The hand-built array view's own super-constructor (see ArrayView's doc) can throw
+            // after texture already succeeded above; free it here rather than leaking it.
+            texture.close();
+            throw e;
+        }
         return new Allocation(texture, view);
     }
 

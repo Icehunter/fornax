@@ -59,14 +59,24 @@ public final class OpaqueDepth {
 
         int usage = GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST
                 | GpuTexture.USAGE_RENDER_ATTACHMENT;
-        GpuTexture nextTexture = device.createTexture("Fornax Opaque Depth", usage,
-                GpuFormat.D32_FLOAT, w, h, 1, 1);
-        GpuTextureView nextView = device.createTextureView(nextTexture);
-        // MoltenVK garbage-VRAM law: clear at allocation, before the swap below publishes this
-        // texture -- a graph reading builtin.depth_opaque before the first real capture() must see
-        // FAR_CLEAR, never driver garbage. Depth clears via clearDepthTexture, never the colour
-        // clear-only render pass TargetRegistry uses (TargetFormat has no depth format).
-        device.createCommandEncoder().clearDepthTexture(nextTexture, FAR_CLEAR);
+        // Hoisted so a failure creating the view or clearing doesn't orphan whatever already
+        // succeeded, with no reference left anywhere to close it.
+        GpuTexture nextTexture = null;
+        GpuTextureView nextView = null;
+        try {
+            nextTexture = device.createTexture("Fornax Opaque Depth", usage,
+                    GpuFormat.D32_FLOAT, w, h, 1, 1);
+            nextView = device.createTextureView(nextTexture);
+            // MoltenVK garbage-VRAM law: clear at allocation, before the swap below publishes this
+            // texture. A graph reading builtin.depth_opaque before the first real capture() must see
+            // FAR_CLEAR, never driver garbage. Depth clears via clearDepthTexture, never the colour
+            // clear-only render pass TargetRegistry uses (TargetFormat has no depth format).
+            device.createCommandEncoder().clearDepthTexture(nextTexture, FAR_CLEAR);
+        } catch (RuntimeException e) {
+            if (nextView != null) nextView.close();
+            if (nextTexture != null) nextTexture.close();
+            throw e;
+        }
 
         GpuTexture oldTexture = texture;
         GpuTextureView oldView = view;

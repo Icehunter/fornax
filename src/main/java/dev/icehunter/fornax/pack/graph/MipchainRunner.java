@@ -124,14 +124,27 @@ public final class MipchainRunner implements AutoCloseable {
             return;
         }
 
-        GpuTexture newTexture = device.createTexture("Fornax Mipchain " + targetSpec.name(),
-                GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING,
-                TargetRegistry.gpuFormat(format), newWidth, newHeight, 1, newLevels);
-        GpuTextureView newFullView = device.createTextureView(newTexture);
+        // Hoisted so a failure partway through the per-level view loop (below) doesn't orphan the
+        // texture and whichever level views already succeeded, with no reference left to close them.
+        GpuTexture newTexture = null;
+        GpuTextureView newFullView = null;
         GpuTextureView[] newLevelViews = new GpuTextureView[newLevels];
-        for (int i = 0; i < newLevels; i++) {
-            newLevelViews[i] = device.createTextureView(newTexture, i, 1);
-            clear(device, newLevelViews[i]);
+        try {
+            newTexture = device.createTexture("Fornax Mipchain " + targetSpec.name(),
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING,
+                    TargetRegistry.gpuFormat(format), newWidth, newHeight, 1, newLevels);
+            newFullView = device.createTextureView(newTexture);
+            for (int i = 0; i < newLevels; i++) {
+                newLevelViews[i] = device.createTextureView(newTexture, i, 1);
+                clear(device, newLevelViews[i]);
+            }
+        } catch (RuntimeException e) {
+            for (GpuTextureView v : newLevelViews) {
+                if (v != null) v.close();
+            }
+            if (newFullView != null) newFullView.close();
+            if (newTexture != null) newTexture.close();
+            throw e;
         }
 
         GpuTexture oldTexture = texture;

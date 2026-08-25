@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.OptionalLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -315,6 +316,37 @@ class PbrSidecarAtlasScaleTest {
         // ...and a neighbouring 512px albedo in the same atlas scales by the same factor, so the
         // two keep their relative sizes and the layout stays the block atlas's.
         assertEquals(1024, PbrSidecarAtlasScale.spriteExtent(512, 1));
+    }
+
+    // ------------------------------------------------------------- VRAM budget
+
+    @Test
+    void effectiveMaxAtlasBytesUsesTheVramShareWhenSmallerThanTheTier() {
+        // A 16 GB card: 1/16 of that is 1 GiB, well under FULL's Long.MAX_VALUE, so the real-VRAM
+        // share must win. This is what closes FULL's own "no ceiling at all" gap.
+        long sixteenGib = 16L * 1024 * 1024 * 1024;
+        long expected = sixteenGib / 16;
+
+        assertEquals(expected, PbrSidecarAtlasScale.effectiveMaxAtlasBytes(
+                OptionalLong.of(sixteenGib), SidecarMapResolution.FULL.maxAtlasBytes()));
+    }
+
+    @Test
+    void effectiveMaxAtlasBytesUsesTheTierWhenSmallerThanTheVramShare() {
+        // A generously provisioned 32 GB card: 1/16 of that is 2 GiB, well over HALF's fixed 512 MB
+        // tier ceiling. The user's own chosen tier must still bind, not just real VRAM.
+        long thirtyTwoGib = 32L * 1024 * 1024 * 1024;
+
+        assertEquals(SidecarMapResolution.HALF.maxAtlasBytes(), PbrSidecarAtlasScale.effectiveMaxAtlasBytes(
+                OptionalLong.of(thirtyTwoGib), SidecarMapResolution.HALF.maxAtlasBytes()));
+    }
+
+    @Test
+    void effectiveMaxAtlasBytesFallsBackToTheFixedBudgetWhenVramIsUnknown() {
+        // GL backend, or the Vulkan query itself failed: same behaviour as before this method
+        // existed, including for FULL. An unknown device must not be read as "unlimited".
+        assertEquals(PbrSidecarAtlasScale.MAX_ATLAS_BYTES, PbrSidecarAtlasScale.effectiveMaxAtlasBytes(
+                OptionalLong.empty(), SidecarMapResolution.FULL.maxAtlasBytes()));
     }
 
     // ------------------------------------------------------ animated sidecars

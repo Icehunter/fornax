@@ -563,16 +563,29 @@ public final class TargetRegistry implements AutoCloseable {
         if (storage) usage |= FornaxTextureUsage.STORAGE;
         GpuFormat gpuFormat = gpuFormat(format);
 
-        GpuTexture texture = device.createTexture("Fornax Target " + name, usage, gpuFormat, width, height, 1, 1);
-        GpuTextureView view = device.createTextureView(texture);
-        clear(device, view);
-
+        // Hoisted so a failure anywhere in this sequence (the history pair failing after the
+        // primary succeeded, or the primary's own view/clear failing after its texture succeeded)
+        // doesn't orphan whatever already succeeded, with no reference left anywhere to close it.
+        GpuTexture texture = null;
+        GpuTextureView view = null;
         GpuTexture historyTexture = null;
         GpuTextureView historyView = null;
-        if (history) {
-            historyTexture = device.createTexture("Fornax Target " + name + " History", usage, gpuFormat, width, height, 1, 1);
-            historyView = device.createTextureView(historyTexture);
-            clear(device, historyView);
+        try {
+            texture = device.createTexture("Fornax Target " + name, usage, gpuFormat, width, height, 1, 1);
+            view = device.createTextureView(texture);
+            clear(device, view);
+
+            if (history) {
+                historyTexture = device.createTexture("Fornax Target " + name + " History", usage, gpuFormat, width, height, 1, 1);
+                historyView = device.createTextureView(historyTexture);
+                clear(device, historyView);
+            }
+        } catch (RuntimeException e) {
+            if (historyView != null) historyView.close();
+            if (historyTexture != null) historyTexture.close();
+            if (view != null) view.close();
+            if (texture != null) texture.close();
+            throw e;
         }
 
         TargetInstance next = new TargetInstance(name, format, width, height, history, texture, view, historyTexture, historyView);
