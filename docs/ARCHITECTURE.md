@@ -1756,23 +1756,25 @@ else entirely.
   but isn't listed in the config is never applied, with no error, warning, or log line of any kind
   distinguishing that from an intentional removal.
 - **A YACL-bound `FornaxSettings` field must appear in `SettingsApplyRouter.route`'s diff, or its
-  change is silently lost.** YACL writes a changed option's value straight into the live
-  `FornaxConfig.get()` before the save callback runs, so the setting visibly takes effect
-  immediately regardless of what the router reports. If the router's before/after diff doesn't
-  compare that field, `SAVE_ONLY` never fires, `FornaxConfig.save()` is never called, and the
-  in-memory change reverts on the next load/config reload with no error, log line, or other trace.
-  Found via `sunPathRotation`, which had a live slider (`FornaxSettingsScreen`) but was never
-  compared in `route()`.
+  change is silently lost.** YACL applies the field into the live `FornaxConfig.get()` before the
+  save callback runs, so it takes effect immediately regardless of what `route()` reports. Missed
+  there, `SAVE_ONLY` never fires and the change reverts on the next config load with no error.
+  Found via `sunPathRotation`.
 - **Some Vulkan backends do not zero-fill new VRAM.** A freshly allocated texture can contain
   arbitrary previously-resident memory rather than zeros; every engine-managed target is cleared
   explicitly at allocation rather than relying on any backend's allocator behaviour.
-- **A GPU-resource builder that creates several handles in sequence must hoist them above its
-  `try` and free whatever succeeded on a mid-sequence failure, or the leak compounds.** Several of
-  this engine's pass runners rebuild their pipeline on every frame until the build succeeds
-  (`GraphRunner.ensureRunnersBuilt`), so an unguarded builder does not leak once -- it leaks again
-  every frame for as long as the pack stays broken. `ParticlePipelineBuilder.build` and
-  `ComputePipelineBuilder.buildWithDescriptorLayout` both follow this shape (hoisted handles,
-  `catch (RuntimeException)`, a null-checked `destroy`); a new builder on this path should too.
+- **A pipeline builder that creates several GPU handles in sequence must free whatever succeeded
+  on a mid-sequence failure.** Several pass runners retry a failed build every frame
+  (`GraphRunner.ensureRunnersBuilt`), so an unguarded builder leaks again each retry, not once.
+  `ParticlePipelineBuilder.build` and `ComputePipelineBuilder.buildWithDescriptorLayout` hoist
+  their handles above the `try` and free them in a `catch`; a new builder here should too.
+- **An "any enabled pass reads buffer X" gate must admit COMPUTE, PARTICLES and FULLSCREEN, the
+  same types `GraphValidator.checkBufferBindable` legalizes for reading a buffer.** COMPUTE-only
+  under-reports: a validated FULLSCREEN/PARTICLES reader still needs the buffer allocated, and a
+  missed gate leaves `prepare()` skip that allocation while the pass's own runner build still
+  requires it, aborting every runner in that attempt and retrying forever.
+  `anyEnabledComputePassReadsVoxelGrid`, `anyEnabledPassReadsPrecipClipmap` and
+  `anyEnabledComputePassReads` all follow this rule.
 - **An unresolvable shader include fails silently downstream, so this engine validates eagerly.**
   The underlying shader-composition mechanism splices an error string into the composed source for
   a missing include rather than failing the load, which would otherwise surface only as a broken

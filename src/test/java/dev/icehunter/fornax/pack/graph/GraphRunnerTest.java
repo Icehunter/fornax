@@ -283,14 +283,27 @@ class GraphRunnerTest {
     }
 
     @Test
-    void onlyComputeCanRequestSurfaceFluidUpdates() {
-        for (PassType type : List.of(PassType.FULLSCREEN, PassType.PARTICLES, PassType.COPY)) {
+    void fullscreenAndParticlesReadersAlsoRequestSurfaceFluidUpdates() {
+        // GraphValidator.checkBufferBindable legalizes COMPUTE, PARTICLES and FULLSCREEN readers of
+        // a buffer target; this gate must see all three or the buffer never gets allocated.
+        for (PassType type : List.of(PassType.FULLSCREEN, PassType.PARTICLES)) {
             GraphSpec graph = new GraphSpec(Map.of(), List.of(
                     new PassSpec("reader", type, null, null, "shaders/read",
                             List.of(SurfaceFluidClipmapBuffer.TARGET), List.of("builtin.output"),
                             null, null, List.of(), null, null, null)));
-            assertFalse(GraphRunner.anyEnabledPassReadsSurfaceFluidClipmap(graph, Map.of()));
+            assertTrue(GraphRunner.anyEnabledPassReadsSurfaceFluidClipmap(graph, Map.of()));
         }
+    }
+
+    @Test
+    void onlyACopyPassCannotRequestSurfaceFluidUpdates() {
+        // GraphValidator.checkBufferBindable forbids COPY from binding a buffer at all, unlike
+        // FULLSCREEN/PARTICLES/COMPUTE; same restriction the voxel-grid and precip-clipmap gates carry.
+        GraphSpec graph = new GraphSpec(Map.of(), List.of(
+                new PassSpec("reader", PassType.COPY, null, null, "shaders/read",
+                        List.of(SurfaceFluidClipmapBuffer.TARGET), List.of("builtin.output"),
+                        null, null, List.of(), null, null, null)));
+        assertFalse(GraphRunner.anyEnabledPassReadsSurfaceFluidClipmap(graph, Map.of()));
     }
 
     // --- Demotion-crash fix: shouldMarkSourcesReady's generation guard ---------------------------

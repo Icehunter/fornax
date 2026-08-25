@@ -1652,7 +1652,12 @@ public final class GraphRunner {
     private static boolean anyEnabledComputePassReads(
             GraphSpec graph, Map<String, Integer> compileValues, String target) {
         for (PassSpec p : graph.passes()) {
-            if (p.type() != PassType.COMPUTE || !isEnabledAtCompile(p, compileValues)) {
+            // Same widening as anyEnabledComputePassReadsVoxelGrid/anyEnabledPassReadsPrecipClipmap:
+            // GraphValidator.checkBufferBindable legalizes COMPUTE, PARTICLES and FULLSCREEN readers
+            // of a buffer target, so this predicate must see all three or prepare() under-allocates.
+            if ((p.type() != PassType.COMPUTE && p.type() != PassType.FULLSCREEN
+                    && p.type() != PassType.PARTICLES)
+                    || !isEnabledAtCompile(p, compileValues)) {
                 continue;
             }
             for (String in : p.inputs()) {
