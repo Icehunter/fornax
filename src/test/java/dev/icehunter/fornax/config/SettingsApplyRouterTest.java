@@ -141,6 +141,29 @@ class SettingsApplyRouterTest {
     }
 
     @Test
+    void frameGenModeToOffRoutesDeactivateAndSave() {
+        FornaxSettings before = new FornaxSettings();
+        before.frameGenMode = FrameGenMode.AUTO;
+        FornaxSettings after = new FornaxSettings();
+        after.frameGenMode = FrameGenMode.OFF;
+
+        assertEquals(Set.of(Action.SAVE_ONLY, Action.FRAMEGEN_DEACTIVATE),
+                SettingsApplyRouter.route(before, after));
+    }
+
+    @Test
+    void frameGenModeAutoToAlwaysRoutesSaveOnly() {
+        // AUTO<->ALWAYS is a live pacing-policy switch, not a resource transition: both keep
+        // FrameGenPass armed, so this must NOT route FRAMEGEN_DEACTIVATE.
+        FornaxSettings before = new FornaxSettings();
+        before.frameGenMode = FrameGenMode.AUTO;
+        FornaxSettings after = new FornaxSettings();
+        after.frameGenMode = FrameGenMode.ALWAYS;
+
+        assertEquals(Set.of(Action.SAVE_ONLY), SettingsApplyRouter.route(before, after));
+    }
+
+    @Test
     void independentActionsCombineInOneSave() {
         // A single YACL "Save" can carry multiple pending option changes at once -- the router must
         // report every action that applies, not just one.

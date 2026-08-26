@@ -27,9 +27,11 @@ import java.util.Set;
  *       FornaxConfig.save()} itself (see its own doc comment: it only recompiles the pack graph),
  *       so a {@link Action#PACK_REAPPLY}-triggering change still needs {@link Action#SAVE_ONLY} to
  *       actually reach disk.</li>
- *   <li>{@code frameGeneration} true-&gt;false, OR {@code aaMethod} METALFX-&gt;anything else
+ *   <li>{@code frameGenMode} any-&gt;{@code OFF}, OR {@code aaMethod} METALFX-&gt;anything else
  *       -&gt; {@link Action#FRAMEGEN_DEACTIVATE}: frame generation's interop resources need
- *       releasing. Deliberately NOT done from the YACL option listeners, which would call this
+ *       releasing. {@code AUTO}&lt;-&gt;{@code ALWAYS} does NOT trigger this: both policies keep
+ *       the same resources armed, only {@code FrameGenPacer}'s per-frame decision differs.
+ *       Deliberately NOT done from the YACL option listeners, which would call this
  *       directly on click -- YACL applies every option's binding (including this exact field)
  *       BEFORE the save callback runs (see the apply-semantics note above), so a listener firing on
  *       click sees the OLD `armed()` truth (config still true) for every frame rendered while the
@@ -64,7 +66,7 @@ public final class SettingsApplyRouter {
         PACK_REAPPLY,
         /**
          * {@code FrameGenPass.deactivate()} + {@code UiLayerCapture.deactivate()} + {@code
-         * FrameGenPresenter.deactivate()} -- fires on the {@code frameGeneration} true-&gt;false or
+         * FrameGenPresenter.deactivate()}. Fires on the {@code frameGenMode} any-&gt;{@code OFF} or
          * {@code aaMethod} METALFX-&gt;other transition; see the class header for why this can't
          * live in the YACL listeners.
          */
@@ -105,13 +107,15 @@ public final class SettingsApplyRouter {
                 || before.taauRatio != after.taauRatio;
         boolean plainSaveNeeded = before.profilerOverlay != after.profilerOverlay
                 || before.debugView != after.debugView
-                || before.frameGeneration != after.frameGeneration
+                || before.frameGenMode != after.frameGenMode
                 || before.metalHud != after.metalHud
                 || before.voxelReachIgnoresRenderDistance != after.voxelReachIgnoresRenderDistance
                 || before.sunPathRotation != after.sunPathRotation;
         boolean resourceReloadNeeded = before.sidecarMapResolution != after.sidecarMapResolution;
         boolean anythingChanged = packReapplyNeeded || plainSaveNeeded || resourceReloadNeeded;
-        boolean framegenDeactivateNeeded = (before.frameGeneration && !after.frameGeneration)
+        // AUTO<->ALWAYS deliberately does NOT deactivate: FrameGenPacer reads the mode live every
+        // frame, so tearing down interop resources for a policy switch would be a pointless rebuild.
+        boolean framegenDeactivateNeeded = (before.frameGenMode != FrameGenMode.OFF && after.frameGenMode == FrameGenMode.OFF)
                 || (before.aaMethod == AaMethod.METALFX && after.aaMethod != AaMethod.METALFX);
         boolean metalHudApplyNeeded = before.metalHud != after.metalHud;
 

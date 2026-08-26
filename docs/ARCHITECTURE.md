@@ -1038,8 +1038,8 @@ sibling pack's settings declarations). What remains is genuinely independent of 
 | `taauRatio` | enum (`TaauRatio`) | `BALANCED` | TAAU/MetalFX render-resolution tier: `perAxisScale()` (0.77/0.67/0.58) drives the render target and `haltonSequenceLength()` (8/12/16) drives the jitter cycle |
 | `taaBlendFactor` | float | `0.9` | Steady-state temporal history weight (migrated from the retiring pack option `u_TaaBlendFactor`), the cap the reconstruct pass's confidence ramp saturates at, not the weight of every frame; see "Temporal reconstruct" |
 | `reconstructSharpen` | float | `0.5` | Contrast-adaptive sharpen strength `ReconstructPass` applies after the temporal blend; TAAU enforces a ratio-scaled floor over it (see "Temporal reconstruct") |
-| `frameGeneration` | boolean | `false` | Experimental MetalFX frame generation: interpolates one frame between real frames. Requires `aaMethod = METALFX` and vsync (FIFO present mode); adds roughly 1 frame of latency when engaged. `FrameGenPacer` adaptively engages/disengages the actual double-present per frame (hysteresis around render fps vs. display refresh; see "Adaptive pacing" below), so arming this does not guarantee constant latency/cost, only that the setting is on and the machine genuinely needs the assist. macOS 26+ Apple Silicon only; the settings-screen toggle is built only when `MetalFxSupport.isFrameInterpolationAvailable()`, greyed out/hidden otherwise. Live-read every frame by `FrameGenPass.armed()` (no pack recompile needed). Turning it off, or switching `aaMethod` away from `METALFX`, releases `FrameGenPass`/`UiLayerCapture`/`FrameGenPresenter`'s interop resources via the shared `FrameGenPresenter.deactivateAll()`, called from two places: `SettingsApplyRouter`'s `FRAMEGEN_DEACTIVATE` action at save time (the before/after field diff, same mechanism as `PACK_REAPPLY`/`SAVE_ONLY`; never from the option's own YACL listener, since YACL applies every option's binding before any listener fires, so a listener can't tell whether this is the transition frame), and `GraphRunner.closeCurrent()` on every pack teardown (frame generation runs independently of pack state and would otherwise keep presenting against GPU state a pack reload just tore down) |
-| `metalHud` | boolean | `false` | Apple's Metal Performance HUD overlay (`CAMetalLayer.developerHUDProperties`, public API since macOS 13), replacing the session-only `MTL_HUD_ENABLED` env var with a live-toggleable setting, independent of `aaMethod` (the HUD overlays whatever the compositor presents, regardless of which AA/upscale path is active). `metalfx.MetalHudControl.apply(enabled)` resolves the game window's `NSWindow` → `contentView` → `layer` (verified via `isKindOfClass:` to actually be MoltenVK's `CAMetalLayer`) and sets a `{"mode": "default"}` properties dictionary to enable or an empty `NSDictionary` to disable; both take effect on the next presented frame, no relaunch. Settings-screen toggle built only when `metalfx.objc.Objc.isLoaded()` (the FFM bridge itself, a lighter gate than `MetalFxSupport.isAvailable()`'s temporal-scaler-support probe, since the HUD needs nothing from the MetalFX framework). Applied on either transition direction via `SettingsApplyRouter`'s `METAL_HUD_APPLY` action (symmetric with `FRAMEGEN_DEACTIVATE`'s save-time-diff mechanism, but two-way rather than one-way), plus once at `CLIENT_STARTED` for a persisted-on config. Fails closed throughout: any resolution failure (no window yet, non-Metal content view, pre-13 macOS) logs once at WARN and does nothing |
+| `frameGenMode` | enum (`FrameGenMode`) | `OFF` | Experimental MetalFX frame generation: interpolates one frame between real frames. Requires `aaMethod = METALFX` and vsync (FIFO present mode); adds roughly 1 frame of latency when engaged. `OFF` disarms `FrameGenPass.armed()` entirely. `AUTO` adaptively engages/disengages the actual double-present per frame (hysteresis around render fps vs. display refresh; see "Adaptive pacing" below), so arming this does not guarantee constant latency/cost, only that the machine genuinely needs the assist. `ALWAYS` bypasses that pacing and double-presents every armed frame unconditionally, holding real fps at roughly half the display refresh under FIFO for as long as it is selected: the deliberate escape hatch for a player who has already capped their own frame rate there (see "Adaptive pacing"). macOS 26+ Apple Silicon only; the settings-screen toggle is built only when `MetalFxSupport.isFrameInterpolationAvailable()`, greyed out/hidden otherwise. Live-read every frame by `FrameGenPass.armed()`/`FrameGenPass.mode()` (no pack recompile needed). Transitioning to `OFF`, or switching `aaMethod` away from `METALFX`, releases `FrameGenPass`/`UiLayerCapture`/`FrameGenPresenter`'s interop resources via the shared `FrameGenPresenter.deactivateAll()`, called from two places: `SettingsApplyRouter`'s `FRAMEGEN_DEACTIVATE` action at save time (the before/after field diff, same mechanism as `PACK_REAPPLY`/`SAVE_ONLY`; never from the option's own YACL listener, since YACL applies every option's binding before any listener fires, so a listener can't tell whether this is the transition frame), and `GraphRunner.closeCurrent()` on every pack teardown (frame generation runs independently of pack state and would otherwise keep presenting against GPU state a pack reload just tore down); `AUTO`<->`ALWAYS` does not route that action, since both keep the same resources armed and only `FrameGenPacer`'s per-frame decision differs. A pre-`frameGenMode` config's boolean `frameGeneration` field migrates `true` to `AUTO` and `false` to `OFF` (schema v3 -> v4; see "Migration") |
+| `metalHud` | boolean | `false` | Apple's Metal Performance HUD overlay (`CAMetalLayer.developerHUDProperties`, macOS 13+), replacing a manual `MTL_HUD_ENABLED` export with a settings toggle, independent of `aaMethod`. `FornaxPreLaunch` calls `MetalHudEnv.enableIfConfigured()` when true: a native `setenv("MTL_HUD_ENABLED", "1", 1)` before Minecraft's `main()`, since the HUD subsystem must exist before `Metal.framework` loads. Restart-to-apply in both directions under MoltenVK (see "Known laws"): `MetalHudControl.apply(enabled)` sets/clears the layer's `mode` key and logs a verdict from a live save, but only the `CLIENT_STARTED` call (config already true at boot) ever visibly shows the HUD. Toggle built only when `Objc.isLoaded()`. Fails closed: any resolution failure logs once at WARN and does nothing |
 | `schemaVersion` | int | `0` | Config-file migration marker only, not a rendering setting; see "Migration" below |
 
 **Storage.** A plain Gson-serialized JSON file in the Fabric config directory. Load tolerates a
@@ -1061,9 +1061,14 @@ normalizes a `null` `ssaaPreset` to `X4`: null means the file held an enum const
 longer has (`X9`, removed from the ladder; for a removed constant Gson maps the unknown name to null
 rather than leaving the field initializer's value, the one exception to the absent-field rule
 below), and that can appear at any persisted version, so it can't ride a schema gate. The v1 step
-tolerates the null by construction (`null != OFF` still reads as "supersampling was on"). Finally
-`schemaVersion` stamps to `CURRENT_SCHEMA_VERSION` (3, bumped for the X9 removal so an old file
-holding it is rewritten on disk exactly once). Gson leaves any field absent from the JSON at
+tolerates the null by construction (`null != OFF` still reads as "supersampling was on"). The v3
+step reads the boxed `Boolean frameGeneration` field (migration-only; boxed so an absent key stays
+distinguishable from a persisted `false`), sets `frameGenMode` to `AUTO` when it was `true` and
+`OFF` otherwise, then nulls it; since this config's Gson has no `serializeNulls`, the dead key
+stops being written on the next save. A version-ungated guard normalizes a `null` `frameGenMode`
+to `OFF` the same way the `ssaaPreset`/`debugView` guards do. Finally `schemaVersion` stamps to
+`CURRENT_SCHEMA_VERSION` (4, bumped for the `frameGeneration` -> `frameGenMode` split so an old
+file is rewritten on disk exactly once). Gson leaves any field absent from the JSON at
 whatever the class's own field initializer sets it to (never null, never a compile error), the same
 lesson the pack-option loader's default-value handling depends on. This is idempotent by
 construction: a settings object already at `CURRENT_SCHEMA_VERSION` is returned unchanged, and
@@ -1474,10 +1479,11 @@ fast the machine could otherwise render. On a 120Hz panel, a scene the hardware 
 at 90fps was throttled down to 60 real + 60 generated frames; frame generation must never make the
 real frame rate worse than doing nothing. `FrameGenPacer` (`pipeline`) fixes this: it only "engages"
 the interpolator (and therefore the double-present) when render fps is meaningfully below what the
-display can already show natively. Every armed frame, `FrameGenPass.runIfEnabled` calls
-`FrameGenPacer.update(CLOCK.emaIntervalNanos())`, the single per-frame decision point both this
-method's own arming and the present seam trace back to (see `FrameGenPacer`'s own header), which
-compares render fps against the display refresh rate (`Window.getRefreshRate()`, confirmed by
+display can already show natively: this is the `FrameGenMode.AUTO` policy specifically. Every
+armed frame, `FrameGenPass.runIfEnabled` calls `FrameGenPacer.update(CLOCK.emaIntervalNanos(),
+FrameGenPass.mode())`, the single per-frame decision point both this method's own arming and the
+present seam trace back to (see `FrameGenPacer`'s own header), which under `AUTO` compares render
+fps against the display refresh rate (`Window.getRefreshRate()`, confirmed by
 bytecode inspection as `GLX._getRefreshRate`: `glfwGetWindowMonitor` falling back to
 `glfwGetPrimaryMonitor` when windowed, then `glfwGetVideoMode(...).refreshRate()`; falls back to
 60Hz and logs once if that ever reports non-positive) with hysteresis: engage below `0.40 ×
@@ -1501,6 +1507,18 @@ displayHz` sits below the roughly `0.5 × displayHz` engaged measurement and the
 stays reachable; a scene rendering genuinely below `0.40 ×` displayHz (measured from the disengaged,
 uncapped state, so this threshold is not subject to the same self-throttling) still correctly
 engages and stays engaged.
+
+**`FrameGenMode.ALWAYS` is a separate policy, not a fourth point on this curve.** No threshold
+inside the 0.40-0.48 band could ever produce an always-engaged policy: any disengage threshold at
+or above 0.5 is mathematically unreachable for the reason above, so `AUTO` can never be tuned into
+"stay engaged unconditionally." A player who has capped their own frame rate at or below half the
+display refresh (60fps on a 120Hz panel, wanting 60 real + 60 generated) needs a genuinely
+different policy, not a retuned threshold: `FrameGenMode.ALWAYS` bypasses `computeEngaged` entirely
+and forces `engaged = true` on every call, including before the render clock has warmed up (unlike
+`AUTO`, which holds state until `emaIntervalNanos > 0`). The tradeoff is symmetric with `AUTO`'s own
+reasoning: `ALWAYS` holds real fps at roughly `displayHz / 2` for as long as it is selected,
+correct when the player wants exactly that ceiling, a regression on an uncapped session that could
+otherwise render faster on its own.
 
 While disengaged, `runIfEnabled` returns before calling `run` at all: no Vulkan copy into
 `curColor`, no `MTLFXFrameInterpolator` encode, `generatedReady` forced false, so a disengaged frame
@@ -1961,3 +1979,8 @@ else entirely.
   all chain the same `Minecraft.reloadResourcePacks()`-derived future; a listener throwing partway
   through it must not silently skip the terrain resync. Missing on one of the three re-hides the
   stale-terrain incident this section already records elsewhere for the general case.
+- **`CAMetalLayer.developerHUDProperties` is read once by MoltenVK's HUD compositor, at layer
+  setup, and never again.** A mid-session `MetalHudControl.apply` call succeeds and its read-back
+  proves the OS holds the new value, yet the HUD doesn't change (confirmed live, even with a forced
+  window resize). `metalHud` is therefore restart-to-apply in both directions: only the value
+  already true when `Metal.framework` initializes (`FornaxPreLaunch` -> `MetalHudEnv`) shows.

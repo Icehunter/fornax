@@ -9,6 +9,7 @@
   "icon": "assets/fornax/icon.png",
   "environment": "client",
   "entrypoints": {
+    "preLaunch": ["dev.icehunter.fornax.FornaxPreLaunch"],
     "client": ["dev.icehunter.fornax.FornaxMod"],
     "sodium:config_api_user": ["dev.icehunter.fornax.compat.SodiumConfigEntry"]
   },

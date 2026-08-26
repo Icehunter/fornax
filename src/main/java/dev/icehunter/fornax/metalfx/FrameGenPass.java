@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.config.AaMethod;
 import dev.icehunter.fornax.config.FornaxConfig;
+import dev.icehunter.fornax.config.FrameGenMode;
 import dev.icehunter.fornax.metalfx.VulkanMetalInterop.InteropImage;
 import dev.icehunter.fornax.metalfx.objc.Objc;
 import dev.icehunter.fornax.pipeline.FrameClock;
@@ -166,7 +167,7 @@ public final class FrameGenPass {
         }
         try {
             CLOCK.markFrame(System.nanoTime());
-            FrameGenPacer.update(CLOCK.emaIntervalNanos());
+            FrameGenPacer.update(CLOCK.emaIntervalNanos(), mode());
             if (!FrameGenPacer.engaged()) {
                 if (hasHistory) {
                     // True->false transition only (see this method's own header): force a one-frame
@@ -203,9 +204,24 @@ public final class FrameGenPass {
     public static boolean armed() {
         // Config is the primary arming switch (the settings-screen toggle); the JVM property stays
         // live as an OR so a dev override still works without touching fornax.json.
-        return (FornaxConfig.get().frameGeneration || ARM_REQUESTED) && !failed
+        return (FornaxConfig.get().frameGenMode != FrameGenMode.OFF || ARM_REQUESTED) && !failed
                 && FornaxConfig.get().aaMethod == AaMethod.METALFX
                 && MetalFxSupport.isFrameInterpolationAvailable();
+    }
+
+    /**
+     * The pacing policy for this frame, read by {@link #runIfEnabled}. Mirrors {@link #armed()}'s
+     * own OR with {@link #ARM_REQUESTED}: the JVM dev override arms with today's adaptive pacing,
+     * never with {@link FrameGenMode#ALWAYS}: a dev flag silently upgrading to unconditional
+     * double-present would be a surprising behavior change for existing {@code -Dfornax.framegen}
+     * users, not just an arming convenience.
+     */
+    private static FrameGenMode mode() {
+        FrameGenMode configured = FornaxConfig.get().frameGenMode;
+        if (configured != FrameGenMode.OFF) {
+            return configured;
+        }
+        return ARM_REQUESTED ? FrameGenMode.AUTO : FrameGenMode.OFF;
     }
 
     /** True when this frame produced a generated image ready to present. */

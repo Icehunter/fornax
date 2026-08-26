@@ -3,6 +3,7 @@ package dev.icehunter.fornax.screen;
 import dev.icehunter.fornax.config.AaMethod;
 import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.config.FornaxSettings;
+import dev.icehunter.fornax.config.FrameGenMode;
 import dev.icehunter.fornax.config.GBufferDebugView;
 import dev.icehunter.fornax.config.SettingsApplyRouter;
 import dev.icehunter.fornax.config.SettingsApplyRouter.Action;
@@ -130,7 +131,7 @@ public final class FornaxSettingsScreen {
         copy.sidecarMapResolution = source.sidecarMapResolution;
         copy.profilerOverlay = source.profilerOverlay;
         copy.debugView = source.debugView;
-        copy.frameGeneration = source.frameGeneration;
+        copy.frameGenMode = source.frameGenMode;
         copy.metalHud = source.metalHud;
         copy.voxelReachIgnoresRenderDistance = source.voxelReachIgnoresRenderDistance;
         copy.sunPathRotation = source.sunPathRotation;
@@ -209,7 +210,7 @@ public final class FornaxSettingsScreen {
         // aaMethod cycle below (isAvailable()), one level stricter (frame interpolation is a
         // narrower capability than the base upscaler probe): no point offering a toggle that could
         // never arm on this machine.
-        Option<Boolean> frameGeneration = dev.icehunter.fornax.metalfx.MetalFxSupport.isFrameInterpolationAvailable()
+        Option<FrameGenMode> frameGeneration = dev.icehunter.fornax.metalfx.MetalFxSupport.isFrameInterpolationAvailable()
                 ? buildFrameGenerationOption()
                 : null;
         Option<AaMethod> aaMethod = buildAaMethodOption(ssaaPreset, taauRatio, frameGeneration);
@@ -235,7 +236,7 @@ public final class FornaxSettingsScreen {
     }
 
     private static Option<AaMethod> buildAaMethodOption(
-            Option<SsaaPreset> ssaaPreset, Option<TaauRatio> taauRatio, Option<Boolean> frameGeneration) {
+            Option<SsaaPreset> ssaaPreset, Option<TaauRatio> taauRatio, Option<FrameGenMode> frameGeneration) {
         // METALFX appears in the cycle only where the runtime probe passes (macOS/Apple silicon
         // with MetalFX support) -- the SsaaPreset value-exclusion precedent below, applied to a
         // capability instead of a legacy value. A persisted METALFX config on unsupported hardware
@@ -272,19 +273,29 @@ public final class FornaxSettingsScreen {
                 .build();
     }
 
-    private static Option<Boolean> buildFrameGenerationOption() {
-        return Option.<Boolean>createBuilder()
+    private static Option<FrameGenMode> buildFrameGenerationOption() {
+        return Option.<FrameGenMode>createBuilder()
                 .name(Component.translatable("gui.fornax.option.frame_generation"))
                 .description(OptionDescription.of(Component.translatable("gui.fornax.option.frame_generation.tooltip")))
-                .binding(false, () -> FornaxConfig.get().frameGeneration, v -> FornaxConfig.get().frameGeneration = v)
-                .controller(opt -> BooleanControllerBuilder.create(opt).coloured(true).onOffFormatter())
-                // No listener: turning OFF must release interop resources, but that has to happen at
-                // the save-time apply point (SettingsApplyRouter's FRAMEGEN_DEACTIVATE action), not
-                // here -- see SettingsApplyRouter's class header for why a click-time listener can't
-                // do this correctly (YACL applies this option's binding before any listener fires).
-                // Turning ON needs no action anywhere -- FrameGenPass.armed() picks it up and arms
-                // next frame.
+                .binding(FrameGenMode.OFF, () -> FornaxConfig.get().frameGenMode, v -> FornaxConfig.get().frameGenMode = v)
+                .controller(opt -> EnumControllerBuilder.create(opt)
+                        .enumClass(FrameGenMode.class)
+                        .formatValue(FornaxSettingsScreen::frameGenModeLabel))
+                // No listener: transitioning to OFF must release interop resources, but that has to
+                // happen at the save-time apply point (SettingsApplyRouter's FRAMEGEN_DEACTIVATE
+                // action), not here: see SettingsApplyRouter's class header for why a click-time
+                // listener can't do this correctly (YACL applies this option's binding before any
+                // listener fires). Any other transition (including AUTO<->ALWAYS) needs no action
+                // anywhere; FrameGenPass.armed()/mode() pick it up live, next frame.
                 .build();
+    }
+
+    private static Component frameGenModeLabel(FrameGenMode mode) {
+        return switch (mode) {
+            case OFF -> Component.literal("Off");
+            case AUTO -> Component.literal("Auto");
+            case ALWAYS -> Component.literal("Always");
+        };
     }
 
     /** Called ONLY from {@link #applyRoutedChanges}, on {@code SettingsApplyRouter.Action

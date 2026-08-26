@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * Load/save WIRING against a real (temp) file, complementing {@link FornaxSettingsMigrationTest}'s
@@ -81,6 +82,40 @@ class FornaxConfigWiringTest {
         FornaxConfig.load(path);
 
         assertEquals(true, FornaxConfig.get().voxelReachIgnoresRenderDistance);
+    }
+
+    @Test
+    void frameGenModeChoiceFromTheFirstSessionSurvivesASecondLaunch() {
+        // Mirrors metalHudChoiceFromTheFirstSessionSurvivesASecondLaunch exactly, substituting
+        // frameGenMode; ALWAYS specifically, since it's the newly added value.
+        Path path = configDir.resolve("fornax.json");
+        FornaxConfig.install(new FornaxSettings());
+        FornaxConfig.load(path);
+        FornaxConfig.get().frameGenMode = FrameGenMode.ALWAYS;
+        FornaxConfig.save(path);
+
+        FornaxConfig.install(new FornaxSettings());
+        FornaxConfig.load(path);
+
+        assertEquals(FrameGenMode.ALWAYS, FornaxConfig.get().frameGenMode);
+    }
+
+    @Test
+    void legacyFrameGenerationBooleanMigratesThroughTheRealLoadPath() throws IOException {
+        // Real-Gson leg of the frameGeneration -> frameGenMode split: a v3 file's boolean true
+        // migrates to AUTO through the actual load path, and the schema bump's save-on-change
+        // rewrite must drop the dead frameGeneration key from disk.
+        Path path = configDir.resolve("fornax.json");
+        Files.writeString(path, "{\"schemaVersion\": 3, \"frameGeneration\": true}");
+        FornaxConfig.install(new FornaxSettings());
+
+        FornaxConfig.load(path);
+
+        assertEquals(FrameGenMode.AUTO, FornaxConfig.get().frameGenMode);
+        assertEquals(FornaxSettings.CURRENT_SCHEMA_VERSION, FornaxConfig.get().schemaVersion);
+        String onDiskJson = Files.readString(path);
+        assertFalse(onDiskJson.contains("frameGeneration"),
+                "migration must not leave the dead frameGeneration key on disk");
     }
 
     @Test

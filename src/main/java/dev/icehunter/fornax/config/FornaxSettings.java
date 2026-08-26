@@ -104,16 +104,28 @@ public class FornaxSettings {
     /**
      * Experimental MetalFX frame generation: interpolates one frame between real frames. Requires
      * {@link #aaMethod} to be {@code METALFX} and vsync (FIFO present mode); adds ~1 frame of
-     * latency. macOS 26+ Apple Silicon only.
+     * latency. macOS 26+ Apple Silicon only. {@link FrameGenMode#AUTO} paces engagement against
+     * measured fps (see {@code pipeline.FrameGenPacer}); {@link FrameGenMode#ALWAYS} engages
+     * unconditionally. See that enum's own header for why the two are separate policies, not one
+     * tuning curve.
      */
-    public boolean frameGeneration = false;
+    public FrameGenMode frameGenMode = FrameGenMode.OFF;
 
     /**
-     * Apple's Metal Performance HUD overlay ({@code CAMetalLayer.developerHUDProperties}),
-     * macOS-only, live-toggled through {@code metalfx.MetalHudControl} (no restart, no pack
-     * recompile) -- replaces the session-only {@code MTL_HUD_ENABLED} environment variable with a
-     * setting. Independent of {@link #aaMethod}: the HUD renders over whatever the compositor
-     * presents regardless of which AA/upscale path is active.
+     * Migration-only: the pre-v4 boolean this field replaced. Boxed (not primitive) so a legacy
+     * file's {@code true}/{@code false} stays distinguishable from a fresh-or-already-migrated
+     * file's absent key. {@link #migrate} reads this once per file, on the v3-&gt;v4 step, then
+     * nulls it so the dead key stops being written on the next save (this config's {@code Gson}
+     * has no {@code serializeNulls}). Never read outside {@link #migrate}.
+     */
+    public Boolean frameGeneration;
+
+    /**
+     * Apple's Metal Performance HUD overlay, macOS-only. {@code metalfx.FornaxPreLaunch} sets
+     * {@code MTL_HUD_ENABLED} natively before Minecraft's own {@code main()} when this is
+     * persisted true, replacing a manual env-var export. Restart-to-apply in both directions:
+     * MoltenVK's HUD compositor reads the layer's properties once, at setup, and never again.
+     * Only whatever this was set to at boot ever shows. Independent of {@link #aaMethod}.
      */
     public boolean metalHud = false;
 
@@ -146,7 +158,7 @@ public class FornaxSettings {
      * {@link #aaMethod} from {@link #ssaaPreset} -- silently clobbering whatever the user picked in
      * their first session.
      */
-    public static final int CURRENT_SCHEMA_VERSION = 3;
+    public static final int CURRENT_SCHEMA_VERSION = 4;
 
     /**
      * Config-file schema version, bumped by {@link #migrate} the first time a legacy (pre-{@link
@@ -206,6 +218,19 @@ public class FornaxSettings {
         // across diagnostic-view removals before render code calls debugView.shaderId().
         if (settings.debugView == null) {
             settings.debugView = GBufferDebugView.OFF;
+        }
+        if (settings.schemaVersion < 4) {
+            // v3 -> v4: frameGeneration (boolean on/off) split into frameGenMode (OFF/AUTO/ALWAYS).
+            // A user who had it on keeps today's AUTO behaviour, not a silent upgrade to
+            // unconditional engagement. ALWAYS is reachable only by picking it explicitly.
+            settings.frameGenMode = Boolean.TRUE.equals(settings.frameGeneration)
+                    ? FrameGenMode.AUTO : FrameGenMode.OFF;
+            settings.frameGeneration = null;
+        }
+        // Not version-gated, same reasoning as ssaaPreset/debugView above: a removed FrameGenMode
+        // constant maps to null at any persisted version, including one already stamped current.
+        if (settings.frameGenMode == null) {
+            settings.frameGenMode = FrameGenMode.OFF;
         }
         // Same rule for the sidecar resolution, and it needs it MORE than the two above: a config file
         // written by any build before this field existed simply has no key for it, which Gson also

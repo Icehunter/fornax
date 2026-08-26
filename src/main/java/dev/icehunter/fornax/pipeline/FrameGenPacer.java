@@ -1,6 +1,7 @@
 package dev.icehunter.fornax.pipeline;
 
 import dev.icehunter.fornax.FornaxMod;
+import dev.icehunter.fornax.config.FrameGenMode;
 import net.minecraft.client.Minecraft;
 
 /**
@@ -25,6 +26,12 @@ import net.minecraft.client.Minecraft;
  * frame pop-in/out. The band between {@link #ENGAGE_FRACTION} and {@link #DISENGAGE_FRACTION}
  * absorbs that jitter: a scene has to cross meaningfully past the OPPOSITE threshold to flip
  * state, not just twitch around one line.
+ *
+ * <p><b>{@link dev.icehunter.fornax.config.FrameGenMode#ALWAYS} is a separate policy, not a
+ * fourth tuning value</b>: it bypasses {@link #computeEngaged} entirely and forces {@link
+ * #engaged} true every frame. The hysteresis law below governs {@link
+ * dev.icehunter.fornax.config.FrameGenMode#AUTO} only. See that enum's own header for why no
+ * threshold inside the band below could ever produce an always-engaged policy.
  *
  * <p><b>Both thresholds MUST sit strictly below 0.5 -- this is not a free tuning choice</b> (a
  * code-review catch that found the ORIGINAL 0.45/0.55 band, straddling 0.5, self-latches): while
@@ -88,20 +95,27 @@ public final class FrameGenPacer {
 
     /**
      * Recomputes engagement for THIS frame from the render clock's current EMA-smoothed interval
-     * ({@code FrameClock#emaIntervalNanos()}), applying the hysteresis band above, then tallies the
-     * outcome into the per-cadence-window counters {@link #engagedFrameCount()}/
-     * {@link #disengagedFrameCount()}. No-ops (holding whatever state is already set, without
-     * tallying) when the clock has not produced a real interval yet -- {@code emaIntervalNanos <=
-     * 0} means either the very first armed frame ever, or the frame right after a {@code
-     * FrameClock#reset()} (resize, deactivate/re-arm) -- engaging off a meaningless/zero interval
-     * would misfire on exactly the frames this pacer most needs to get right.
+     * ({@code FrameClock#emaIntervalNanos()}), applying the hysteresis band above under {@link
+     * FrameGenMode#AUTO} (or forcing engagement under {@link FrameGenMode#ALWAYS}, see this class's
+     * header), then tallies the outcome into the per-cadence-window counters {@link
+     * #engagedFrameCount()}/{@link #disengagedFrameCount()}. Under {@link FrameGenMode#AUTO},
+     * no-ops (holding whatever state is already set, without tallying) when the clock has not
+     * produced a real interval yet: {@code emaIntervalNanos <= 0} means either the very first
+     * armed frame ever, or the frame right after a {@code FrameClock#reset()} (resize,
+     * deactivate/re-arm). Engaging off a meaningless/zero interval would misfire on exactly the
+     * frames this pacer most needs to get right. {@link FrameGenMode#ALWAYS} has no such warm-up
+     * gate: it forces engagement from the very first call, since it carries no fps-based decision
+     * to warm up in the first place.
      */
-    public static void update(long emaIntervalNanos) {
-        if (emaIntervalNanos <= 0) {
+    public static void update(long emaIntervalNanos, FrameGenMode mode) {
+        if (mode == FrameGenMode.ALWAYS) {
+            engaged = true;
+        } else if (emaIntervalNanos > 0) {
+            double renderFps = 1.0e9 / (double) emaIntervalNanos;
+            engaged = computeEngaged(engaged, renderFps, displayRefreshHz(), mode);
+        } else {
             return;
         }
-        double renderFps = 1.0e9 / (double) emaIntervalNanos;
-        engaged = computeEngaged(engaged, renderFps, displayRefreshHz());
         if (engaged) {
             engagedFrames++;
         } else {
@@ -110,13 +124,18 @@ public final class FrameGenPacer {
     }
 
     /**
-     * Pure hysteresis decision, split out from {@link #update} so the engage/disengage math is
+     * Pure engagement decision, split out from {@link #update} so the engage/disengage math is
      * testable without a live {@code Minecraft}/GLFW window (the only thing {@link #update} adds is
-     * sourcing {@code renderFps}/{@code displayHz} from the real clock and window). Held state
-     * persists between calls: HOLD in the band between the two thresholds, not just at the exact
-     * crossing points.
+     * sourcing {@code renderFps}/{@code displayHz} from the real clock and window). Under {@link
+     * FrameGenMode#ALWAYS}, unconditionally {@code true}. Under {@link FrameGenMode#AUTO}, held
+     * state persists between calls: HOLD in the band between the two thresholds, not just at the
+     * exact crossing points.
      */
-    static boolean computeEngaged(boolean currentlyEngaged, double renderFps, int displayHz) {
+    static boolean computeEngaged(boolean currentlyEngaged, double renderFps, int displayHz,
+            FrameGenMode mode) {
+        if (mode == FrameGenMode.ALWAYS) {
+            return true;
+        }
         if (currentlyEngaged) {
             return !(renderFps > DISENGAGE_FRACTION * displayHz);
         }

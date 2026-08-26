@@ -6,29 +6,25 @@ import net.minecraft.client.Minecraft;
 import org.lwjgl.glfw.GLFWNativeCocoa;
 
 /**
- * Apple's Metal Performance HUD ({@code CAMetalLayer.developerHUDProperties}, public API since
- * macOS 13) exposed as a live Fornax settings toggle in place of the session-only {@code
- * MTL_HUD_ENABLED} environment variable, which must be set before launch. Setting a non-empty
- * properties dictionary on the game window's {@code CAMetalLayer} (MoltenVK's own layer, backing
- * the GLFW-owned {@code NSWindow}'s content view -- the same layer every presented Vulkan frame
- * lands on) turns the overlay on; an empty dictionary turns it back off. Both take effect on the
- * next presented frame -- no relaunch required, unlike the env-var path.
+ * Apple's Metal Performance HUD ({@code CAMetalLayer.developerHUDProperties}, macOS 13+), applied
+ * to the game window's layer in place of manually exporting {@code MTL_HUD_ENABLED} before launch.
  *
- * <p>Called from {@link dev.icehunter.fornax.config.SettingsApplyRouter}'s {@code
- * METAL_HUD_APPLY} action (either direction of the {@code metalHud} setting) and once at {@code
- * CLIENT_STARTED} when the persisted config already has it on -- see {@code FornaxMod}.
+ * <p>Restart-to-apply in both directions under MoltenVK: its HUD compositor reads {@code
+ * developerHUDProperties} once, at layer setup, and never again (confirmed live, including a
+ * forced window resize). {@link #apply} still runs on a live settings save so the saved value is
+ * correct, but only the {@code CLIENT_STARTED} call, when the persisted value is already true at
+ * boot, ever shows the HUD. {@code MTL_HUD_ENABLED} has the same restriction, which is why {@link
+ * MetalHudEnv} sets it natively at preLaunch, once per process.
  *
- * <p>FAIL-CLOSED, EXACTLY LIKE EVERY OTHER {@link Objc} CALLER IN THIS PACKAGE: guarded by {@link
- * Objc#isLoaded()} (implies macOS/aarch64) plus a live {@code respondsToSelector:}/{@code
- * isKindOfClass:} probe of the resolved layer. Any failure anywhere in the chain (no window yet,
- * content view not layer-backed, layer isn't actually a {@code CAMetalLayer}, older macOS without
- * the property) is logged -- never thrown -- into the settings-save or client-start path.
+ * <p>Called from {@code SettingsApplyRouter}'s {@code METAL_HUD_APPLY} action and once at {@code
+ * CLIENT_STARTED} for a persisted-on config; see {@code FornaxMod}.
  *
- * <p>EVERY {@link #apply} call logs an explicit success-or-failure verdict, including a read-back
- * of {@code [layer developerHUDProperties]} immediately after the set call. This is deliberate,
- * not chatty: {@link #apply} runs at most a handful of times per session (once at startup, once
- * per settings-screen toggle -- see the call sites above), so there is no hot-path spam risk, and
- * a silent outcome here would leave "the HUD never shows" impossible to root-cause from outside
+ * <p>Fail-closed like every other {@link Objc} caller: guarded by {@link Objc#isLoaded()} plus a
+ * live {@code respondsToSelector:}/{@code isKindOfClass:} probe of the resolved layer. Every
+ * failure is logged, never thrown.
+ *
+ * <p>{@link #apply} logs a success/failure verdict every call, including a read-back of the
+ * property right after setting it: the only way to root-cause "the HUD never shows" from outside
  * this class.
  */
 public final class MetalHudControl {
@@ -36,19 +32,19 @@ public final class MetalHudControl {
     }
 
     /**
-     * Enables/disables the HUD on the game window's {@code CAMetalLayer}. Safe to call any number
-     * of times, including redundantly with the same value -- each call independently resolves the
-     * layer and sets its properties dictionary fresh.
+     * Sets the HUD on/off on the game window's {@code CAMetalLayer}. Safe to call repeatedly, even
+     * with the same value. Per this class's header: only a call from {@code CLIENT_STARTED} is ever
+     * visible under MoltenVK; a live-save call still succeeds and logs, but has no effect until
+     * restart.
      *
-     * <p>ONE autorelease pool brackets the WHOLE operation -- layer resolution, dictionary
-     * construction, AND the {@code setDeveloperHUDProperties:} call -- popped only in the
-     * {@code finally} after the setter has run. This is load-bearing, not defensive style: {@code
-     * dictionaryWithObject:forKey:} (and the {@code NSString} pieces that build it) hand back
-     * AUTORELEASED objects, and Java evaluates a method's return expression before its {@code
-     * finally} block runs, so popping the pool any earlier would free the autoreleased dictionary
-     * before {@code setDeveloperHUDProperties:} sees it -- a SIGSEGV on the enable path. The
-     * disable path is unaffected because {@code [NSDictionary dictionary]} returns Apple's
-     * immortal empty singleton, not a fresh autoreleased object.
+     * <p>Mutates a copy of the layer's CURRENT {@code developerHUDProperties} rather than replacing
+     * it, matching Apple's sample code for this API: the setter appears to key off the dictionary
+     * object it already tracks, so replacing it wholesale left a later disable call removing a key
+     * from an object that never had it.
+     *
+     * <p>One autorelease pool brackets the whole call, popped in {@code finally} after the setter
+     * runs. {@link #currentPropertiesMutableCopy} returns a RETAINED object; this method releases
+     * it once the setter has consumed it.
      */
     public static void apply(boolean enabled) {
         if (!Objc.isLoaded()) {
@@ -58,27 +54,35 @@ public final class MetalHudControl {
         try {
             long layer = resolveMetalLayer();
             if (layer == 0) {
-                logFailure("could not resolve the window's CAMetalLayer -- no-op");
+                logFailure("could not resolve the window's CAMetalLayer, no-op");
                 return;
             }
             long responds = Objc.selector("respondsToSelector:");
             long setProperties = Objc.selector("setDeveloperHUDProperties:");
             if (!Objc.msgSendBool(layer, responds, setProperties)) {
-                logFailure("CAMetalLayer has no setDeveloperHUDProperties: (macOS < 13?) -- no-op");
+                logFailure("CAMetalLayer has no setDeveloperHUDProperties: (macOS < 13?), no-op");
                 return;
             }
-            long properties = enabled ? enabledProperties() : emptyDictionary();
+            long properties = currentPropertiesMutableCopy(layer);
             if (properties == 0) {
-                // Never fall through and send nil here: on the enable path that would silently do
-                // the SAME thing as disabling, with nothing anywhere to tell the two apart.
-                logFailure("could not build the HUD " + (enabled ? "on" : "off")
-                        + " properties dictionary (NSDictionary unavailable) -- not touching the HUD");
+                logFailure("could not build a mutable HUD properties dictionary, not touching the HUD");
                 return;
             }
-            Objc.msgSendVoid(layer, setProperties, properties);
-            long readBack = Objc.msgSendId(layer, Objc.selector("developerHUDProperties"));
-            logSuccess("set developerHUDProperties(enabled=" + enabled + "), read back "
-                    + describe(readBack));
+            try {
+                long modeKey = Objc.nsString("mode");
+                if (enabled) {
+                    Objc.msgSendVoid(properties, Objc.selector("setObject:forKey:"),
+                            Objc.nsString("default"), modeKey);
+                } else {
+                    Objc.msgSendVoid(properties, Objc.selector("removeObjectForKey:"), modeKey);
+                }
+                Objc.msgSendVoid(layer, setProperties, properties);
+                long readBack = Objc.msgSendId(layer, Objc.selector("developerHUDProperties"));
+                logSuccess("set developerHUDProperties(enabled=" + enabled + "), read back "
+                        + describe(readBack));
+            } finally {
+                Objc.msgSendVoid(properties, Objc.selector("release"));
+            }
         } catch (RuntimeException e) {
             logFailure("failed: " + e);
         } finally {
@@ -116,27 +120,25 @@ public final class MetalHudControl {
         return isMetalLayer ? layer : 0;
     }
 
-    /** {@code {"mode": "default"}} -- Apple's documented minimal HUD-on properties dictionary.
-     * Returns an AUTORELEASED object; the caller ({@link #apply}) must not pop its pool until AFTER
-     * handing this to {@code setDeveloperHUDProperties:} -- see {@link #apply}'s own doc comment. */
-    private static long enabledProperties() {
-        long key = Objc.nsString("mode");
-        long value = Objc.nsString("default");
-        long dictionaryClass = Objc.getClass("NSDictionary");
-        if (dictionaryClass == 0) {
+    /**
+     * A RETAINED mutable copy of {@code [layer developerHUDProperties]} (never nil: an absent
+     * property starts a fresh, retained empty dictionary instead), so {@link #apply} can remove
+     * just the {@code mode} key rather than replace the whole object. Returns 0 on failure.
+     */
+    private static long currentPropertiesMutableCopy(long layer) {
+        long current = Objc.msgSendId(layer, Objc.selector("developerHUDProperties"));
+        if (current != 0) {
+            return Objc.msgSendId(current, Objc.selector("mutableCopy"));
+        }
+        long mutableDictionaryClass = Objc.getClass("NSMutableDictionary");
+        if (mutableDictionaryClass == 0) {
             return 0;
         }
-        return Objc.msgSendId(
-                dictionaryClass, Objc.selector("dictionaryWithObject:forKey:"), value, key);
-    }
-
-    /** {@code [NSDictionary dictionary]} -- the documented HUD-off value (an empty dictionary). */
-    private static long emptyDictionary() {
-        long dictionaryClass = Objc.getClass("NSDictionary");
-        if (dictionaryClass == 0) {
+        long fresh = Objc.msgSendId(mutableDictionaryClass, Objc.selector("dictionary"));
+        if (fresh == 0) {
             return 0;
         }
-        return Objc.msgSendId(dictionaryClass, Objc.selector("dictionary"));
+        return Objc.msgSendId(fresh, Objc.selector("retain"));
     }
 
     /** {@code [nsObject description]} as a Java string, or the literal {@code "nil"} for a null

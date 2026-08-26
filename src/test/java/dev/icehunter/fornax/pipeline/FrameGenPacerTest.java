@@ -1,5 +1,6 @@
 package dev.icehunter.fornax.pipeline;
 
+import dev.icehunter.fornax.config.FrameGenMode;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -36,20 +37,20 @@ class FrameGenPacerTest {
     @Test
     void engagesWhenRenderFpsDropsBelowEngageThreshold() {
         // 40fps is below the 48fps engage threshold.
-        assertTrue(FrameGenPacer.computeEngaged(false, 40.0, DISPLAY_HZ));
+        assertTrue(FrameGenPacer.computeEngaged(false, 40.0, DISPLAY_HZ, FrameGenMode.AUTO));
     }
 
     @Test
     void staysDisengagedAboveEngageThreshold() {
         // 90fps (the live-measured repro case, 0.75x@120Hz) is well above the 48fps threshold.
-        assertFalse(FrameGenPacer.computeEngaged(false, 90.0, DISPLAY_HZ));
+        assertFalse(FrameGenPacer.computeEngaged(false, 90.0, DISPLAY_HZ, FrameGenMode.AUTO));
     }
 
     @Test
     void staysEngagedJustBelowDisengageThreshold() {
         // 57fps is just under the 57.6fps disengage threshold and still under the ~60fps
         // (0.5x) ceiling engaged render fps can actually reach -- a live, reachable case.
-        assertTrue(FrameGenPacer.computeEngaged(true, 57.0, DISPLAY_HZ));
+        assertTrue(FrameGenPacer.computeEngaged(true, 57.0, DISPLAY_HZ, FrameGenMode.AUTO));
     }
 
     @Test
@@ -60,7 +61,7 @@ class FrameGenPacerTest {
         // since it is close to the highest fps it will ever observe in that state. 60 > 57.6
         // (DISENGAGE_FRACTION * 120), so this must disengage. Under the OLD 0.45/0.55 band this
         // assertion would have failed (60 < 66), which was exactly the latch bug.
-        assertFalse(FrameGenPacer.computeEngaged(true, 60.0, DISPLAY_HZ));
+        assertFalse(FrameGenPacer.computeEngaged(true, 60.0, DISPLAY_HZ, FrameGenMode.AUTO));
     }
 
     @Test
@@ -68,16 +69,39 @@ class FrameGenPacerTest {
         // 52fps sits inside (48, 57.6) and under the ~60fps engaged-state ceiling -- a live,
         // reachable point where hysteresis, not the nearer threshold, must decide the outcome.
         double fpsInBand = 52.0;
-        assertTrue(FrameGenPacer.computeEngaged(true, fpsInBand, DISPLAY_HZ),
+        assertTrue(FrameGenPacer.computeEngaged(true, fpsInBand, DISPLAY_HZ, FrameGenMode.AUTO),
                 "engaged state must hold inside the band");
-        assertFalse(FrameGenPacer.computeEngaged(false, fpsInBand, DISPLAY_HZ),
+        assertFalse(FrameGenPacer.computeEngaged(false, fpsInBand, DISPLAY_HZ, FrameGenMode.AUTO),
                 "disengaged state must hold inside the band");
+    }
+
+    @Test
+    void alwaysModeEngagesFromDisengagedRegardlessOfRenderFps() {
+        // 90fps at 120Hz is well above every AUTO threshold and would stay disengaged under
+        // AUTO (see staysDisengagedAboveEngageThreshold); ALWAYS must engage anyway.
+        assertTrue(FrameGenPacer.computeEngaged(false, 90.0, DISPLAY_HZ, FrameGenMode.ALWAYS));
+    }
+
+    @Test
+    void alwaysModeNeverDisengages() {
+        // 90fps at 120Hz is above the engaged-state ceiling AUTO could ever observe, and above
+        // DISENGAGE_FRACTION*displayHz; AUTO would disengage here. ALWAYS must not.
+        assertTrue(FrameGenPacer.computeEngaged(true, 90.0, DISPLAY_HZ, FrameGenMode.ALWAYS));
+    }
+
+    @Test
+    void alwaysModeIgnoresTheHysteresisBand() {
+        // 52fps sits inside AUTO's hysteresis band, where AUTO's outcome depends on the prior
+        // state (see holdsEngagedStateInsideHysteresisBand). ALWAYS must engage either way.
+        double fpsInBand = 52.0;
+        assertTrue(FrameGenPacer.computeEngaged(true, fpsInBand, DISPLAY_HZ, FrameGenMode.ALWAYS));
+        assertTrue(FrameGenPacer.computeEngaged(false, fpsInBand, DISPLAY_HZ, FrameGenMode.ALWAYS));
     }
 
     @Test
     void engageThresholdBoundaryDoesNotEngage() {
         // Strict inequality: exactly AT the engage threshold (48.0fps) must not itself engage.
-        assertFalse(FrameGenPacer.computeEngaged(false, ENGAGE_THRESHOLD_FPS, DISPLAY_HZ));
+        assertFalse(FrameGenPacer.computeEngaged(false, ENGAGE_THRESHOLD_FPS, DISPLAY_HZ, FrameGenMode.AUTO));
     }
 
     @Test
@@ -85,7 +109,7 @@ class FrameGenPacerTest {
         // Strict inequality: exactly AT the disengage threshold (57.6fps) must not itself
         // disengage -- and 57.6fps is still under the ~60fps engaged-state ceiling, so this is a
         // point live code can actually land on.
-        assertTrue(FrameGenPacer.computeEngaged(true, DISENGAGE_THRESHOLD_FPS, DISPLAY_HZ));
+        assertTrue(FrameGenPacer.computeEngaged(true, DISENGAGE_THRESHOLD_FPS, DISPLAY_HZ, FrameGenMode.AUTO));
     }
 
     @Test

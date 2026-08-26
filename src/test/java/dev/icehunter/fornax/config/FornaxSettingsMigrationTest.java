@@ -4,6 +4,7 @@ import dev.icehunter.fornax.pass.ssaa.SsaaPreset;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
  * {@link FornaxSettings#migrate} is the pure logic {@code FornaxConfig.load()} runs right after
@@ -116,6 +117,48 @@ class FornaxSettingsMigrationTest {
     }
 
     @Test
+    void legacyFrameGenerationTrueMigratesToAuto() {
+        // A v3 file that had the boolean on keeps today's AUTO behaviour, not a silent upgrade to
+        // unconditional (ALWAYS) engagement; ALWAYS is reachable only by picking it explicitly.
+        FornaxSettings v3 = new FornaxSettings();
+        v3.schemaVersion = 3;
+        v3.frameGeneration = true;
+
+        FornaxSettings migrated = FornaxSettings.migrate(v3);
+
+        assertEquals(FrameGenMode.AUTO, migrated.frameGenMode);
+        assertNull(migrated.frameGeneration);
+        assertEquals(FornaxSettings.CURRENT_SCHEMA_VERSION, migrated.schemaVersion);
+    }
+
+    @Test
+    void legacyFrameGenerationFalseMigratesToOff() {
+        FornaxSettings v3 = new FornaxSettings();
+        v3.schemaVersion = 3;
+        v3.frameGeneration = false;
+
+        FornaxSettings migrated = FornaxSettings.migrate(v3);
+
+        assertEquals(FrameGenMode.OFF, migrated.frameGenMode);
+        assertNull(migrated.frameGeneration);
+        assertEquals(FornaxSettings.CURRENT_SCHEMA_VERSION, migrated.schemaVersion);
+    }
+
+    @Test
+    void absentFrameGenModeMigratesToOff() {
+        // A removed FrameGenMode constant (or a schema-4+ file predating a future addition to the
+        // enum) deserializes to null; normalize it the same way ssaaPreset/debugView do, not
+        // version-gated (see removedDebugViewMigratesToOff, the model for this case).
+        FornaxSettings current = new FornaxSettings();
+        current.schemaVersion = FornaxSettings.CURRENT_SCHEMA_VERSION;
+        current.frameGenMode = null;
+
+        FornaxSettings migrated = FornaxSettings.migrate(current);
+
+        assertEquals(FrameGenMode.OFF, migrated.frameGenMode);
+    }
+
+    @Test
     void alreadyMigratedSettingsAreUnchanged() {
         FornaxSettings current = new FornaxSettings();
         current.schemaVersion = FornaxSettings.CURRENT_SCHEMA_VERSION;
@@ -132,12 +175,14 @@ class FornaxSettingsMigrationTest {
         FornaxSettings legacy = new FornaxSettings();
         legacy.schemaVersion = 0;
         legacy.ssaaPreset = SsaaPreset.X4;
+        legacy.frameGeneration = true;
 
         FornaxSettings once = FornaxSettings.migrate(legacy);
         FornaxSettings twice = FornaxSettings.migrate(once);
 
         assertEquals(AaMethod.SSAA, twice.aaMethod);
         assertEquals(SsaaPreset.X4, twice.ssaaPreset);
+        assertEquals(FrameGenMode.AUTO, twice.frameGenMode);
         assertEquals(FornaxSettings.CURRENT_SCHEMA_VERSION, twice.schemaVersion);
     }
 }
