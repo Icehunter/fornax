@@ -103,13 +103,10 @@ public final class PackReload {
             var sourcesVisible = GraphRunner.rebuild(model, shaderSources,
                     PackSettingsSupport.compileIntMap(model, values),
                     PackSettingsSupport.runtimeFloatMap(model, values));
-            // LIVE-CAUGHT (2026-07-14, the stale-terrain incident): this path used to skip the
-            // renderer reload on the doc'd theory that engine defines only change GRAPH shader
-            // text -- but a pack reapply also re-publishes the pack's TERRAIN shader sources, and
-            // Sodium's terrain pipelines only recompile on a renderer resync. Without this chain,
-            // every terrain.fsh edit stayed invisible until a full relaunch (three water fix
-            // rounds shipped blind before this was caught). Same latch-law idiom as PackSwitch:
-            // chained on the resource future, never requested directly.
+            // A pack reapply republishes the pack's terrain shader sources, not just the pack
+            // graph, and Sodium's terrain pipelines only recompile on a renderer resync. Chained
+            // on the resource future, never requested directly -- same latch-law idiom as
+            // PackSwitch.
             //
             // The timing log here spans vanilla's FULL Minecraft.reloadResourcePacks() (every mod's
             // resources, not just this pack's) plus every reload listener it drives, including the
@@ -121,7 +118,12 @@ public final class PackReload {
                                 + "atlas builds) in {} ms",
                         (System.nanoTime() - rebuildStart) / 1_000_000L);
                 RendererReload.request();
-            }, Minecraft.getInstance());
+            }, Minecraft.getInstance()).exceptionally(t -> {
+                // Matches PackSwitch.apply and PackEditSession.apply's identical chains.
+                FornaxMod.LOGGER.error(
+                        "[Fornax] Resource reload failed after pack reload; renderer reload skipped", t);
+                return null;
+            });
             FornaxMod.LOGGER.info("[Fornax] Loaded active pack '{}' ({} targets, {} passes)", picked.name(),
                     model.graph().targets().size(), model.graph().passes().size());
         } catch (FornaxPackError e) {

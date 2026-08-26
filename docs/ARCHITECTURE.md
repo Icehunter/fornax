@@ -1935,3 +1935,8 @@ else entirely.
   target via `copyTextureToTexture`, which executes at transfer stage, not fragment). A reader type
   with no branch contributes 0, which skips both the semaphore signal and the wait entirely — not a
   conservative default, an absent one.
+- **Every async resource-reload chain that ends in `RendererReload.request()` carries an
+  `.exceptionally` handler.** `PackSwitch.apply`, `PackEditSession.apply` and `PackReload.reload`
+  all chain the same `Minecraft.reloadResourcePacks()`-derived future; a listener throwing partway
+  through it must not silently skip the terrain resync. Missing on one of the three re-hides the
+  stale-terrain incident this section already records elsewhere for the general case.
