@@ -885,16 +885,19 @@ same byte order, low byte first. This is a plain convention, not something the t
 
 ## 8. Mixin inventory
 
-All 49 mixins are `required: true`; a mixin listed in the mixin config that fails to apply is a hard
+All 76 mixins are `required: true`; a mixin listed in the mixin config that fails to apply is a hard
 load error, but a mixin not listed at all is never applied, with no warning of any kind. There is
 nothing to distinguish "intentionally removed" from "accidentally dropped from the list" except
 checking the list itself.
 
-Only one of the 49 is a full-method `@Overwrite` (the highest-risk mixin shape, since it silently
-stops tracking whatever the original method does beyond what was true at the time it was written);
-every other mixin is additive, injecting, redirecting, wrapping, or modifying against a specific
-instruction or call, changing only what needs to change and leaving the rest of the original method
-to evolve upstream without needing to be restated here.
+Seven of the 76 are full-method `@Overwrite`s (the highest-risk mixin shape, since it silently
+stops tracking whatever the original method does beyond what was true at the time it was written):
+`CompactChunkVertexMixin`, `DefaultChunkRendererRenderPassMixin`,
+`ShaderChunkRendererDeferredPipelineMixin`, `DrawContextVKMixin`, `DrawContextGLMixin`, and
+`UniformBufferManagerMixin` (one file carries two). Every other mixin is additive, injecting,
+redirecting, wrapping, or modifying against a specific instruction or call, changing only what
+needs to change and leaving the rest of the original method to evolve upstream without needing to
+be restated here.
 
 **Sodium-targeting** (23):
 
@@ -946,7 +949,6 @@ to evolve upstream without needing to be restated here.
 | `TextureAtlasCelestialHookMixin` | `TextureAtlas` | Capture the celestials atlas (sun + all 8 moon-phase sprite UV rects) into `CelestialSprites` whenever it is (re)uploaded | Inject |
 | `TextureAtlasBlockHookMixin` | `TextureAtlas` | Capture the live block atlas texture/view used by voxel cutout-occlusion and analytic-light passes | Inject |
 | `TextureAtlasMaterialHookMixin` | `TextureAtlas` | Rebuild the material-map atlas whenever the block atlas is (re)uploaded | Inject |
-| `TextureAtlasNormalHookMixin` | `TextureAtlas` | Rebuild the normal-map atlas whenever the block atlas is (re)uploaded | Inject |
 | `TextureAtlasReleaseGenerationMixin` | `TextureAtlas` | At `upload` HEAD, select a rebuild scope and hand it to `AtlasGenerationSchedule`: changed block = sidecars + overflow/grid, unchanged block = retain sidecars but retire overflow/grid, changed non-block mirrored atlas = sidecars only, unchanged non-block = no-op. Released resources rebuild only after three render-loop-separated polls | Inject (HEAD) |
 | `VulkanRenderPipelineMixin` | `VulkanRenderPipeline` | Declare the widened 60-byte push-constant range on every terrain-family Vulkan pipeline layout | WrapOperation |
 | `WindowMixin` | `Window` | Report the supersampled dimensions while a scaled frame is in flight, so downstream size queries stay consistent | ModifyReturnValue x2 |
@@ -1743,14 +1745,14 @@ save cycle before the router ever runs.
 
 ## 11. Debug views
 
-Eleven values, ordinal 0 through 10: off, normals, albedo, the raw material/specular channel, motion
-vectors, ambient occlusion (raw and blended/SSAO), the TAA history buffer, block-light emission, the
-raw screen-space-reflection buffer, and the resolved material-category ID (hashed to a distinct
-colour per category, uncategorized shown as black). Selection rides the same generic per-pass-params
-mechanism every fullscreen pass uses (see §6); the resolve pass alone receives the current
-debug-view ordinal as one of its two generic per-pass scalars, decoded shader-side into an integer
-branch. There is no dedicated debug-view uniform; it is one value of a mechanism built for something
-else entirely.
+`GBufferDebugView` has grown well past a small fixed list as new passes gained their own diagnostic
+view (52 constants as of this writing, off plus everything from raw G-buffer channels through the
+tonemap/bloom/exposure terminal-pass branches and a 9-view env-specular series). Treat
+`GBufferDebugView.java` itself as the list; its own doc comment explains which ordinals are resolve
+branches versus terminal-pass branches. Selection rides the same generic per-pass-params mechanism
+every fullscreen pass uses (see §6); the resolve pass alone receives the current debug-view ordinal
+as one of its two generic per-pass scalars, decoded shader-side into an integer branch. There is no
+dedicated debug-view uniform; it is one value of a mechanism built for something else entirely.
 
 ## 12. Known laws
 

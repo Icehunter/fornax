@@ -4,7 +4,7 @@ paths: "src/test/**/*.java"
 
 # Testing Standards
 
-185 test classes under `src/test/java` (plus 3 shared support classes: `PackFixtures`,
+219 test classes under `src/test/java` (plus 3 shared support classes: `PackFixtures`,
 `GraphValidatorTestSupport`, `PbrSettingsBlockParser`), mirroring the main package tree. The suite is
 **contract-heavy** on purpose: most of this engine's failure modes are silent, so the tests pin
 names, byte sizes, layouts and gate expressions rather than exercising a GPU.

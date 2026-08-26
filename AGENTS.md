@@ -48,7 +48,7 @@ See `.claude/rules/clean-room.md` for the working protocol.
    split reader and writer contexts before a single line is written (see
    `.claude/rules/clean-room.md`).
 2. **Write the pinning test.** A pinning test locks today's behaviour in place, so a suite that
-   changes it gets caught. This suite already has 185 such classes, pinning names, layouts, byte
+   changes it gets caught. This suite already has 219 such classes, pinning names, layouts, byte
    sizes and gate expressions on purpose. Do not treat a behaviour change as finished until a test
    for it fails before the change and passes after.
 3. **Implement the smallest correct change**: mechanism, not policy (see Core Principles).
@@ -71,8 +71,9 @@ See `.claude/rules/clean-room.md` for the working protocol.
 `FORNAX_LINK_PACK=/path/to/pack ./scripts/deploy.sh` additionally symlinks a pack checkout into the
 profile's `shaderpacks/` so pack edits are live without a copy step.
 
-There is no linter, formatter or CI (continuous integration: automated checks that run on every
-change) configured in this repo. `./gradlew clean test` is the gate.
+There is no linter or formatter configured in this repo. `.github/workflows/ci.yml` runs
+`./gradlew clean test` twice on every push and PR, and `release.yml` gates a tag on `mod_version`
+matching. Locally, `./gradlew clean test` is still the gate to run yourself before pushing.
 
 **Never launch Minecraft.** Do not run `./gradlew runClient` and do not start the game through a
 launcher. Live verification comes from the user's own play sessions; the resulting game logs land
@@ -177,7 +178,7 @@ fornax/
 │   ├── fabric.mod.json         # Entrypoints, hard deps
 │   ├── fornax.mixins.json      # EVERY mixin must be listed here
 │   └── assets/fornax/          # Engine-owned shaders (blocks/, post/, include/), shaders_engine/
-├── src/test/java/...           # 185 test classes + 3 shared support classes, mirroring main
+├── src/test/java/...           # 219 test classes + shared support classes, mirroring main
 ├── src/test/resources/packs/   # Pack fixtures: sample_pack + deliberately broken packs
 ├── docs/ARCHITECTURE.md        # Current-code reference; update in the same commit
 ├── THIRD-PARTY-NOTICES.md      # Every dependency bundled in the jar (+ licenses/)
