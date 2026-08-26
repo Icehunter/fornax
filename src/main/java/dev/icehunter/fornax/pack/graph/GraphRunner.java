@@ -63,6 +63,7 @@ import dev.icehunter.fornax.pipeline.SkyProbe;
 import dev.icehunter.fornax.pipeline.SkyReprojection;
 import dev.icehunter.fornax.profile.FrameProfiler;
 import dev.icehunter.fornax.profile.PassTimer;
+import dev.icehunter.fornax.util.GpuFatalErrors;
 import dev.icehunter.fornax.util.SunDirection;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
 import net.caffeinemc.mods.sodium.client.render.viewport.CameraTransform;
@@ -1218,6 +1219,12 @@ public final class GraphRunner {
                         try {
                             runner.run(r, mipchainTargets);
                         } catch (RuntimeException e) {
+                            // A dead device rethrows here rather than joining the ordinary
+                            // per-pass degrade path: this loop would otherwise keep submitting
+                            // every remaining pass to a device that already reported it is gone,
+                            // and logPassRunFailureOnce's once-per-pass-name gate would hide every
+                            // recurrence after the first.
+                            GpuFatalErrors.rethrowIfFatal(e);
                             logPassRunFailureOnce(p.name(), e);
                         }
                     } else {
@@ -1228,6 +1235,7 @@ public final class GraphRunner {
                     try {
                         CopyRunner.run(p, r);
                     } catch (RuntimeException e) {
+                        GpuFatalErrors.rethrowIfFatal(e);
                         logPassRunFailureOnce(p.name(), e);
                     }
                 }

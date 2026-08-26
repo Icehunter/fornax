@@ -11,6 +11,7 @@ import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.metalfx.objc.Objc;
 import dev.icehunter.fornax.mixin.vulkan.GpuDeviceBackendAccessor;
+import dev.icehunter.fornax.util.GpuFatalException;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.util.vma.Vma;
@@ -251,7 +252,7 @@ public final class VulkanMetalInterop {
             int result = VK13.vkWaitSemaphores(
                     device.vkDevice(), waitInfo, FENCE_TIMEOUT_NANOS);
             if (result != VK13.VK_SUCCESS) {
-                throw new IllegalStateException(
+                throw new GpuFatalException(
                         "interop timeline wait failed at " + value + ": " + result);
             }
         }
@@ -271,7 +272,7 @@ public final class VulkanMetalInterop {
         recorder.record(cmd);
         int result = VK13.vkEndCommandBuffer(cmd);
         if (result != VK13.VK_SUCCESS) {
-            throw new IllegalStateException("vkEndCommandBuffer failed: " + result);
+            throw new GpuFatalException("vkEndCommandBuffer failed: " + result);
         }
         encoder.execute(cmd);
     }
@@ -285,13 +286,13 @@ public final class VulkanMetalInterop {
         recorder.record(cmd);
         int result = VK13.vkEndCommandBuffer(cmd);
         if (result != VK13.VK_SUCCESS) {
-            throw new IllegalStateException("vkEndCommandBuffer failed: " + result);
+            throw new GpuFatalException("vkEndCommandBuffer failed: " + result);
         }
         encoder.execute(cmd);
         try (GpuFence fence = encoder.createFence()) {
             encoder.submit();
             if (!fence.awaitCompletion(FENCE_TIMEOUT_NANOS)) {
-                throw new IllegalStateException("interop fence timeout (" + FENCE_TIMEOUT_NANOS + "ns)");
+                throw new GpuFatalException("interop fence timeout (" + FENCE_TIMEOUT_NANOS + "ns)");
             }
         }
     }
@@ -519,7 +520,7 @@ public final class VulkanMetalInterop {
             long cb = Objc.msgSendId(metalCommandQueue(), Objc.selector("commandBuffer"));
             long blit = Objc.msgSendId(cb, Objc.selector("blitCommandEncoder"));
             if (cb == 0 || blit == 0) {
-                throw new IllegalStateException("Metal command buffer/blit encoder nil");
+                throw new GpuFatalException("Metal command buffer/blit encoder nil");
             }
             Objc.msgSendVoid(blit, Objc.selector("copyFromTexture:toTexture:"),
                     imageA.mtlTexture, imageB.mtlTexture);

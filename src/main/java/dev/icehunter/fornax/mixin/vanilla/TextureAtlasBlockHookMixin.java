@@ -1,5 +1,6 @@
 package dev.icehunter.fornax.mixin.vanilla;
 
+import dev.icehunter.fornax.atlas.AtlasGenerationSchedule;
 import dev.icehunter.fornax.atlas.BlockAtlasOverflow;
 import dev.icehunter.fornax.atlas.BlockAtlasPagedLayout;
 import dev.icehunter.fornax.atlas.BlockAtlasView;
@@ -46,6 +47,13 @@ public class TextureAtlasBlockHookMixin {
         // upload RETURN the stitch takeover (if any) has published its layout and every sprite's
         // mip chain exists (readyForUpload completed before upload). Null layout = unpaged
         // generation -> clears any previous generation's layers.
-        BlockAtlasOverflow.rebuild(BlockAtlasPagedLayout.current());
+        //
+        // Skipped when TextureAtlasReleaseGenerationMixin's HEAD hook already released this
+        // generation and scheduled a deferred rebuild -- see that mixin's and
+        // AtlasGenerationSchedule's own docs. Rebuilding here too would allocate the new overflow
+        // array in the same call as the release, defeating the whole point of deferring it.
+        if (!AtlasGenerationSchedule.hasPending(this.location)) {
+            BlockAtlasOverflow.rebuild(BlockAtlasPagedLayout.current());
+        }
     }
 }

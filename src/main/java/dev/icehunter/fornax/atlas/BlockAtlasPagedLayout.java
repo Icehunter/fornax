@@ -26,9 +26,15 @@ import java.util.List;
  *                          BlockAtlasGhostLayout#MAX_OVERFLOW_PAGES})
  * @param ghosts            every spilled sprite, carrying its overflow page and page-local
  *                          placement
+ * @param gridSize          the {@code SpriteBoundsTexture} resolution this takeover's placement
+ *                          pitch needs (see {@code SpriteBoundsTexture#SIZE_LADDER}), decided on
+ *                          the stitch worker thread but only ever APPLIED on the render thread (by
+ *                          {@code BlockAtlasOverflow#rebuild}) -- {@code SpriteBoundsTexture
+ *                          #useGridSize} closes a live GPU texture, and the stitch takeover runs
+ *                          off the render thread, so the decision and the GPU call must stay split
  */
 public record BlockAtlasPagedLayout(int canvasSize, int mipLevel, int overflowPageCount,
-                                    List<BlockAtlasGhostSprite> ghosts) {
+                                    List<BlockAtlasGhostSprite> ghosts, int gridSize) {
     public BlockAtlasPagedLayout {
         ghosts = List.copyOf(ghosts);
     }

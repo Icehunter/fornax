@@ -93,12 +93,14 @@ public class SpriteLoaderPagedStitchMixin {
                 FornaxMod.LOGGER.info(
                         "[Fornax] Paged block atlas: {} sprite(s) fit one page, vanilla stitch proceeds",
                         contents.size());
-                BlockAtlasPagedLayout.clear();
-                // Back to the cheap grid. A previous pack may have escalated it, and without this
+                // Back to the cheap grid: a previous pack may have escalated it, and without this
                 // the biggest pack of the session would keep its 512 MB grid allocated for every
-                // pack loaded after it.
-                dev.icehunter.fornax.pipeline.SpriteBoundsTexture.useGridSize(
-                        dev.icehunter.fornax.pipeline.SpriteBoundsTexture.DEFAULT_SIZE);
+                // pack loaded after it. NOT applied here -- this hook runs on the stitch's
+                // background executor, not the render thread, and SpriteBoundsTexture.useGridSize
+                // closes a live GPU texture. BlockAtlasOverflow.rebuild(null), called from the
+                // render-thread RETURN hook once BlockAtlasPagedLayout.current() reads null below,
+                // is what actually resets the grid.
+                BlockAtlasPagedLayout.clear();
                 return;
             } catch (BlockAtlasPaging.PagingException overflowsOnePage) {
                 // The pack genuinely needs paging -- the takeover below is the only path that can

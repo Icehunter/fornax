@@ -11,6 +11,7 @@ import dev.icehunter.fornax.metalfx.VulkanMetalInterop.InteropImage;
 import dev.icehunter.fornax.metalfx.objc.Objc;
 import dev.icehunter.fornax.pipeline.FrameClock;
 import dev.icehunter.fornax.pipeline.FrameGenPacer;
+import dev.icehunter.fornax.util.GpuFatalErrors;
 import org.joml.Vector2f;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK13;
@@ -187,6 +188,12 @@ public final class FrameGenPass {
                 copyGeneratedInto(nativeDest);
             }
         } catch (Throwable t) {
+            // Fatal rethrows: run() records and submits real GPU work (the Vulkan copy-in plus the
+            // Metal interpolator encode), so a GpuDeviceLossException or one of VulkanMetalInterop's
+            // own GpuFatalExceptions here means the device is already gone. Swallowing it into the
+            // same soft failed=true fallback as an ordinary bug hands the very next unrelated
+            // submit() that same dead device.
+            GpuFatalErrors.rethrowIfFatal(t);
             markFailed("runIfEnabled", t);
         }
     }
@@ -251,6 +258,9 @@ public final class FrameGenPass {
             lastVulkanSignal = signalV;
             return true;
         } catch (Throwable t) {
+            // Fatal rethrows -- same reasoning as runIfEnabled's own catch: this records and
+            // submits real GPU work too.
+            GpuFatalErrors.rethrowIfFatal(t);
             markFailed("copyGeneratedInto", t);
             return false;
         }
@@ -283,6 +293,11 @@ public final class FrameGenPass {
             try {
                 VulkanMetalInterop.waitTimeline(device, timeline, lastVulkanSignal);
             } catch (Throwable t) {
+                // Fatal rethrows: this method's own doc explains the wait exists specifically to
+                // stop deactivate() from freeing the interpolator/images while GPU work still
+                // reads them. Downgrading a failed wait to a warning and proceeding to free them
+                // anyway is exactly the use-after-free this method exists to prevent.
+                GpuFatalErrors.rethrowIfFatal(t);
                 FornaxMod.LOGGER.warn("[Fornax] frame generation cross-teardown wait failed", t);
             }
         }

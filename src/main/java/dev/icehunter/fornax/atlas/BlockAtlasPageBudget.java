@@ -55,8 +55,11 @@ public final class BlockAtlasPageBudget {
     /**
      * The most pages {@code availableVramBytes} can hold at {@code pageWidth}x{@code pageHeight},
      * after reserving {@code (1 - budgetFraction)} of it for everything else the engine and game
-     * already keep resident. Never returns less than 1 (a device that cannot afford even one page
-     * is a later phase's degrade-or-refuse decision, not this method's), and never more than
+     * already keep resident. Honestly returns 0 when the budget cannot afford even one overflow
+     * page -- it used to floor at 1, which let a caller plan an allocation the budget itself said
+     * could not be afforded; {@link BlockAtlasPagedStitch#takeover} already adds its own +1 for
+     * page 0 (which vanilla allocates regardless of paging), so 0 here correctly caps a starved
+     * device at page 0 alone rather than lying that one more page fits. Never returns more than
      * {@code hardCeiling}.
      *
      * @param budgetFraction the fraction of {@code availableVramBytes} this atlas may claim, in
@@ -77,7 +80,7 @@ public final class BlockAtlasPageBudget {
         }
         long budgetBytes = (long) (availableVramBytes * budgetFraction);
         long pages = budgetBytes / bytesPerPage(pageWidth, pageHeight);
-        return (int) Math.max(1, Math.min(hardCeiling, pages));
+        return (int) Math.max(0, Math.min(hardCeiling, pages));
     }
 
     /**

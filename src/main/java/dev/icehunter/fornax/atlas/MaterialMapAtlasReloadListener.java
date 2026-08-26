@@ -9,6 +9,7 @@ import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.config.FornaxConfig;
+import dev.icehunter.fornax.util.GpuFatalException;
 import dev.icehunter.fornax.util.GpuMemoryEstimator;
 import net.minecraft.client.renderer.texture.SpriteLoader;
 import net.minecraft.client.renderer.texture.TextureAtlas;
@@ -85,11 +86,17 @@ public final class MaterialMapAtlasReloadListener {
         // are worth. See PbrSidecarAtlasScale.
         List<TextureAtlasSprite> sprites = new ArrayList<>(preparations.regions().values());
         LabPbrSidecarSurvey.Result survey = LabPbrSidecarSurvey.survey(sprites, resourceManager, "_s");
+
+        // Read before choosing the scale, not after -- see the normal lane's matching comment.
+        BlockAtlasPagedLayout pagedLayout = TextureAtlas.LOCATION_BLOCKS.equals(atlasLocation)
+                ? BlockAtlasPagedLayout.current() : null;
+        int overflowPages = pagedLayout == null ? 0 : pagedLayout.overflowPageCount();
+
         int log2Scale;
         try {
             log2Scale = PbrSidecarAtlasScale.chooseLog2Scale(
                     preparations.width(), preparations.height(), survey.maxRatio(),
-                    LabPbrSidecarSurvey.maxTextureDimension(device), MIP_CHAIN_FACTOR,
+                    LabPbrSidecarSurvey.maxTextureDimension(device), MIP_CHAIN_FACTOR, overflowPages,
                     FornaxConfig.get().sidecarMapResolution.log2ScaleOffset(),
                     PbrSidecarAtlasScale.effectiveMaxAtlasBytes(
                             GpuMemoryEstimator.detectedVramBytesFromDevice(device),
@@ -114,11 +121,9 @@ public final class MaterialMapAtlasReloadListener {
         List<LabPbrAnimatedSidecar.Rect> occupiedAnimationRegions = new ArrayList<>();
         boolean animationsTransferred = false;
 
-        // Paged overflow layers (M13 phase 3 "1c") -- same shape as the normal lane's, with this
-        // lane's own neutral fill and class-aware mip reduction. See the normal listener's
-        // matching block for the full rationale.
-        BlockAtlasPagedLayout pagedLayout = TextureAtlas.LOCATION_BLOCKS.equals(atlasLocation)
-                ? BlockAtlasPagedLayout.current() : null;
+        // Paged overflow layers (pagedLayout/overflowPages, computed above) -- same shape as the
+        // normal lane's, with this lane's own neutral fill and class-aware mip reduction. See the
+        // normal listener's matching block for the full rationale.
 
         // Skip point -- see the normal lane's matching block for the full rationale.
         String fingerprint = LabPbrAtlasFingerprint.compute(atlasLocation, preparations, survey, pagedLayout);
@@ -128,8 +133,6 @@ public final class MaterialMapAtlasReloadListener {
                     + "skipping rebuild ({} sprites)", sprites.size());
             return existing;
         }
-
-        int overflowPages = pagedLayout == null ? 0 : pagedLayout.overflowPageCount();
 
         // Stage B: see the normal lane's matching block for the full rationale.
         LabPbrAtlasDiskCache.Loaded diskCached = LabPbrAtlasDiskCache.tryRead(
@@ -282,11 +285,13 @@ public final class MaterialMapAtlasReloadListener {
 
         FornaxMod.LOGGER.info("[LabPBR] Material map atlas built: {} sprites with _s maps ({} carrying"
                         + " authored emission), {} without;"
-                        + " {}x{} at scale 2^{} (pack asked for 2^{}), {} MB resident with mips, in {} ms"
-                        + " (level 0 {})",
+                        + " {}x{} at scale 2^{} (pack asked for 2^{}), {} MB resident with mips and {}"
+                        + " overflow layer(s), in {} ms (level 0 {})",
                 found, authoredEmission, missing, atlasWidth, atlasHeight, log2Scale,
                 PbrSidecarAtlasScale.ceilLog2(survey.maxRatio()),
-                Math.round(atlasWidth * (double) atlasHeight * 4.0 * MIP_CHAIN_FACTOR / 1.0e6),
+                Math.round(atlasWidth * (double) atlasHeight * 4.0 * MIP_CHAIN_FACTOR
+                        * (1 + overflowPages) / 1.0e6),
+                overflowPages,
                 (System.nanoTime() - start) / 1_000_000L,
                 sourcedFromDisk ? "from disk cache" : "freshly composited");
         return builtAtlas;
@@ -390,6 +395,12 @@ public final class MaterialMapAtlasReloadListener {
      * code with the stone matrix, and 2.9%..5.7% of the face carries an invented F0 averaging 0.44
      * against the matrix's 0.039. Further out a screen pixel covers dozens of texels while a 2x2 tap
      * samples four, so the class landed on at random and the specks scintillated.
+     *
+     * <p><b>Leak safety.</b> {@code texture} and {@code pages} are hoisted to nulled locals and
+     * freed in an outer catch if anything after their allocation throws -- this lane's mip chain is
+     * real (unlike the normal lane's), so the loop that can throw mid-sequence runs on every build,
+     * not just in theory. See the normal lane's matching method for why the two allocation calls
+     * are wrapped to raise {@link GpuFatalException} on any failure.
      */
     private static MaterialMapAtlas upload(GpuDevice device, NativeImage atlasImage,
                                            List<SpriteRect> spriteRects,
@@ -402,65 +413,113 @@ public final class MaterialMapAtlasReloadListener {
         int height = atlasImage.getHeight();
         int levelCount = computeMipLevelCount(width, height);
 
-        GpuTexture texture = device.createTexture(
-                "Sodium LabPBR Material Atlas",
-                GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
-                GpuFormat.RGBA8_UNORM,
-                width,
-                height,
-                1,          // depthOrLayers
-                levelCount  // mipLevels
-        );
-
-        CommandEncoder encoder = device.createCommandEncoder();
-        encoder.writeToTexture(texture, atlasImage, 0, 0, 0, 0);
-
+        GpuTexture texture = null;
+        ArrayTextures.Allocation pages = null;
         NativeImage previous = atlasImage;
-        for (int level = 1; level < levelCount; level++) {
-            NativeImage mip = downsampleLevel(previous, width, height, level, spriteRects);
-            encoder.writeToTexture(texture, mip, level, 0, 0, 0);
+        NativeImage previousLayer = null;
+        try {
+            try {
+                texture = device.createTexture(
+                        "Sodium LabPBR Material Atlas",
+                        GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
+                        GpuFormat.RGBA8_UNORM,
+                        width,
+                        height,
+                        1,          // depthOrLayers
+                        levelCount  // mipLevels
+                );
+            } catch (RuntimeException e) {
+                throw new GpuFatalException(
+                        "Material map atlas base texture allocation failed: " + e.getMessage());
+            }
+
+            CommandEncoder encoder = device.createCommandEncoder();
+            encoder.writeToTexture(texture, atlasImage, 0, 0, 0, 0);
+
+            for (int level = 1; level < levelCount; level++) {
+                NativeImage mip = downsampleLevel(previous, width, height, level, spriteRects);
+                try {
+                    encoder.writeToTexture(texture, mip, level, 0, 0, 0);
+                } catch (RuntimeException e) {
+                    mip.close();
+                    throw e;
+                }
+                if (previous != atlasImage) {
+                    previous.close();
+                }
+                previous = mip;
+            }
             if (previous != atlasImage) {
                 previous.close();
+                previous = atlasImage;
             }
-            previous = mip;
-        }
-        if (previous != atlasImage) {
-            previous.close();
-        }
 
-        // Overflow layers: same per-sprite (class-aware) mip discipline as the base atlas above,
-        // one layer per overflow page, through the array-texture seam. See the normal lane's
-        // matching block.
-        ArrayTextures.Allocation pages = null;
-        if (layerImages.length > 0) {
-            pages = ArrayTextures.create("Sodium LabPBR Material Atlas Pages",
-                    GpuFormat.RGBA8_UNORM, width, height, layerImages.length, levelCount);
-            if (pages == null) {
-                FornaxMod.LOGGER.warn("[LabPBR] Material overflow layers unavailable on this backend;"
-                        + " spilled sprites keep ghost-resolution material data");
-            } else {
-                for (int layer = 0; layer < layerImages.length; layer++) {
-                    encoder.writeToTexture(pages.texture(), layerImages[layer], 0, layer, 0, 0);
-                    NativeImage previousLayer = layerImages[layer];
-                    for (int level = 1; level < levelCount; level++) {
-                        NativeImage mip = downsampleLevel(previousLayer, width, height, level,
-                                layerRects.get(layer));
-                        encoder.writeToTexture(pages.texture(), mip, level, layer, 0, 0);
-                        if (previousLayer != layerImages[layer]) {
-                            previousLayer.close();
+            // Overflow layers: same per-sprite (class-aware) mip discipline as the base atlas above,
+            // one layer per overflow page, through the array-texture seam. See the normal lane's
+            // matching block.
+            if (layerImages.length > 0) {
+                try {
+                    pages = ArrayTextures.create("Sodium LabPBR Material Atlas Pages",
+                            GpuFormat.RGBA8_UNORM, width, height, layerImages.length, levelCount);
+                } catch (RuntimeException e) {
+                    throw new GpuFatalException(
+                            "Material map atlas overflow pages allocation failed: " + e.getMessage());
+                }
+                if (pages == null) {
+                    FornaxMod.LOGGER.warn("[LabPBR] Material overflow layers unavailable on this backend;"
+                            + " spilled sprites keep ghost-resolution material data");
+                } else {
+                    for (int layer = 0; layer < layerImages.length; layer++) {
+                        encoder.writeToTexture(pages.texture(), layerImages[layer], 0, layer, 0, 0);
+                        // layerBase is the caller's own image (layerImages[layer]; the outer
+                        // finally in build() always closes it regardless of what happens here), so
+                        // the method-scope previousLayer the outer catch below closes must only
+                        // ever point at a mip THIS loop produced, never at layerBase itself --
+                        // otherwise a throw before the first reassignment would double-close it.
+                        NativeImage layerBase = layerImages[layer];
+                        NativeImage current = layerBase;
+                        previousLayer = null;
+                        for (int level = 1; level < levelCount; level++) {
+                            NativeImage mip = downsampleLevel(current, width, height, level,
+                                    layerRects.get(layer));
+                            try {
+                                encoder.writeToTexture(pages.texture(), mip, level, layer, 0, 0);
+                            } catch (RuntimeException e) {
+                                mip.close();
+                                throw e;
+                            }
+                            if (current != layerBase) {
+                                current.close();
+                            }
+                            current = mip;
+                            previousLayer = current;
                         }
-                        previousLayer = mip;
-                    }
-                    if (previousLayer != layerImages[layer]) {
-                        previousLayer.close();
+                        if (current != layerBase) {
+                            current.close();
+                        }
+                        previousLayer = null;
                     }
                 }
             }
-        }
 
-        GpuTextureView view = device.createTextureView(texture);
-        return new MaterialMapAtlas(texture, view,
-                new LabPbrAnimationSet(animations, occupiedAnimationRegions), pages, fingerprint);
+            GpuTextureView view = device.createTextureView(texture);
+            return new MaterialMapAtlas(texture, view,
+                    new LabPbrAnimationSet(animations, occupiedAnimationRegions), pages, fingerprint);
+        } catch (RuntimeException e) {
+            if (previousLayer != null) {
+                previousLayer.close();
+            }
+            if (previous != atlasImage) {
+                previous.close();
+            }
+            if (pages != null) {
+                pages.close();
+            }
+            if (texture != null) {
+                texture.close();
+            }
+            throw e;
+        }
     }
 
     /**

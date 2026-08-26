@@ -68,7 +68,7 @@ class PbrSidecarAtlasScaleTest {
 
     @Test
     void mapsThatMatchTheColourRetainTheirAuthoredResolutionWhenTheyFit() {
-        int log2Scale = PbrSidecarAtlasScale.chooseLog2Scale(8192, 4096, 1, MAX_DIMENSION, FULL_MIP_CHAIN);
+        int log2Scale = PbrSidecarAtlasScale.chooseLog2Scale(8192, 4096, 1, MAX_DIMENSION, FULL_MIP_CHAIN, 0);
 
         assertEquals(0, log2Scale);
         assertEquals(8192, PbrSidecarAtlasScale.atlasDimension(8192, log2Scale));
@@ -91,7 +91,7 @@ class PbrSidecarAtlasScaleTest {
         // maps: the pack asks for 2^3, which would be a 16384x16384 sidecar atlas at 1074 MB before
         // mips. The cap has to bring that down, not refuse it.
         int asked = PbrSidecarAtlasScale.ceilLog2(8);
-        int got = PbrSidecarAtlasScale.chooseLog2Scale(4096, 4096, 8, MAX_DIMENSION, FULL_MIP_CHAIN);
+        int got = PbrSidecarAtlasScale.chooseLog2Scale(4096, 4096, 8, MAX_DIMENSION, FULL_MIP_CHAIN, 0);
 
         assertEquals(3, asked);
         assertTrue(got < asked, "an over-budget request must be capped, got " + got);
@@ -108,7 +108,7 @@ class PbrSidecarAtlasScaleTest {
         // A GPU that reports a smaller ceiling than Apple's 16384 must get a smaller atlas, not a
         // texture-creation failure at reload time.
         for (int maxDimension : new int[] {2048, 4096, 8192, 16384}) {
-            int log2Scale = PbrSidecarAtlasScale.chooseLog2Scale(8192, 4096, 8, maxDimension, NO_MIPS);
+            int log2Scale = PbrSidecarAtlasScale.chooseLog2Scale(8192, 4096, 8, maxDimension, NO_MIPS, 0);
             assertTrue(PbrSidecarAtlasScale.atlasDimension(8192, log2Scale) <= maxDimension,
                     "width over the limit at maxDimension " + maxDimension);
             assertTrue(PbrSidecarAtlasScale.atlasDimension(4096, log2Scale) <= maxDimension,
@@ -124,7 +124,7 @@ class PbrSidecarAtlasScaleTest {
         int[][] cases = {{16384, 16384, 1}, {8192, 8192, 4}, {8192, 4096, 8}};
         for (int[] c : cases) {
             int historical = PbrSidecarAtlasScale.chooseLog2Scale(
-                    c[0], c[1], c[2], MAX_DIMENSION, FULL_MIP_CHAIN);
+                    c[0], c[1], c[2], MAX_DIMENSION, FULL_MIP_CHAIN, 0);
             int viaHalf = tier(SidecarMapResolution.HALF, c[0], c[1], c[2], MAX_DIMENSION);
             assertEquals(historical, viaHalf,
                     "HALF must match the historical sizing for " + c[0] + "x" + c[1]
@@ -158,7 +158,7 @@ class PbrSidecarAtlasScaleTest {
         // drag it up to 0 -- the loop only ever steps down from what was surveyed, and the cap is a
         // ceiling on that, never a floor.
         int asked = PbrSidecarAtlasScale.chooseLog2Scale(
-                4096, 4096, 1, MAX_DIMENSION, FULL_MIP_CHAIN);
+                4096, 4096, 1, MAX_DIMENSION, FULL_MIP_CHAIN, 0);
         assertEquals(0, asked, "a pack asking for scale 0 must never be pushed above it");
         assertEquals(0, tier(SidecarMapResolution.FULL, 4096, 4096, 1, MAX_DIMENSION));
     }
@@ -181,7 +181,7 @@ class PbrSidecarAtlasScaleTest {
         //
         // A large maxDimension and a small atlas so neither limit binds and the tier is what is
         // actually being measured.
-        int asked = PbrSidecarAtlasScale.chooseLog2Scale(1024, 1024, 4, MAX_DIMENSION, NO_MIPS);
+        int asked = PbrSidecarAtlasScale.chooseLog2Scale(1024, 1024, 4, MAX_DIMENSION, NO_MIPS, 0);
         assertEquals(2, asked, "the pack asks for +2 when its maps are 4x the albedo");
         assertEquals(2, tier(SidecarMapResolution.FULL, 1024, 1024, 4, MAX_DIMENSION));
         assertEquals(1, tier(SidecarMapResolution.HALF, 1024, 1024, 4, MAX_DIMENSION),
@@ -192,14 +192,43 @@ class PbrSidecarAtlasScaleTest {
     private static int tier(SidecarMapResolution resolution, int width, int height, int ratio,
                             int maxDimension) {
         return PbrSidecarAtlasScale.chooseLog2Scale(width, height, ratio, maxDimension,
-                FULL_MIP_CHAIN, resolution.log2ScaleOffset(), resolution.maxAtlasBytes());
+                FULL_MIP_CHAIN, 0, resolution.log2ScaleOffset(), resolution.maxAtlasBytes());
+    }
+
+    @Test
+    void overflowLayersAreCountedAgainstTheByteBudgetNotJustTheBaseImage() {
+        // 8192x8192, no mips: the base image alone is 256 MiB, comfortably under a 512 MiB budget.
+        // Three overflow layers (BlockAtlasGhostLayout.MAX_OVERFLOW_PAGES) make the real allocation
+        // 4x that -- 1024 MiB -- which must be refused at scale 0, exactly the gap that let a real
+        // switch overcommit VRAM 3-4x before this accounted for layers at all.
+        long fiveTwelveMib = 512L * 1024 * 1024;
+        int withoutLayers = PbrSidecarAtlasScale.chooseLog2Scale(
+                8192, 8192, 1, MAX_DIMENSION, NO_MIPS, 0, 0, fiveTwelveMib);
+        int withThreeLayers = PbrSidecarAtlasScale.chooseLog2Scale(
+                8192, 8192, 1, MAX_DIMENSION, NO_MIPS, 3, 0, fiveTwelveMib);
+
+        assertEquals(0, withoutLayers, "the base image alone fits at scale 0");
+        assertTrue(withThreeLayers < withoutLayers,
+                "three full-size overflow layers must force a smaller scale, got " + withThreeLayers);
+    }
+
+    @Test
+    void aZeroPageLayoutIsUnaffectedByTheOverflowFactor() {
+        // overflowPages == 0 (an atlas location that never pages, or a fresh install) must reproduce
+        // the pre-existing base-image-only sizing exactly -- the (1 + overflowPages) factor is 1.
+        int withoutOverflowParam = PbrSidecarAtlasScale.chooseLog2Scale(
+                4096, 4096, 8, MAX_DIMENSION, FULL_MIP_CHAIN, 0);
+        int explicitZero = PbrSidecarAtlasScale.chooseLog2Scale(
+                4096, 4096, 8, MAX_DIMENSION, FULL_MIP_CHAIN, 0, 0, PbrSidecarAtlasScale.MAX_ATLAS_BYTES);
+
+        assertEquals(withoutOverflowParam, explicitZero);
     }
 
     @Test
     void anAtlasTooBigEvenAtTheHistoricalSizingDegradesBelowIt() {
         // The path that keeps a small card usable rather than losing the device: if half the block
         // atlas will not fit, the answer is a quarter of it, not a crash.
-        int log2Scale = PbrSidecarAtlasScale.chooseLog2Scale(16384, 16384, 1, 2048, NO_MIPS);
+        int log2Scale = PbrSidecarAtlasScale.chooseLog2Scale(16384, 16384, 1, 2048, NO_MIPS, 0);
 
         assertTrue(log2Scale < 0, "must degrade past scale 0, got " + log2Scale);
         assertTrue(PbrSidecarAtlasScale.atlasDimension(16384, log2Scale) <= 2048);
@@ -215,7 +244,7 @@ class PbrSidecarAtlasScaleTest {
         // is just larger than the device supports. This must fail loudly here, not at texture
         // creation deeper in the reload.
         assertThrows(IllegalStateException.class,
-                () -> PbrSidecarAtlasScale.chooseLog2Scale(32768, 32768, 1, 2048, NO_MIPS));
+                () -> PbrSidecarAtlasScale.chooseLog2Scale(32768, 32768, 1, 2048, NO_MIPS, 0));
     }
 
     @Test

@@ -9,6 +9,7 @@ import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.config.FornaxConfig;
+import dev.icehunter.fornax.util.GpuFatalException;
 import dev.icehunter.fornax.util.GpuMemoryEstimator;
 import net.minecraft.client.renderer.texture.SpriteLoader;
 import net.minecraft.client.renderer.texture.TextureAtlas;
@@ -45,10 +46,13 @@ public final class NormalMapAtlasReloadListener {
     private static final int NEUTRAL_NORMAL_ARGB = 0xFF_80_80_FF;
 
     /**
-     * Resident-size multiplier for a full mip chain: a halving pyramid converges on 4/3 of level 0.
-     * Used only to budget the atlas -- see {@link PbrSidecarAtlasScale#MAX_ATLAS_BYTES}.
+     * Resident-size multiplier for budgeting this atlas: {@code 1.0}, not the {@code 4/3} a full mip
+     * chain would cost, because {@link #computeMipLevelCount} always returns 1 for this lane -- no
+     * mip chain is ever built or uploaded. Budgeting {@code 4/3} for mips that do not exist understated
+     * the real cost of what DOES get allocated (every overflow layer, full-size, uncounted until
+     * {@link PbrSidecarAtlasScale#fits} learned about them) rather than overstating it.
      */
-    private static final double MIP_CHAIN_FACTOR = 4.0 / 3.0;
+    private static final double MIP_CHAIN_FACTOR = 1.0;
 
     private NormalMapAtlasReloadListener() {
     }
@@ -86,11 +90,19 @@ public final class NormalMapAtlasReloadListener {
         List<TextureAtlasSprite> sprites = new ArrayList<>(preparations.regions().values());
         LabPbrSidecarSurvey.Result survey =
                 LabPbrSidecarSurvey.survey(sprites, resourceManager, "_n");
+
+        // Read before choosing the scale, not after: the byte budget below has to price every
+        // overflow layer this atlas will ALSO allocate (see PbrSidecarAtlasScale#fits's doc), and
+        // that requires overflowPages up front rather than after the scale is already chosen.
+        BlockAtlasPagedLayout pagedLayout = TextureAtlas.LOCATION_BLOCKS.equals(atlasLocation)
+                ? BlockAtlasPagedLayout.current() : null;
+        int overflowPages = pagedLayout == null ? 0 : pagedLayout.overflowPageCount();
+
         int log2Scale;
         try {
             log2Scale = PbrSidecarAtlasScale.chooseLog2Scale(
                     preparations.width(), preparations.height(), survey.maxRatio(),
-                    LabPbrSidecarSurvey.maxTextureDimension(device), MIP_CHAIN_FACTOR,
+                    LabPbrSidecarSurvey.maxTextureDimension(device), MIP_CHAIN_FACTOR, overflowPages,
                     FornaxConfig.get().sidecarMapResolution.log2ScaleOffset(),
                     PbrSidecarAtlasScale.effectiveMaxAtlasBytes(
                             GpuMemoryEstimator.detectedVramBytesFromDevice(device),
@@ -114,14 +126,12 @@ public final class NormalMapAtlasReloadListener {
         List<LabPbrAnimatedSidecar.Rect> occupiedAnimationRegions = new ArrayList<>();
         boolean animationsTransferred = false;
 
-        // Paged overflow layers: full-resolution sidecar data for every spilled
-        // STATIC sprite at its page-local placement, so page-aware terrain sampling reads normals
-        // at the same resolution page-0 sprites get. The quarter-scale ghost blit below still
-        // happens for every spilled sprite -- non-page-aware consumers and the distance blend's
-        // far end read that. Animated ghosts have no overflow copy by design (they always sample
-        // their vanilla-animated ghost) and are skipped here.
-        BlockAtlasPagedLayout pagedLayout = TextureAtlas.LOCATION_BLOCKS.equals(atlasLocation)
-                ? BlockAtlasPagedLayout.current() : null;
+        // Paged overflow layers (pagedLayout/overflowPages, computed above): full-resolution
+        // sidecar data for every spilled STATIC sprite at its page-local placement, so page-aware
+        // terrain sampling reads normals at the same resolution page-0 sprites get. The
+        // quarter-scale ghost blit below still happens for every spilled sprite -- non-page-aware
+        // consumers and the distance blend's far end read that. Animated ghosts have no overflow
+        // copy by design (they always sample their vanilla-animated ghost) and are skipped here.
 
         // Skip point: computed before any NativeImage is allocated (the base atlas alone can be a
         // quarter-gigabyte at 8192^2), so a fingerprint match costs nothing beyond the survey this
@@ -136,8 +146,6 @@ public final class NormalMapAtlasReloadListener {
                     + "skipping rebuild ({} sprites)", sprites.size());
             return existing;
         }
-
-        int overflowPages = pagedLayout == null ? 0 : pagedLayout.overflowPageCount();
 
         // Stage B: a cold boot has nothing in memory to skip against (the check above never fires),
         // but may still have this exact fingerprint's level-0 pixels on disk from a previous run --
@@ -364,11 +372,13 @@ public final class NormalMapAtlasReloadListener {
         // than from a crash -- and the scale exponent reports whether the maps got the resolution
         // they asked for or were capped (0 = the historical half-the-albedo sizing, 3 = 8x that).
         FornaxMod.LOGGER.info("[LabPBR] Normal map atlas built: {} sprites with _n maps, {} without;"
-                        + " {}x{} at scale 2^{} (pack asked for 2^{}), {} MB resident with mips, in {} ms"
-                        + " (level 0 {})",
+                        + " {}x{} at scale 2^{} (pack asked for 2^{}), {} MB resident with {} overflow"
+                        + " layer(s), in {} ms (level 0 {})",
                 found, missing, atlasWidth, atlasHeight, log2Scale,
                 PbrSidecarAtlasScale.ceilLog2(survey.maxRatio()),
-                Math.round(atlasWidth * (double) atlasHeight * 4.0 * MIP_CHAIN_FACTOR / 1.0e6),
+                Math.round(atlasWidth * (double) atlasHeight * 4.0 * MIP_CHAIN_FACTOR
+                        * (1 + overflowPages) / 1.0e6),
+                overflowPages,
                 (System.nanoTime() - start) / 1_000_000L,
                 sourcedFromDisk ? "from disk cache" : "freshly composited");
         return builtAtlas;
@@ -601,6 +611,14 @@ public final class NormalMapAtlasReloadListener {
      * processed last simply overwrites that texel with its own flat, correctly-reduced color --
      * never a blend of neighbors, so no seam -- and this only happens at extreme minification (a
      * handful of texels covering the whole visible terrain), where it is imperceptible.
+     *
+     * <p><b>Leak safety.</b> {@code texture} and {@code pages} are hoisted to nulled locals and
+     * freed in an outer catch if anything after their allocation throws. The two allocation calls
+     * themselves are wrapped to raise {@link GpuFatalException} on any failure: an allocation
+     * failing for any reason (OOM, device loss, or anything else {@code VulkanUtils.crashIfFailure}
+     * maps to a bare {@code IllegalStateException}) means the device could not fulfill this
+     * request, never a soft, retry-safe condition -- everything else in this method still just
+     * throws whatever it naturally throws.
      */
     private static NormalMapAtlas upload(GpuDevice device, NativeImage atlasImage,
                                          List<SpriteRect> spriteRects,
@@ -613,66 +631,114 @@ public final class NormalMapAtlasReloadListener {
         int height = atlasImage.getHeight();
         int levelCount = computeMipLevelCount(width, height);
 
-        GpuTexture texture = device.createTexture(
-                "Sodium LabPBR Normal Atlas",
-                GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
-                GpuFormat.RGBA8_UNORM,
-                width,
-                height,
-                1,          // depthOrLayers
-                levelCount  // mipLevels
-        );
-
-        CommandEncoder encoder = device.createCommandEncoder();
-        encoder.writeToTexture(texture, atlasImage, 0, 0, 0, 0);
-
+        GpuTexture texture = null;
+        ArrayTextures.Allocation pages = null;
         NativeImage previous = atlasImage;
-        for (int level = 1; level < levelCount; level++) {
-            NativeImage mip = downsampleLevel(previous, width, height, level, spriteRects);
-            encoder.writeToTexture(texture, mip, level, 0, 0, 0);
+        NativeImage previousLayer = null;
+        try {
+            try {
+                texture = device.createTexture(
+                        "Sodium LabPBR Normal Atlas",
+                        GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
+                        GpuFormat.RGBA8_UNORM,
+                        width,
+                        height,
+                        1,          // depthOrLayers
+                        levelCount  // mipLevels
+                );
+            } catch (RuntimeException e) {
+                throw new GpuFatalException(
+                        "Normal map atlas base texture allocation failed: " + e.getMessage());
+            }
+
+            CommandEncoder encoder = device.createCommandEncoder();
+            encoder.writeToTexture(texture, atlasImage, 0, 0, 0, 0);
+
+            for (int level = 1; level < levelCount; level++) {
+                NativeImage mip = downsampleLevel(previous, width, height, level, spriteRects);
+                try {
+                    encoder.writeToTexture(texture, mip, level, 0, 0, 0);
+                } catch (RuntimeException e) {
+                    mip.close();
+                    throw e;
+                }
+                if (previous != atlasImage) {
+                    previous.close();
+                }
+                previous = mip;
+            }
             if (previous != atlasImage) {
                 previous.close();
+                previous = atlasImage;
             }
-            previous = mip;
-        }
-        if (previous != atlasImage) {
-            previous.close();
-        }
 
-        // Overflow layers: same per-sprite mip discipline as the base atlas above, one layer per
-        // overflow page, through the array-texture seam (stock creation refuses depthOrLayers > 1
-        // -- see ArrayTextures). Unavailable (non-Vulkan) degrades to null: terrain then binds the
-        // neutral array and spilled sprites keep their ghost-resolution normals.
-        ArrayTextures.Allocation pages = null;
-        if (layerImages.length > 0) {
-            pages = ArrayTextures.create("Sodium LabPBR Normal Atlas Pages",
-                    GpuFormat.RGBA8_UNORM, width, height, layerImages.length, levelCount);
-            if (pages == null) {
-                FornaxMod.LOGGER.warn("[LabPBR] Normal overflow layers unavailable on this backend;"
-                        + " spilled sprites keep ghost-resolution normals");
-            } else {
-                for (int layer = 0; layer < layerImages.length; layer++) {
-                    encoder.writeToTexture(pages.texture(), layerImages[layer], 0, layer, 0, 0);
-                    NativeImage previousLayer = layerImages[layer];
-                    for (int level = 1; level < levelCount; level++) {
-                        NativeImage mip = downsampleLevel(previousLayer, width, height, level,
-                                layerRects.get(layer));
-                        encoder.writeToTexture(pages.texture(), mip, level, layer, 0, 0);
-                        if (previousLayer != layerImages[layer]) {
-                            previousLayer.close();
+            // Overflow layers: same per-sprite mip discipline as the base atlas above, one layer per
+            // overflow page, through the array-texture seam (stock creation refuses depthOrLayers > 1
+            // -- see ArrayTextures). Unavailable (non-Vulkan) degrades to null: terrain then binds the
+            // neutral array and spilled sprites keep their ghost-resolution normals.
+            if (layerImages.length > 0) {
+                try {
+                    pages = ArrayTextures.create("Sodium LabPBR Normal Atlas Pages",
+                            GpuFormat.RGBA8_UNORM, width, height, layerImages.length, levelCount);
+                } catch (RuntimeException e) {
+                    throw new GpuFatalException(
+                            "Normal map atlas overflow pages allocation failed: " + e.getMessage());
+                }
+                if (pages == null) {
+                    FornaxMod.LOGGER.warn("[LabPBR] Normal overflow layers unavailable on this backend;"
+                            + " spilled sprites keep ghost-resolution normals");
+                } else {
+                    for (int layer = 0; layer < layerImages.length; layer++) {
+                        encoder.writeToTexture(pages.texture(), layerImages[layer], 0, layer, 0, 0);
+                        // layerBase is the caller's own image (layerImages[layer]; the outer
+                        // finally in build() always closes it regardless of what happens here), so
+                        // the method-scope previousLayer the outer catch below closes must only
+                        // ever point at a mip THIS loop produced, never at layerBase itself --
+                        // otherwise a throw before the first reassignment would double-close it.
+                        NativeImage layerBase = layerImages[layer];
+                        NativeImage current = layerBase;
+                        previousLayer = null;
+                        for (int level = 1; level < levelCount; level++) {
+                            NativeImage mip = downsampleLevel(current, width, height, level,
+                                    layerRects.get(layer));
+                            try {
+                                encoder.writeToTexture(pages.texture(), mip, level, layer, 0, 0);
+                            } catch (RuntimeException e) {
+                                mip.close();
+                                throw e;
+                            }
+                            if (current != layerBase) {
+                                current.close();
+                            }
+                            current = mip;
+                            previousLayer = current;
                         }
-                        previousLayer = mip;
-                    }
-                    if (previousLayer != layerImages[layer]) {
-                        previousLayer.close();
+                        if (current != layerBase) {
+                            current.close();
+                        }
+                        previousLayer = null;
                     }
                 }
             }
-        }
 
-        GpuTextureView view = device.createTextureView(texture);
-        return new NormalMapAtlas(texture, view,
-                new LabPbrAnimationSet(animations, occupiedAnimationRegions), pages, fingerprint);
+            GpuTextureView view = device.createTextureView(texture);
+            return new NormalMapAtlas(texture, view,
+                    new LabPbrAnimationSet(animations, occupiedAnimationRegions), pages, fingerprint);
+        } catch (RuntimeException e) {
+            if (previousLayer != null) {
+                previousLayer.close();
+            }
+            if (previous != atlasImage) {
+                previous.close();
+            }
+            if (pages != null) {
+                pages.close();
+            }
+            if (texture != null) {
+                texture.close();
+            }
+            throw e;
+        }
     }
 
     /**
@@ -763,26 +829,17 @@ public final class NormalMapAtlasReloadListener {
      * {@link #scaleRect}'s doc describes for why {@code parentRect} lines up correctly in the first
      * place.
      *
+     * <p>Gated on {@code occupied} because {@link #scaleRect}'s {@code Math.max(1, ...)} floor can
+     * put two DIFFERENT sprites at the same {@code childRect} once both have shrunk to a single
+     * texel -- without the check, whichever sprite reaches that texel last would overwrite the
+     * other's reduction, so a UV belonging to one sprite could sample a completely different
+     * sprite's mip data. First sprite to claim a texel at this level keeps it.
+     *
      * @param source     the previous level's composited image
      * @param parentRect this sprite's rectangle within {@code source}
      * @param dst        this level's image being built
      * @param childRect  this sprite's rectangle within {@code dst}, sized {@code parentRect}
      *                   halved (rounded up via edge replication)
-     */
-    /**
-     * Reduces one sprite's rectangle from {@code source} into {@code dst}, gated by {@code occupied}
-     * so a collision with an already-written sprite loses deterministically rather than silently
-     * clobbering it.
-     *
-     * <p>{@link #scaleRect}'s {@code Math.max(1, ...)} floor means two DIFFERENT sprites can end up
-     * with the same (or overlapping) {@code childRect} at a deep enough level -- a sprite narrower
-     * than {@code 2^level} collapses to a 1-texel rectangle whose position also collapses, and an
-     * adjacent sprite doing the same can land on that exact texel. Without a check, whichever sprite
-     * this loop reaches last would overwrite the earlier one's texel with its own unrelated content,
-     * so a UV that geometrically belongs to one sprite could sample a completely different sprite's
-     * mip data. This makes the loop order-independent instead: the first sprite to reach a given
-     * texel at this level keeps it, and every later claimant is silently skipped there (its own,
-     * non-colliding texels are unaffected).
      */
     private static void boxDownsampleRect(NativeImage source, SpriteRect parentRect, NativeImage dst,
                                           SpriteRect childRect, boolean[] occupied, int dstWidth) {

@@ -9,6 +9,10 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.mixin.sodium.ShaderChunkRendererAccessor;
 import dev.icehunter.fornax.mixin.vanilla.SpriteContentsAccessor;
+import dev.icehunter.fornax.pipeline.SpriteBoundsTexture;
+import dev.icehunter.fornax.util.GpuFatalErrors;
+import dev.icehunter.fornax.util.GpuFatalException;
+import net.minecraft.client.renderer.texture.TextureAtlas;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -28,17 +32,21 @@ import org.jspecify.annotations.Nullable;
  * shader's edge extrusion, and with the stitcher's mip-aligned placement no in-rect sample ever
  * reads a gutter texel at any composited level.
  *
- * <p><b>Lifecycle</b> mirrors {@code LabPbrAtlasPair}'s publish-then-close: {@link #rebuild} runs
- * at every block-atlas {@code upload} RETURN (same hook the sidecar lanes build from), swaps the
- * published allocation, then closes the previous one -- {@code close} routes through the
- * frame-fenced deferred-destroy queue, so in-flight frames stay valid. When the overflow page
- * count CHANGES between generations, Sodium's terrain program cache is cleared (the same
- * generation-guarded clear {@code GraphRunner}'s republish path performs, and safe here for the
- * same reason: {@code upload} runs on the render thread between frames during a reload apply) so
- * the next terrain draw recompiles with the new {@code FORNAX_ATLAS_OVERFLOW_PAGES} constant.
+ * <p><b>Lifecycle</b> is close-before-build: the generation resident when a reload starts is freed
+ * (via {@link #releaseCurrent}, called from {@code TextureAtlasReleaseGenerationMixin} at
+ * {@code upload} HEAD, and again defensively by {@link #rebuild} itself) before the next
+ * generation's array texture is ever requested from the driver, so old and new are never resident
+ * together -- old and new WERE briefly double-resident here, live-caught contributing to a native
+ * out-of-memory crash during a resource-pack switch. {@link #rebuild} normally runs from
+ * {@link AtlasGenerationSchedule}'s terminal tick after the same generation's sidecar work, with
+ * the upload-RETURN hook retained as the no-pending fallback. When the overflow page count changes
+ * between generations, Sodium's terrain program cache is cleared (the same generation-guarded
+ * clear {@code GraphRunner}'s republish path performs, and safe here for the same reason:
+ * {@code upload} runs on the render thread between frames during a reload apply) so the next
+ * terrain draw recompiles with the new {@code FORNAX_ATLAS_OVERFLOW_PAGES} constant.
  */
 public final class BlockAtlasOverflow {
-    private record Published(ArrayTextures.Allocation albedo, int pageCount) {
+    private record Published(ArrayTextures.Allocation albedo, int pageCount, long residentBytes) {
     }
 
     @Nullable
@@ -88,23 +96,83 @@ public final class BlockAtlasOverflow {
     }
 
     /**
+     * Frees the currently published overflow allocation, if any, ahead of a new generation's
+     * build. Normally called from {@code TextureAtlasReleaseGenerationMixin} at {@code upload}
+     * HEAD, three render-loop-separated polls before {@link #rebuild} runs; {@link #rebuild} also
+     * closes-before-building on its own as a second line of defense in case it is ever reached
+     * without that hook.
+     */
+    public static void releaseCurrent() {
+        Published previous = current;
+        if (previous == null) {
+            return;
+        }
+        current = null;
+        previous.albedo.close();
+        // Every allocation of this array was already logged (see build()'s own INFO line); nothing
+        // logged its release before this, which is exactly what made three back-to-back
+        // resource-pack switches accumulating past available VRAM invisible in the log.
+        FornaxMod.LOGGER.info(
+                "[Fornax] Paged block atlas: released {} overflow layer(s) ({} MB freed)",
+                previous.pageCount(), previous.residentBytes() / (1024L * 1024L));
+
+        // Matches rebuild()'s own invalidation for the same reason: overflowPageCount() now
+        // returns 0 (current is null above), so the terrain shader's compiled
+        // FORNAX_ATLAS_OVERFLOW_PAGES constant must drop to 0 too, right here -- not only when
+        // rebuild() itself eventually runs. If upload() throws (or a fatal rethrow from this same
+        // class's own allocation failure propagates) between this release and rebuild() ever
+        // running, leaving that step out would leave cached terrain programs compiled for the old
+        // nonzero page count while the actual binding has already dropped to the neutral fallback.
+        if (previous.pageCount() != 0 && lastPublishedPageCount != 0) {
+            lastPublishedPageCount = 0;
+            ShaderChunkRendererAccessor.fornax$getPrograms().clear();
+            FornaxMod.LOGGER.info(
+                    "[Fornax] Paged block atlas: overflow page count now 0, terrain programs cleared");
+        }
+    }
+
+    /**
      * Rebuilds (or clears) the overflow layers for the atlas generation whose {@code upload} just
-     * completed. Never throws: a compositor failure logs, publishes UNPAGED (terrain then renders
-     * every ghost at quarter resolution -- correct, just soft), and leaves vanilla state alone.
+     * completed. An ordinary compositor failure logs, publishes UNPAGED (terrain then renders
+     * every ghost at quarter resolution -- correct, just soft), and leaves vanilla state alone. A
+     * FATAL failure (the device is lost, or this multi-gigabyte array allocation itself ran the
+     * device out of memory) rethrows instead: this allocation is the one live-caught contributing
+     * to a native out-of-memory crash during a resource-pack switch, and a Vulkan OOM logged as a
+     * soft warning here means rendering continues for several more frames on a device that already
+     * failed, surfacing as an unattributed native crash deeper in, rather than at the line that
+     * actually failed.
+     *
+     * <p>Also applies this generation's sprite-bounds grid size ({@link
+     * SpriteBoundsTexture#useGridSize}), on {@code layout}'s behalf: {@code
+     * BlockAtlasPagedStitch#takeover} decides the grid size on the stitch's background executor
+     * (cheap, no GPU call) but cannot apply it there -- {@code useGridSize} closes a live GPU
+     * texture, and this is the render-thread call that generation's grid decision was waiting for.
+     *
+     * <p>Publishes nothing (soft-degrades to unpaged, same as any other failure here) when this
+     * generation's LabPBR sidecar pair isn't up yet: a paged overflow array and its sidecar
+     * counterparts must describe the same layer count, and {@link AtlasGenerationSchedule} can
+     * reach this before {@code LabPbrAtlasPair.rebuild} has run if the sidecar rebuild itself
+     * failed.
      */
     public static void rebuild(@Nullable BlockAtlasPagedLayout layout) {
-        Published previous = current;
+        SpriteBoundsTexture.useGridSize(
+                layout == null ? SpriteBoundsTexture.DEFAULT_SIZE : layout.gridSize());
+        releaseCurrent();
         Published next = null;
         try {
-            next = layout == null ? null : build(layout);
+            boolean matchingSidecarsReady = layout == null
+                    || LabPbrAtlasPair.get(TextureAtlas.LOCATION_BLOCKS) != null;
+            if (!matchingSidecarsReady) {
+                FornaxMod.LOGGER.warn("[Fornax] Paged block atlas: not publishing overflow layers"
+                        + " because this generation's LabPBR sidecar pair is unavailable");
+            }
+            next = layout == null || !matchingSidecarsReady ? null : build(layout);
         } catch (RuntimeException e) {
+            GpuFatalErrors.rethrowIfFatal(e);
             FornaxMod.LOGGER.warn("[Fornax] Paged block atlas: overflow compositor failed;"
                     + " spilled sprites stay at ghost resolution", e);
         }
         current = next;
-        if (previous != null) {
-            previous.albedo.close();
-        }
 
         int pageCount = next == null ? 0 : next.pageCount;
         if (pageCount != lastPublishedPageCount) {
@@ -178,9 +246,22 @@ public final class BlockAtlasOverflow {
         if (device == null) {
             return null;
         }
-        ArrayTextures.Allocation albedo = ArrayTextures.create("Fornax Paged Block Atlas Albedo",
-                GpuFormat.RGBA8_UNORM, layout.canvasSize(), layout.canvasSize(),
-                layout.overflowPageCount(), layout.mipLevel() + 1);
+        ArrayTextures.Allocation albedo;
+        try {
+            albedo = ArrayTextures.create("Fornax Paged Block Atlas Albedo",
+                    GpuFormat.RGBA8_UNORM, layout.canvasSize(), layout.canvasSize(),
+                    layout.overflowPageCount(), layout.mipLevel() + 1);
+        } catch (RuntimeException e) {
+            // Any exception from this specific call -- OOM, device loss, anything
+            // VulkanUtils.crashIfFailure maps to a bare IllegalStateException -- means the device
+            // could not fulfill this multi-gigabyte allocation, never a soft, retry-safe condition.
+            // rebuild()'s own catch only rethrows GpuDeviceLossException/GpuFatalException; without
+            // this, a real Vulkan OOM here (VK_ERROR_OUT_OF_DEVICE_MEMORY, mapped to a plain
+            // IllegalStateException, not GpuDeviceLossException) was logged as a soft warning while
+            // rendering continued on a device that had already failed.
+            throw new GpuFatalException(
+                    "Paged block atlas: overflow array allocation failed: " + e.getMessage());
+        }
         if (albedo == null) {
             FornaxMod.LOGGER.warn("[Fornax] Paged block atlas: array textures unavailable on this"
                     + " backend; spilled sprites stay at ghost resolution");
@@ -209,14 +290,14 @@ public final class BlockAtlasOverflow {
             albedo.close();
             throw e;
         }
+        long residentBytes = (long) layout.canvasSize() * layout.canvasSize() * 4L
+                * layout.overflowPageCount() * 4L / 3L;
         FornaxMod.LOGGER.info(
                 "[Fornax] Paged block atlas: composited {} spilled sprite(s) onto {} overflow layer(s)"
                         + " ({} MB resident) in {} ms",
-                composited, layout.overflowPageCount(),
-                (long) layout.canvasSize() * layout.canvasSize() * 4L * layout.overflowPageCount()
-                        * 4L / 3L / (1024L * 1024L),
+                composited, layout.overflowPageCount(), residentBytes / (1024L * 1024L),
                 (System.nanoTime() - start) / 1_000_000L);
-        return new Published(albedo, layout.overflowPageCount());
+        return new Published(albedo, layout.overflowPageCount(), residentBytes);
     }
 
     /**

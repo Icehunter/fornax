@@ -139,9 +139,12 @@ public final class BlockAtlasPagedStitch {
             // far short the pack fell.
             throw lastFailure;
         }
-        // Set before anything reads the grid. The reload rebuilds it after this, and a stale value
-        // would align placements to one cell size and index them by another.
-        dev.icehunter.fornax.pipeline.SpriteBoundsTexture.useGridSize(gridSize);
+        // NOT applied here: SpriteBoundsTexture.useGridSize() closes a live GPU texture, and this
+        // method runs on the stitch's background executor, not the render thread (confirmed via the
+        // reload pipeline's own CompletableFuture chain -- SpriteLoader.loadAndStitch schedules
+        // stitch() on the background executor, only the later sprite-map update on the game one).
+        // gridSize instead rides BlockAtlasPagedLayout to BlockAtlasOverflow.rebuild, which is
+        // render-thread-only and applies it there.
         if (gridSize != dev.icehunter.fornax.pipeline.SpriteBoundsTexture.DEFAULT_SIZE) {
             // Worth a line: this is where one pack quietly costs hundreds of MB more than another
             // at the same resolution, and the reason is sprite count, not sprite size.
@@ -183,7 +186,8 @@ public final class BlockAtlasPagedStitch {
                 () -> regions.values().forEach(sprite -> sprite.contents().increaseMipLevel(mipLevel)), executor);
         SpriteLoader.Preparations preparations = new SpriteLoader.Preparations(
                 canvasSize, canvasSize, mipLevel, missing, regions, readyForUpload);
-        BlockAtlasPagedLayout layout = new BlockAtlasPagedLayout(canvasSize, mipLevel, overflowPages, ghosts);
+        BlockAtlasPagedLayout layout = new BlockAtlasPagedLayout(
+                canvasSize, mipLevel, overflowPages, ghosts, gridSize);
         return new Takeover(preparations, layout);
     }
 

@@ -9,6 +9,7 @@ import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.metalfx.FrameGenPass;
 import dev.icehunter.fornax.pass.ssaa.SsaaManager;
 import dev.icehunter.fornax.pipeline.FrameGenPacer;
+import dev.icehunter.fornax.util.GpuFatalErrors;
 import net.minecraft.client.Minecraft;
 import org.jspecify.annotations.Nullable;
 
@@ -320,6 +321,10 @@ public final class FrameGenPresenter {
             }
             stagingPrepared = true;
         } catch (Throwable t) {
+            // Fatal rethrows: copyGeneratedInto and the sky-fill/UI composites below it all record
+            // and submit real GPU work on the same shared queue -- see GpuFatalErrors' own doc for
+            // why a dead device must not be swallowed into the ordinary soft-fail path here.
+            GpuFatalErrors.rethrowIfFatal(t);
             FrameGenPass.markFailed("present seam (prepare G)", t);
         }
     }
@@ -374,6 +379,11 @@ public final class FrameGenPresenter {
             surface.blitFromTexture(encoder, staging.getColorTextureView());
             encoder.submit();
         } catch (Throwable t) {
+            // Fatal (GpuDeviceLossException, or a VulkanMetalInterop GpuFatalException) rethrows
+            // here rather than falling into the same soft-degrade path as an ordinary failure --
+            // see GpuFatalErrors' own doc for why: swallowing it hands vanilla's own blit/submit/
+            // present, which runs immediately after this injection point, the same dead device.
+            GpuFatalErrors.rethrowIfFatal(t);
             FrameGenPass.markFailed("present seam (blit G)", t);
             recordSkip(SkipReason.FAILED);
             stagingPrepared = false;
@@ -383,6 +393,7 @@ public final class FrameGenPresenter {
         try {
             surface.present();
         } catch (Throwable t) {
+            GpuFatalErrors.rethrowIfFatal(t);
             FrameGenPass.markFailed("present seam (present G)", t);
             recordSkip(SkipReason.FAILED);
             stagingPrepared = false;
@@ -393,6 +404,12 @@ public final class FrameGenPresenter {
         try {
             surface.acquireNextTexture();
         } catch (Throwable t) {
+            // Rethrown when fatal: a failed reacquire here means vanilla's own blitFromTexture/
+            // present for the real frame, which runs immediately after this injection point with
+            // no image acquired, must not run either -- propagating aborts the rest of this
+            // renderFrame call instead of letting vanilla draw into nothing (the exact seam
+            // documented above this method as a live-reproduced device-lost crash).
+            GpuFatalErrors.rethrowIfFatal(t);
             FrameGenPass.markFailed("present seam (reacquire)", t);
             recordSkip(SkipReason.FAILED);
         }

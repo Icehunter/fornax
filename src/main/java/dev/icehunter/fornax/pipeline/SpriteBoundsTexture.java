@@ -7,6 +7,7 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.icehunter.fornax.FornaxMod;
+import dev.icehunter.fornax.atlas.AtlasGenerationSchedule;
 import dev.icehunter.fornax.mixin.vanilla.TextureAtlasSpritesAccessor;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureAtlas;
@@ -99,17 +100,22 @@ public final class SpriteBoundsTexture {
     private static @Nullable GpuTextureView view;
     private static @Nullable GpuTexture rangeTexture;
     private static @Nullable GpuTextureView rangeView;
+    private static @Nullable NeutralGrid neutralGrid;
     private static boolean built;
     private static boolean reportedFailure;
 
     private SpriteBoundsTexture() {}
 
     /**
-     * The view to bind, building it on first use. Returns {@code null} before a device or atlas
-     * exists, which callers treat like any other unresolvable input.
+     * The view to bind, building it on first use. During block-generation retirement it returns a
+     * one-texel semantic-zero fallback instead, so graph passes stay resolvable without allocating
+     * either large grid early. Returns {@code null} only before a GPU device or atlas exists.
      */
     @Nullable
     public static synchronized GpuTextureView view() {
+        if (AtlasGenerationSchedule.hasPending(TextureAtlas.LOCATION_BLOCKS)) {
+            return neutralViewOrNull();
+        }
         if (!built) {
             build();
         }
@@ -133,6 +139,9 @@ public final class SpriteBoundsTexture {
      */
     @Nullable
     public static synchronized GpuTextureView rangeViewOrNull() {
+        if (AtlasGenerationSchedule.hasPending(TextureAtlas.LOCATION_BLOCKS)) {
+            return neutralViewOrNull();
+        }
         if (!built) {
             build();
         }
@@ -219,18 +228,7 @@ public final class SpriteBoundsTexture {
                 written++;
             }
 
-            if (texture == null) {
-                texture = device.createTexture("Fornax Sprite Bounds",
-                        GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
-                        GpuFormat.RGBA32_FLOAT, gridSize, gridSize, 1, 1);
-                view = device.createTextureView(texture);
-            }
-            if (rangeTexture == null) {
-                rangeTexture = device.createTexture("Fornax Sprite Height Ranges",
-                        GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
-                        GpuFormat.RGBA32_FLOAT, gridSize, gridSize, 1, 1);
-                rangeView = device.createTextureView(rangeTexture);
-            }
+            ensureGridTextures(device);
             CommandEncoder encoder = device.createCommandEncoder();
             encoder.writeToTexture(texture, pixels, 0, 0, 0, 0, gridSize, gridSize);
             encoder.writeToTexture(rangeTexture, ranges, 0, 0, 0, 0, gridSize, gridSize);
@@ -285,6 +283,116 @@ public final class SpriteBoundsTexture {
         } finally {
             MemoryUtil.memFree(pixels);
             MemoryUtil.memFree(ranges);
+        }
+    }
+
+    /** A device-generation-owned zero texel for the few frames a real grid is retired. */
+    @Nullable
+    private static GpuTextureView neutralViewOrNull() {
+        GpuDevice device = RenderSystem.tryGetDevice();
+        if (device == null) {
+            return null;
+        }
+        if (neutralGrid != null && neutralGrid.device() == device) {
+            return neutralGrid.view();
+        }
+        if (neutralGrid != null) {
+            neutralGrid.close();
+            neutralGrid = null;
+        }
+
+        GpuTexture nextTexture = null;
+        GpuTextureView nextView = null;
+        ByteBuffer zero = MemoryUtil.memCalloc(4 * Float.BYTES);
+        try {
+            nextTexture = device.createTexture("Fornax Neutral Sprite Grid",
+                    GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
+                    GpuFormat.RGBA32_FLOAT, 1, 1, 1, 1);
+            nextView = device.createTextureView(nextTexture);
+            device.createCommandEncoder().writeToTexture(
+                    nextTexture, zero, 0, 0, 0, 0, 1, 1);
+            neutralGrid = new NeutralGrid(device, nextTexture, nextView);
+            return nextView;
+        } catch (RuntimeException failure) {
+            if (nextView != null) {
+                nextView.close();
+            }
+            if (nextTexture != null) {
+                nextTexture.close();
+            }
+            throw failure;
+        } finally {
+            MemoryUtil.memFree(zero);
+        }
+    }
+
+    /** Publishes the two large grids only after both texture/view pairs exist. */
+    private static void ensureGridTextures(GpuDevice device) {
+        if (texture != null && view != null && rangeTexture != null && rangeView != null) {
+            return;
+        }
+        closeGridResources();
+
+        GpuTexture nextTexture = null;
+        GpuTextureView nextView = null;
+        GpuTexture nextRangeTexture = null;
+        GpuTextureView nextRangeView = null;
+        try {
+            nextTexture = device.createTexture("Fornax Sprite Bounds",
+                    GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
+                    GpuFormat.RGBA32_FLOAT, gridSize, gridSize, 1, 1);
+            nextView = device.createTextureView(nextTexture);
+            nextRangeTexture = device.createTexture("Fornax Sprite Height Ranges",
+                    GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
+                    GpuFormat.RGBA32_FLOAT, gridSize, gridSize, 1, 1);
+            nextRangeView = device.createTextureView(nextRangeTexture);
+            texture = nextTexture;
+            view = nextView;
+            rangeTexture = nextRangeTexture;
+            rangeView = nextRangeView;
+        } catch (RuntimeException failure) {
+            if (nextView != null) {
+                nextView.close();
+            }
+            if (nextRangeView != null) {
+                nextRangeView.close();
+            }
+            if (nextTexture != null) {
+                nextTexture.close();
+            }
+            if (nextRangeTexture != null) {
+                nextRangeTexture.close();
+            }
+            throw failure;
+        }
+    }
+
+    private static void closeGridResources() {
+        if (view != null) {
+            view.close();
+        }
+        if (rangeView != null) {
+            rangeView.close();
+        }
+        if (texture != null) {
+            texture.close();
+        }
+        if (rangeTexture != null) {
+            rangeTexture.close();
+        }
+        texture = null;
+        view = null;
+        rangeTexture = null;
+        rangeView = null;
+        built = false;
+    }
+
+    private record NeutralGrid(GpuDevice device, GpuTexture texture, GpuTextureView view)
+            implements AutoCloseable {
+        @Override
+        public void close() {
+            view.close();
+            texture.close();
         }
     }
 
@@ -346,16 +454,14 @@ public final class SpriteBoundsTexture {
 
     /** Drops the GPU resources, for pack teardown and device loss. */
     public static synchronized void destroy() {
-        if (texture != null) {
-            texture.close();
+        boolean hadTexture = texture != null || rangeTexture != null;
+        closeGridResources();
+        if (hadTexture) {
+            // Every rebuild was already logged (see the class doc's grid-raise line); nothing
+            // logged a release before this, which is exactly what made three back-to-back
+            // resource-pack switches accumulating past available VRAM invisible in the log.
+            FornaxMod.LOGGER.info("[Fornax] Sprite bounds grid: released ({} MB freed)",
+                    2L * bytes() / (1024L * 1024L));
         }
-        if (rangeTexture != null) {
-            rangeTexture.close();
-        }
-        texture = null;
-        view = null;
-        rangeTexture = null;
-        rangeView = null;
-        built = false;
     }
 }

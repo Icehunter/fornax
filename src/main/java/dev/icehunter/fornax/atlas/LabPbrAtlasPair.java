@@ -1,5 +1,6 @@
 package dev.icehunter.fornax.atlas;
 
+import dev.icehunter.fornax.FornaxMod;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -12,8 +13,16 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>The two LabPBR lanes are one resource generation. Readers must never observe a normal atlas
  * from one upload beside a material atlas from another, so the pair is installed with one map
- * write. The replacement is visible before the previous GPU objects are closed; Blaze3D's graphics
- * resource lifecycle defers their native destruction past already-submitted draws.
+ * write.
+ *
+ * <p>{@link #rebuild}/{@link #replace} still close the previous pair only after the new one
+ * builds, as a correctness fallback for any caller reached without a prior release. Changed atlas
+ * generations normally rebuild through {@link AtlasGenerationSchedule}, after the release hook's
+ * render-loop-separated retirement window; an unchanged block generation deliberately retains the
+ * exact pair and schedules only its albedo overflow/grid resources. Old and new WERE briefly
+ * double-resident by design here (Blaze3D's frame-fenced deferred destroy made that seem safe)
+ * until that doubling was live-caught contributing to a native out-of-memory crash during a
+ * resource-pack switch.
  */
 public final class LabPbrAtlasPair implements AutoCloseable {
     private static final Map<Identifier, LabPbrAtlasPair> INSTANCES = new HashMap<>();
@@ -67,11 +76,20 @@ public final class LabPbrAtlasPair implements AutoCloseable {
         if (previous == null || previous == replacement) {
             return;
         }
-        if (replacement == null || previous.normal() != replacement.normal()) {
+        boolean normalClosed = replacement == null || previous.normal() != replacement.normal();
+        boolean materialClosed = replacement == null || previous.material() != replacement.material();
+        if (normalClosed) {
             previous.normal().close();
         }
-        if (replacement == null || previous.material() != replacement.material()) {
+        if (materialClosed) {
             previous.material().close();
+        }
+        if (replacement == null && (normalClosed || materialClosed)) {
+            // Every build was already logged (see each listener's own INFO line); nothing logged a
+            // release before this, which is exactly what made three back-to-back resource-pack
+            // switches accumulating past available VRAM invisible in the log.
+            FornaxMod.LOGGER.info("[LabPBR] Released sidecar atlas pair for {}: normal={} material={}",
+                    atlasLocation, normalClosed, materialClosed);
         }
     }
 

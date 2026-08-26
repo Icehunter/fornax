@@ -64,6 +64,7 @@
     "vanilla.TextureAtlasCelestialHookMixin",
     "vanilla.TextureAtlasLabPbrAnimationMixin",
     "vanilla.TextureAtlasMaterialHookMixin",
+    "vanilla.TextureAtlasReleaseGenerationMixin",
     "vanilla.TextureAtlasSpriteInvoker",
     "vanilla.TextureAtlasSpritesAccessor",
     "vanilla.TitleScreenMixin",

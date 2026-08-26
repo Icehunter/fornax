@@ -924,7 +924,7 @@ to evolve upstream without needing to be restated here.
 | `SodiumWorldRendererRenderLayerMixin` | `SodiumWorldRenderer` | Populate shared per-frame render context and refresh PBR settings once per pass | Inject |
 | `UniformBufferManagerMixin` | `UniformBufferManager` | Widen the shared per-frame uniform buffer and append the motion-vector/jitter fields; add a second small ring buffer for PBR settings | ModifyArg, Inject x2, WrapOperation |
 
-**Vanilla/Blaze3D-targeting** (21):
+**Vanilla/Blaze3D-targeting** (22):
 
 | Mixin | Target | Purpose | Shape |
 |---|---|---|---|
@@ -947,6 +947,7 @@ to evolve upstream without needing to be restated here.
 | `TextureAtlasBlockHookMixin` | `TextureAtlas` | Capture the live block atlas texture/view used by voxel cutout-occlusion and analytic-light passes | Inject |
 | `TextureAtlasMaterialHookMixin` | `TextureAtlas` | Rebuild the material-map atlas whenever the block atlas is (re)uploaded | Inject |
 | `TextureAtlasNormalHookMixin` | `TextureAtlas` | Rebuild the normal-map atlas whenever the block atlas is (re)uploaded | Inject |
+| `TextureAtlasReleaseGenerationMixin` | `TextureAtlas` | At `upload` HEAD, select a rebuild scope and hand it to `AtlasGenerationSchedule`: changed block = sidecars + overflow/grid, unchanged block = retain sidecars but retire overflow/grid, changed non-block mirrored atlas = sidecars only, unchanged non-block = no-op. Released resources rebuild only after three render-loop-separated polls | Inject (HEAD) |
 | `VulkanRenderPipelineMixin` | `VulkanRenderPipeline` | Declare the widened 60-byte push-constant range on every terrain-family Vulkan pipeline layout | WrapOperation |
 | `WindowMixin` | `Window` | Report the supersampled dimensions while a scaled frame is in flight, so downstream size queries stay consistent | ModifyReturnValue x2 |
 
@@ -1849,14 +1850,70 @@ else entirely.
   frame later as an unattributed native crash with no Java stack trace. `GpuDeviceLossException`
   is now caught ahead of the broad fallback and rethrown, so the real cause surfaces immediately
   through Minecraft's own crash-report path instead.
-- **A VRAM budget that does not know about the other budgets sharing the same device is not a real
-  budget.** The block atlas's overflow-page budget (`SpriteLoaderPagedStitchMixin`, up to 1/2 of
-  real device-local VRAM) and the two labPBR sidecar atlases' budget (`PbrSidecarAtlasScale`, was a
-  fixed 512MB constant per atlas, and no ceiling at all (`Long.MAX_VALUE`) at the FULL resolution
-  tier) were sized completely independently, with neither aware of the other or of
-  `LabPbrAtlasPair`'s own documented old+new coexistence during a resource-pack switch (up to 4
-  atlas-sized sidecar allocations resident at once: old normal, new normal, old material, new
-  material). Live-caught as a `VK_ERROR_OUT_OF_DEVICE_MEMORY`/`Lost VkDevice` crash switching to a
-  large labPBR resource pack. Fixed via `PbrSidecarAtlasScale.effectiveMaxAtlasBytes`, which derives
-  the sidecar ceiling from the same real-VRAM query the block atlas budget already uses, reserving a
-  documented, coordinated share rather than each subsystem claiming its own independently.
+- **Every VRAM budget sharing one device derives from the same real-VRAM query, never an
+  independent fixed constant.** The block atlas's overflow-page budget
+  (`SpriteLoaderPagedStitchMixin`, up to 1/2 of real device-local VRAM) and the two labPBR sidecar
+  atlases' budget (`PbrSidecarAtlasScale.effectiveMaxAtlasBytes`) both read
+  `GpuMemoryEstimator.detectedVramBytesFromDevice`, each reserving its own documented, coordinated
+  share rather than sizing against a constant with no relationship to what the device actually has
+  or to what the other budget already claims.
+- **`GpuTexture.close()` does not free VRAM.** It enqueues the handle into a 2-slot destroy ring
+  that Blaze3D drains on `VulkanCommandEncoder.submit()`, once per real rendered frame; an entry is
+  destroyed only on the SECOND `submit()` after it was closed, and a wait-idle before closing does
+  not advance the ring. A teardown that allocates a replacement inside the same synchronous call as
+  the release reclaims nothing before that allocation.
+- **A changed atlas generation waits for real render-loop submits to reclaim the previous one
+  before allocating the next.** `TextureAtlasReleaseGenerationMixin` (at `upload` HEAD) selects a
+  rebuild scope per location: full for a changed block atlas, overflow/grid-only for an unchanged
+  one (that data is not covered by the sidecar fingerprint), sidecars-only for a changed non-block
+  mirrored atlas, no-op otherwise. `AtlasGenerationSchedule` defers that scope's rebuild three
+  `cycleAnimationFrames` polls (`RETIRE_POLLS`, matching `TargetRegistry.RETIRE_GENERATIONS`'s
+  margin over the destroy ring's 2-submit requirement), driven by the existing per-frame
+  `TextureAtlasLabPbrAnimationMixin` poll. The rebuild itself is one synchronous call; nothing runs
+  off the render thread and nothing splits CPU compositing from GPU upload.
+- **A retired sprite grid stays on its neutral fallback until its generation's terminal atlas work
+  completes, and its Vulkan view closes before its texture.** `SpriteBoundsTexture.view`/
+  `rangeViewOrNull` return a shared 1x1 zero-filled fallback while the block generation is pending
+  (`AtlasGenerationSchedule.hasPending`), and publish the real grids only once both texture/view
+  pairs exist. `BlockAtlasOverflow` refuses to publish a nonzero overflow page count unless the
+  matching sidecar pair exists, so the shader constant and the sampled array-layer counts always
+  agree.
+- **A sidecar atlas's byte budget prices every layer the allocation actually creates.**
+  `PbrSidecarAtlasScale.fits` multiplies by `(1 + overflowPages)`: both sidecar listeners allocate
+  one full-size array layer per block-atlas overflow page, on top of the base image.
+  `BlockAtlasPageBudget.maxPages` returns 0, not a floor of 1, when the budget cannot afford even
+  one page; the caller's own `+1` for page 0 is what keeps a starved device usable.
+- **A broad catch around GPU work checks whether the failure is fatal before it logs and
+  degrades.** `GpuFatalErrors.rethrowIfFatal(failure)` recognizes `GpuDeviceLossException` and
+  `VulkanMetalInterop`'s own `GpuFatalException` (its interop wait/command-buffer failures, distinct
+  from an ordinary `IllegalStateException`) and rethrows before any catch's degrade path runs; call
+  it first in any catch wrapping GPU work. Applied at the eight sites on the crash path
+  (`FrameGenPresenter`'s four present-seam catches, `GraphRunner`'s MIPCHAIN/COPY dispatch,
+  `FrameGenPass`'s three catches), not universally: some broad catches elsewhere have their own
+  considered retry/latch behavior. `VulkanUtils.crashIfFailure` only wraps `VK_ERROR_DEVICE_LOST` as
+  `GpuDeviceLossException`, so a Vulkan OOM still surfaces as a plain `IllegalStateException`;
+  `BlockAtlasOverflow.build`'s `ArrayTextures.create` and both sidecar listeners'
+  `device.createTexture`/`ArrayTextures.create` calls wrap that specific call to raise
+  `GpuFatalException` on any failure instead, leaving unrelated exceptions elsewhere in the same
+  method unreclassified.
+- **A multi-handle GPU builder hoists every allocation to a nulled local and frees whatever
+  succeeded in an outer catch.** `NormalMapAtlasReloadListener.upload`/
+  `MaterialMapAtlasReloadListener.upload` create a texture, then an `ArrayTextures.Allocation`, then
+  a view, with real throwing operations between each; the outer catch closes
+  `texture`/`pages`/any in-flight mip that is non-null before rethrowing, matching the precedents
+  this section documents elsewhere.
+- **A GPU-owned texture closes only from the render thread, regardless of where the decision to
+  resize it is made.** `BlockAtlasPagedStitch.takeover` runs on the reload's background stitch
+  executor and only decides the grid size, carried on `BlockAtlasPagedLayout.gridSize`;
+  `BlockAtlasOverflow.rebuild` (render-thread-only) is what actually calls
+  `SpriteBoundsTexture.useGridSize`.
+- **A release hook that clears published state checks whether anything actually changed before it
+  releases.** `TextureAtlasReleaseGenerationMixin` computes both LabPBR lanes' fingerprints itself
+  before touching `LabPbrAtlasPair`, so an unchanged reload releases nothing and each listener's own
+  `existing != null && fingerprint.equals(...)` skip check (14.6s/~24s on a large pack) stays
+  reachable.
+- **Releasing published GPU state also invalidates whatever else was compiled against that state's
+  shape, not just what reads its content.** `BlockAtlasOverflow.releaseCurrent` resets
+  `lastPublishedPageCount` and clears Sodium's terrain program cache in the same call that nulls
+  `current`, so a reload that never reaches `rebuild()` afterward cannot leave cached terrain
+  programs compiled for a page count the actual binding no longer has.

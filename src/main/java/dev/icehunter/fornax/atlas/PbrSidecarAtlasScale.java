@@ -64,11 +64,15 @@ public final class PbrSidecarAtlasScale {
      * sprite-bounds grid, leaving 1/2 for everything else this engine and vanilla put on the GPU
      * (vanilla's own atlases, the G-buffer, MetalFX interop images). Of that remaining half, this
      * reserves half again for that non-sidecar overhead, leaving 1/4 of total real VRAM for BOTH
-     * sidecar lanes (normal + material) combined. Each lane can itself be briefly doubled during a
-     * resource-pack switch, per {@link LabPbrAtlasPair}'s own doc ("the replacement is visible before
-     * the previous GPU objects are closed"), so up to 4 atlas-sized allocations (old normal, new
-     * normal, old material, new material) can be resident at once. 1/4 total split 4 ways is 1/16
-     * per allocation.
+     * sidecar lanes (normal + material) combined, and two atlas locations own sidecar lanes ({@code
+     * LOCATION_BLOCKS} and the banner-pattern atlas, see {@code LabPbrGeometryBindings
+     * #isMirroredAtlasOwner}), giving 4 concurrent allocations in the steady state. 1/4 total split
+     * 4 ways is 1/16 per allocation.
+     *
+     * <p>{@code TextureAtlasReleaseGenerationMixin} now frees the previous generation before the
+     * next one builds, so the old-and-new doubling this fraction used to budget headroom for no
+     * longer happens on the normal path -- 1/16 is accordingly conservative rather than exact, which
+     * is the safer direction to be wrong in.
      */
     private static final double VRAM_SHARE_PER_ATLAS_FRACTION = 1.0 / 16.0;
 
@@ -112,15 +116,19 @@ public final class PbrSidecarAtlasScale {
      * @param maxDimension     the device's largest supported texture dimension
      * @param mipFactor        resident-size multiplier for this atlas's mip chain: {@code 4/3} for a
      *                         full chain, {@code 1} for a single level
+     * @param overflowPages    paged block-atlas overflow layers this atlas will ALSO allocate, one
+     *                         full-size layer each, matching page 0's width/height/mip count exactly
+     *                         (see {@link BlockAtlasPageBudget}'s doc) -- 0 for any atlas location
+     *                         that never pages
      */
     public static int chooseLog2Scale(int blockAtlasWidth, int blockAtlasHeight, int maxSidecarRatio,
-                                      int maxDimension, double mipFactor) {
+                                      int maxDimension, double mipFactor, int overflowPages) {
         return chooseLog2Scale(blockAtlasWidth, blockAtlasHeight, maxSidecarRatio, maxDimension,
-                               mipFactor, 0, MAX_ATLAS_BYTES);
+                               mipFactor, overflowPages, 0, MAX_ATLAS_BYTES);
     }
 
     /**
-     * As {@link #chooseLog2Scale(int, int, int, int, double)}, with an explicit ceiling on the
+     * As {@link #chooseLog2Scale(int, int, int, int, double, int)}, with an explicit ceiling on the
      * scale exponent -- the user's {@code SidecarMapResolution} tier.
      *
      * <p>RELATIVE to what the pack asked for, not an absolute ceiling, and the distinction is
@@ -132,25 +140,27 @@ public final class PbrSidecarAtlasScale {
      *
      * <p>Passing 0 reproduces the historical behaviour exactly: the offset vanishes, the surveyed
      * ratio stands, and the byte budget alone chooses as it always did. That is what the
-     * five-argument form above passes.
+     * six-argument form above passes.
      *
      * @param log2ScaleOffset offset on the scale the pack asked for; 0 keeps it and each step down
      *                        halves the sidecar per axis relative to what was authored
-     * @param maxAtlasBytes resident-byte ceiling for this atlas including its mip chain. The FULL
-     *                      tier passes {@code Long.MAX_VALUE}: a ceiling exists so a machine is not
-     *                      surprised, and a user who explicitly asked for full resolution is not
-     *                      being surprised. maxDimension and MIN_LOG2_SCALE still bound it.
+     * @param maxAtlasBytes resident-byte ceiling for this atlas including its mip chain and every
+     *                      overflow layer. The FULL tier passes {@code Long.MAX_VALUE}: a ceiling
+     *                      exists so a machine is not surprised, and a user who explicitly asked for
+     *                      full resolution is not being surprised. maxDimension and MIN_LOG2_SCALE
+     *                      still bound it.
      */
     public static int chooseLog2Scale(int blockAtlasWidth, int blockAtlasHeight, int maxSidecarRatio,
-                                      int maxDimension, double mipFactor, int log2ScaleOffset,
-                                      long maxAtlasBytes) {
+                                      int maxDimension, double mipFactor, int overflowPages,
+                                      int log2ScaleOffset, long maxAtlasBytes) {
         // The tier adjusts what the pack asked for, before the budget loop starts stepping down.
         int scale = ceilLog2(Math.max(1, maxSidecarRatio)) + log2ScaleOffset;
         // Step DOWN from what the pack asked for until it fits, never up from what fits: a pack that
         // ships no high-resolution maps must land on exactly 0 and take the historical path, and
         // searching upward from below would depend on the budget arithmetic to stop it there.
         while (scale > MIN_LOG2_SCALE
-                && !fits(blockAtlasWidth, blockAtlasHeight, scale, maxDimension, mipFactor, maxAtlasBytes)) {
+                && !fits(blockAtlasWidth, blockAtlasHeight, scale, maxDimension, mipFactor,
+                         overflowPages, maxAtlasBytes)) {
             scale--;
         }
         // The loop's short-circuit evaluates `scale > MIN_LOG2_SCALE` before `fits(...)`, so it can
@@ -160,7 +170,8 @@ public final class PbrSidecarAtlasScale {
         // over budget, `atlasDimension` still comes out positive there, so neither caller's existing
         // "invalid atlas size" bail-out catches it, and allocation proceeds to fail later, past where
         // either caller can skip gracefully.
-        if (!fits(blockAtlasWidth, blockAtlasHeight, scale, maxDimension, mipFactor, maxAtlasBytes)) {
+        if (!fits(blockAtlasWidth, blockAtlasHeight, scale, maxDimension, mipFactor, overflowPages,
+                  maxAtlasBytes)) {
             throw new IllegalStateException(
                     "No labPBR atlas scale fits even at the floor (" + MIN_LOG2_SCALE + "): "
                             + blockAtlasWidth + "x" + blockAtlasHeight + " block atlas exceeds "
@@ -177,14 +188,25 @@ public final class PbrSidecarAtlasScale {
      */
     private static final int MIN_LOG2_SCALE = -3;
 
+    /**
+     * Estimates the same shape the listeners actually allocate: a base image plus {@code
+     * overflowPages} full-size array layers, all at this atlas's mip factor. Before this, the
+     * estimate priced only the base image -- 3-4x under the real allocation at the {@code
+     * BlockAtlasGhostLayout.MAX_OVERFLOW_PAGES} ceiling, since neither {@code
+     * NormalMapAtlasReloadListener} nor {@code MaterialMapAtlasReloadListener} downsamples an
+     * overflow layer relative to page 0 (see {@link BlockAtlasPageBudget}'s doc, which already
+     * accounts for this on the block-atlas side). Live-caught contributing to a native
+     * out-of-memory crash during a resource-pack switch.
+     */
     private static boolean fits(int blockAtlasWidth, int blockAtlasHeight, int log2Scale,
-                                int maxDimension, double mipFactor, long maxAtlasBytes) {
+                                int maxDimension, double mipFactor, int overflowPages,
+                                long maxAtlasBytes) {
         int width = atlasDimension(blockAtlasWidth, log2Scale);
         int height = atlasDimension(blockAtlasHeight, log2Scale);
         if (width > maxDimension || height > maxDimension) {
             return false;
         }
-        return (long) width * height * BYTES_PER_TEXEL * mipFactor <= maxAtlasBytes;
+        return (long) width * height * BYTES_PER_TEXEL * mipFactor * (1 + overflowPages) <= maxAtlasBytes;
     }
 
     /** This atlas's dimension for a given block-atlas dimension, at {@code log2Scale}. */
