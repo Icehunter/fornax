@@ -615,7 +615,7 @@ terrain's translucent arm.
 
 ## 6. Uniform contracts
 
-### `u_Globals` (std140, 688 bytes)
+### `u_Globals` (std140, 800 bytes)
 
 Written in two pieces sharing one physical buffer: Sodium's own uniform writer produces the first
 184 bytes unmodified, and `GlobalUniformsWriteMixin` appends the remaining fields to the same
@@ -652,8 +652,15 @@ buffer object. The backing ring buffer (`UniformBufferManagerMixin`) is widened 
 | `u_CameraSkyLight` | vec4 | 592 | 16 |
 | `u_InvProjModelViewNoJitter` | mat4 | 608 | 64 |
 | `u_FrameState` | vec4 | 672 | 16 |
+| `u_HeldLight` | vec4 | 688 | 16 |
+| `u_WeatherAnchor` | vec4 | 704 | 16 |
+| `u_CameraDelta` | vec4 | 720 | 16 |
+| `u_LocalActorPosition` | vec4 | 736 | 16 |
+| `u_LocalActorMotion` | vec4 | 752 | 16 |
+| `u_LocalActorShape` | vec4 | 768 | 16 |
+| `u_LocalActorFluid` | vec4 | 784 | 16 |
 
-Total: 688 bytes exactly. Both sides apply the same std140 alignment rules (std140 is a fixed,
+Total: 800 bytes exactly. Both sides apply the same std140 alignment rules (std140 is a fixed,
 standard packing convention that lets GPU shader code and CPU-side buffer-writing code agree on
 where each field sits in memory) to the same declared type sequence in the same order, so in
 principle the offsets can only agree. But they are written in two languages by hand, and a
@@ -661,7 +668,10 @@ disagreement produces no compile error, no validation failure, and no log line: 
 silently holding a neighbouring field's bytes. `GlobalsLayoutContractTest` therefore computes the
 block size from `globals.glsl` under std140 rules and asserts it equals what
 `UniformBufferManagerMixin` allocates, so a divergence fails the build instead of surfacing as a
-feature that mysteriously does nothing.
+feature that mysteriously does nothing. A second test checks field order too, reading
+`GlobalUniformsWriteMixin`'s `Std140Builder` call sequence off its source and comparing it to
+`globals.glsl`'s declared order, type for type. Size alone can match with two fields swapped;
+this catches that case.
 
 That check also covers the vec3 trap: `Std140Builder.putVec3` pads a vec3 to a full 16 bytes, while
 GLSL lets a following member with smaller alignment sit at offset+12. Never place a scalar directly

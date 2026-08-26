@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>These two are written by different people at different times in different languages, and nothing
  * mechanically ties them together. When they disagree, every member past the divergence is read from
- * the wrong offset -- with no compile error, no validation failure, and no log line. The symptom is a
+ * the wrong offset, with no compile error, no validation failure, and no log line. The symptom is a
  * uniform that silently holds a neighbouring field's bytes, which reads as "this feature does nothing"
  * and has cost real debugging time on this codebase before.
  *
@@ -28,6 +28,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * offset+12. A scalar placed directly after a vec3 therefore lands at a different offset on each side.
  * Computing the block size under GLSL's rules and comparing it to what Java allocates surfaces that
  * divergence as a size mismatch instead of as a mysteriously dead uniform.
+ *
+ * <p>A second test below checks field order too, since size alone can still match with two fields
+ * swapped. Neither test can instantiate the writer, since it reads a live game frame, so both read
+ * source text instead, same pattern as {@code BuiltinResolutionContractTest}.
  */
 class GlobalsLayoutContractTest {
 
@@ -35,6 +39,12 @@ class GlobalsLayoutContractTest {
             Path.of("src/main/resources/assets/fornax/shaders/include/globals.glsl");
     private static final Path MANAGER =
             Path.of("src/main/java/dev/icehunter/fornax/mixin/sodium/UniformBufferManagerMixin.java");
+    private static final Path WRITER =
+            Path.of("src/main/java/dev/icehunter/fornax/mixin/sodium/GlobalUniformsWriteMixin.java");
+    private static final String FORNAX_EXTENSION_MARKER = "Fornax extension fields below";
+    private static final String WRITER_METHOD_START =
+            "private ByteBuffer fornax$appendMotionVectorFields(";
+    private static final String WRITER_METHOD_END = "return original.call(builder);";
 
     /** GLSL std140: {alignment, size}. vec3 is the notable one -- aligns to 16 but occupies only 12. */
     private static int[] rulesFor(String type) {
@@ -75,11 +85,27 @@ class GlobalsLayoutContractTest {
 
     /** Members of the {@code u_Globals} block, in declaration order, as {type, name}. */
     private static List<String[]> declaredMembers() throws IOException {
+        return parseMembers(rawGlobalsBlock());
+    }
+
+    /** Members after Sodium's own prefix: the part {@code GlobalUniformsWriteMixin} writes. */
+    private static List<String[]> declaredExtensionMembers() throws IOException {
+        String body = rawGlobalsBlock();
+        int markerAt = body.indexOf(FORNAX_EXTENSION_MARKER);
+        assertTrue(markerAt >= 0, "could not find the '" + FORNAX_EXTENSION_MARKER + "' marker in " + GLOBALS);
+        return parseMembers(body.substring(markerAt));
+    }
+
+    /** The raw (comments included) text of the {@code u_Globals} block, braces excluded. */
+    private static String rawGlobalsBlock() throws IOException {
         String source = Files.readString(GLOBALS);
         int start = source.indexOf("uniform u_Globals {");
         assertTrue(start >= 0, "could not find the u_Globals block in " + GLOBALS);
-        String body = source.substring(start, source.indexOf("};", start));
+        return source.substring(start, source.indexOf("};", start));
+    }
 
+    /** Parses {type, name} member declarations out of a block body, comments and all. */
+    private static List<String[]> parseMembers(String body) {
         // Strip comments first: the block is heavily commented, and a type keyword inside prose would
         // otherwise be parsed as a member.
         body = body.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\n]*", "");
@@ -91,6 +117,49 @@ class GlobalsLayoutContractTest {
             members.add(new String[] {m.group(1), m.group(2)});
         }
         return members;
+    }
+
+    @Test
+    void writerCallOrderMatchesTheFornaxExtensionFieldsInGlobalsGlsl() throws IOException {
+        List<String> declaredTypes = declaredExtensionMembers().stream().map(member -> member[0]).toList();
+        List<String> writtenTypes = writerCallTypes();
+
+        assertEquals(declaredTypes, writtenTypes,
+                "u_Globals field order/types mismatch. Declared: " + declaredTypes
+                        + ". Written by " + WRITER + ": " + writtenTypes);
+    }
+
+    /** GLSL type of each {@code Std140Builder.putXxx(...)} call in the writer method, in order. */
+    private static List<String> writerCallTypes() throws IOException {
+        String source = Files.readString(WRITER);
+        int methodStart = source.indexOf(WRITER_METHOD_START);
+        assertTrue(methodStart >= 0, "could not find " + WRITER_METHOD_START + " in " + WRITER);
+        int methodEnd = source.indexOf(WRITER_METHOD_END, methodStart);
+        assertTrue(methodEnd >= 0, "could not find the terminal '" + WRITER_METHOD_END + "' in " + WRITER);
+        String body = source.substring(methodStart, methodEnd);
+
+        Matcher m = Pattern.compile("\\.(putFloat|putInt|putVec2|putVec3|putVec4|putIVec2|putIVec4|putMat4f)\\(")
+                .matcher(body);
+        List<String> types = new ArrayList<>();
+        while (m.find()) {
+            types.add(putMethodType(m.group(1)));
+        }
+        return types;
+    }
+
+    private static String putMethodType(String putMethod) {
+        return switch (putMethod) {
+            case "putFloat" -> "float";
+            case "putInt" -> "int";
+            case "putVec2" -> "vec2";
+            case "putVec3" -> "vec3";
+            case "putVec4" -> "vec4";
+            case "putIVec2" -> "ivec2";
+            case "putIVec4" -> "ivec4";
+            case "putMat4f" -> "mat4";
+            default -> throw new IllegalArgumentException(
+                    "unmodeled Std140Builder method: " + putMethod + ", add its GLSL type");
+        };
     }
 
     private static int allocatedBufferSize() throws IOException {
