@@ -111,6 +111,21 @@ class ParticlePassBindingTest {
     }
 
     @Test
+    void aHistoryReaderOfAComputeOutputStillGetsTheHandoff() {
+        // targetBaseName collapses the .history suffix: after the end-of-frame swap, next frame's
+        // current image is the physical image a reader sampled as history the prior frame, so a
+        // .history reader needs the same wait a plain reader of the same target would. Exact-string
+        // matching against p.outputs() would miss this entirely and return 0.
+        PassSpec compute = computePass("water_step", List.of("waveState"), null);
+        PassSpec terrain = new PassSpec("terrain", PassType.GEOMETRY, GeometrySlot.TERRAIN,
+                "shaders/terrain", null, List.of("waveState.history"), List.of("sceneColor"),
+                null, null, List.of(), null, null, null);
+        GraphSpec graph = new GraphSpec(Map.of(), List.of(compute, terrain));
+        assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                GraphRunner.computeGraphicsWaitStages(compute, graph, Map.of()));
+    }
+
+    @Test
     void aParticlesPassIsNeverItsOwnHandoffSource() {
         // Only a COMPUTE submission has a cross-queue handoff to request; asking about any other
         // pass type must be 0, not an accidental match on its own outputs.

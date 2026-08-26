@@ -1117,9 +1117,16 @@ public final class GraphRunner {
             boolean finalProducer = i == runnable.size() - 1;
             // Only the final producer signals: every producer submits to the same compute queue in
             // graph order, so one semaphore covers the whole chain (see this method's own doc). The
-            // consumers of these lighting buffers are fragment shaders, so FRAGMENT is the earliest
-            // stage the graphics queue has to wait at.
-            long graphicsWaitStages = finalProducer ? VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : 0;
+            // mask it signals is the union of every producer's own graphicsWaitStagesFor result, not a
+            // hardcoded stage: a hardcoded FRAGMENT is correct only as long as every reader of every
+            // lighting buffer in the chain happens to be a fragment-stage consumer, and drifts silently
+            // wrong the moment a pack points a COPY or PARTICLES pass at one instead.
+            long graphicsWaitStages = 0;
+            if (finalProducer) {
+                for (PassSpec producer : runnable) {
+                    graphicsWaitStages |= graphicsWaitStagesFor(producer, pack.graph());
+                }
+            }
             runner.run(r, computeParams(p, width, height), options, globals,
                     computeExtraPushConstants(p, matrices, x, y, z),
                     computeDispatchOverride(p), false, graphicsWaitStages);
@@ -1721,6 +1728,12 @@ public final class GraphRunner {
      * group would wait at the wrong stage and, depending on driver ordering, might not cover the
      * copy at all.
      *
+     * <p>Matches readers by base target name, collapsing a {@code .history} suffix, the same way
+     * {@link #computeStorageWriteNeedsGraphicsDrain} already does for the reverse direction: after the
+     * end-of-frame swap, next frame's current image is the physical image a reader sampled as history
+     * the prior frame, so a {@code .history} reader of this pass's output needs the same handoff a
+     * plain reader would.
+     *
      * <p>Pure function of the graph + compile values, extracted for the same reason {@link
      * #computePackDeclaresDepthCopyback} was: this is a correctness rule about which passes feed
      * which, and it should be provable without a GPU.
@@ -1729,13 +1742,17 @@ public final class GraphRunner {
         if (p.type() != PassType.COMPUTE || p.outputs().isEmpty()) {
             return 0;
         }
+        Set<String> outputBaseNames = new HashSet<>();
+        for (String output : p.outputs()) {
+            outputBaseNames.add(targetBaseName(output));
+        }
         long stages = 0;
         for (PassSpec reader : graph.passes()) {
             if (!isEnabledAtCompile(reader, compileValues)) {
                 continue;
             }
             for (String in : reader.inputs()) {
-                if (p.outputs().contains(in)) {
+                if (outputBaseNames.contains(targetBaseName(in))) {
                     if (reader.type() == PassType.PARTICLES) {
                         stages |= VK13.VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
                     } else if (reader.type() == PassType.FULLSCREEN || reader.type() == PassType.GEOMETRY

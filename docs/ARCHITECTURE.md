@@ -1935,6 +1935,17 @@ else entirely.
   target via `copyTextureToTexture`, which executes at transfer stage, not fragment). A reader type
   with no branch contributes 0, which skips both the semaphore signal and the wait entirely — not a
   conservative default, an absent one.
+- **A cross-queue wait-stage lookup matches readers by base target name, not exact string.**
+  `GraphRunner.computeGraphicsWaitStages` collapses a `.history` suffix via `targetBaseName` before
+  comparing a reader's input against a compute pass's outputs, mirroring
+  `computeStorageWriteNeedsGraphicsDrain`'s own reverse-direction match: after the end-of-frame
+  swap, next frame's current image is the physical image a reader sampled as history the prior
+  frame, so a `.history` reader needs the same handoff a plain reader of the same target would.
+- **A hand-picked wait stage for a fixed set of consumers must be re-derived, not hardcoded, once a
+  shared function already computes it.** `GraphRunner.runPreOpaqueLightingCompute`'s final producer
+  signals the union of `computeGraphicsWaitStages` across every producer in its chain rather than a
+  hardcoded `FRAGMENT_SHADER_BIT`, so a pack pointing a `COPY` or `PARTICLES` pass at a lighting
+  buffer still gets the correct stage instead of a silently under-synchronized fragment-only wait.
 - **Every async resource-reload chain that ends in `RendererReload.request()` carries an
   `.exceptionally` handler.** `PackSwitch.apply`, `PackEditSession.apply` and `PackReload.reload`
   all chain the same `Minecraft.reloadResourcePacks()`-derived future; a listener throwing partway
