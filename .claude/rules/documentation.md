@@ -47,9 +47,14 @@ When you lose an afternoon to one, write it there.
 
 ## Comments in code
 
-- Comments state the engineering reason, not the history of who did what. The exception is a
-  live-caught bug: mixin and validation Javadocs in this tree record the exact failure that forced
-  the shape, and that is the most useful comment in the file. Keep writing those.
+- **Present tense only. No history.** A comment states the current engineering reason a piece of
+  code is shaped the way it is — never the story of how it got that way. Banned: "used to",
+  "previously", "before this", "was reverted", "already/once/fixed via/fixed by", "LIVE-CAUGHT",
+  incident dates. If a comment reads as narration of a bug that happened rather than a mechanism
+  that holds, rewrite it: keep every technical fact (what breaks, what depends on what), drop the
+  timeline.
+- The story of a bug — what broke, how it was found, what was tried — belongs in `docs/local/`
+  (gitignored), never in a comment. Comments ship; incident write-ups do not.
 - **Every authored constant carries a provenance comment** — the paper, the measurement, or the
   render it was tuned against. See `.claude/rules/clean-room.md`.
 - **Never name another pack or renderer as a source.** Not in a comment, not in a commit message.
@@ -66,6 +71,7 @@ text wraps around 100 columns. Prose over bullet soup where a paragraph reads be
 
 - [ ] `docs/ARCHITECTURE.md` updated in the same commit as the surface it documents
 - [ ] A newly discovered silent failure added to §12 Known laws
+- [ ] No comment narrates history — present tense, mechanism only, no incident story
 - [ ] Authored constants carry provenance comments
 - [ ] No comment or commit message names another project as a source
 - [ ] Gitignored scratch dirs not treated as documentation

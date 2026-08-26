@@ -63,9 +63,9 @@ from a call site that runs every frame.
 ## Documentation
 
 Every mixin carries a class Javadoc stating: what it targets, what it changes, why the injection
-point is the one chosen, and what happens when the pack is inactive. The existing mixins document
-live-caught bugs in that Javadoc — keep that habit; it is the record of why the seam looks the way
-it does.
+point is the one chosen, and what happens when the pack is inactive. State the reason in present
+tense — the mechanism the seam protects against, not the story of the bug that revealed it. See
+`.claude/rules/documentation.md`'s "Comments in code" section for the full rule.
 
 ## Testing
 
