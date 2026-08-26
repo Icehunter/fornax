@@ -14,9 +14,9 @@ import org.spongepowered.asm.mixin.injection.At;
  * declares {@code getWidth()}/{@code getHeight()} -- not the similarly named
  * {@code com.mojang.blaze3d.opengl.GlBackend}, which has no such methods.
  *
- * <p>{@link GameRendererMixin} reads native size via {@code Window.getScreenWidth/Height}
- * (unaffected by this mixin) rather than {@code getWidth/getHeight}, to avoid feeding an
- * already-scaled size back in as if it were native.
+ * <p>{@link GameRendererMixin} reads native size through these SAME {@code getWidth/getHeight}
+ * methods, but before {@link SsaaManager#isFrameActive()} is set true for the frame, so this
+ * mixin's override has not engaged yet and the read passes through untouched.
  */
 @Mixin(Window.class)
 public class WindowMixin {

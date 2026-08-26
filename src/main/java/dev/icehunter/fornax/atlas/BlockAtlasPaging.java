@@ -99,7 +99,8 @@ public final class BlockAtlasPaging {
      * parameters, SEPARATED from the real mip level on purpose: the stitcher uses this value only
      * to round padded boxes up to {@code 1 << mip} multiples (decompile:
      * {@code smallestFittingMinTexel}), and the paged layout must round to the SPRITE-BOUNDS GRID
-     * instead. That grid ({@code SpriteBoundsTexture.SIZE} cells across the canvas) can only store
+     * instead. That grid ({@link dev.icehunter.fornax.pipeline.SpriteBoundsTexture#size()} cells
+     * across the canvas) can only store
      * ONE rect per cell, so any placement pitch that does not divide the cell size leaves every
      * sprite-boundary cell shared between two sprites -- last writer wins, the loser's edge strip
      * fails the shader's rect-contains-uv gate, and POM shuts off in a band along every sprite

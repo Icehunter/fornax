@@ -722,12 +722,24 @@ public final class BrickGridUpload {
                 // recording anything and skips the WHOLE slot rather than partially writing some of the
                 // four ranges but not others -- partial per-slot corruption would look plausible instead
                 // of obviously wrong; a dropped slot is simply re-harvested if it re-enters the window.
-                if (!fitsInBuffer(occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancy.sizeBytes())
-                        || !fitsInBuffer(payloadOffset, VOXELS_PER_SECTION, payload.sizeBytes())
-                        || !fitsInBuffer(faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSeal.sizeBytes())
-                        || (paletteBytes != null && !fitsInBuffer(paletteOffset, paletteData.length, palette.sizeBytes()))
-                        || !fitsInBuffer(summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summary.sizeBytes())) {
+                if (!fitsInBuffer(occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancy.sizeBytes())) {
                     logOobDrop(OCCUPANCY_TARGET, slot, occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancy.sizeBytes());
+                    return;
+                }
+                if (!fitsInBuffer(payloadOffset, VOXELS_PER_SECTION, payload.sizeBytes())) {
+                    logOobDrop(PAYLOAD_TARGET, slot, payloadOffset, VOXELS_PER_SECTION, payload.sizeBytes());
+                    return;
+                }
+                if (!fitsInBuffer(faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSeal.sizeBytes())) {
+                    logOobDrop(FACE_SEAL_TARGET, slot, faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSeal.sizeBytes());
+                    return;
+                }
+                if (paletteBytes != null && !fitsInBuffer(paletteOffset, paletteData.length, palette.sizeBytes())) {
+                    logOobDrop(PALETTE_TARGET, slot, paletteOffset, paletteData.length, palette.sizeBytes());
+                    return;
+                }
+                if (!fitsInBuffer(summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summary.sizeBytes())) {
+                    logOobDrop(BRICK_SUMMARY_TARGET, slot, summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summary.sizeBytes());
                     return;
                 }
                 VulkanComputeBackend backend = VulkanComputeBackend.tryCreate();
@@ -905,11 +917,20 @@ public final class BrickGridUpload {
                 // Correctness guard, per item -- see this method's own "Per-item bounds guard" doc and
                 // fitsInBuffer's doc (out-of-bounds-write fix). Checked BEFORE packing any bytes for
                 // this item, so a stale/rejected item costs nothing beyond the check itself.
-                if (!fitsInBuffer(occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize)
-                        || !fitsInBuffer(payloadOffset, VOXELS_PER_SECTION, payloadBufferSize)
-                        || !fitsInBuffer(faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize)
-                        || !fitsInBuffer(summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize)) {
+                if (!fitsInBuffer(occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize)) {
                     logOobDrop(OCCUPANCY_TARGET, slot, occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize);
+                    continue;
+                }
+                if (!fitsInBuffer(payloadOffset, VOXELS_PER_SECTION, payloadBufferSize)) {
+                    logOobDrop(PAYLOAD_TARGET, slot, payloadOffset, VOXELS_PER_SECTION, payloadBufferSize);
+                    continue;
+                }
+                if (!fitsInBuffer(faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize)) {
+                    logOobDrop(FACE_SEAL_TARGET, slot, faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize);
+                    continue;
+                }
+                if (!fitsInBuffer(summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize)) {
+                    logOobDrop(BRICK_SUMMARY_TARGET, slot, summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize);
                     continue;
                 }
 

@@ -1951,6 +1951,11 @@ else entirely.
   represent that remainder past a few million blocks: every sub-texel offset rounds to the same
   float. Only this one transform needs it; every other use of the light view is already
   camera-relative and stays float.
+- **An OR-chain of bounds checks over several buffers logs each buffer's own target name, not one
+  hardcoded name for the whole chain.** `BrickGridUpload.uploadSlot`/`uploadBatchLocked` check
+  occupancy, payload, faceSeal, palette and summary as separate `if`s, each calling `logOobDrop`
+  with its own target constant, so an out-of-bounds payload or summary write is not misattributed
+  to occupancy in the log.
 - **Every async resource-reload chain that ends in `RendererReload.request()` carries an
   `.exceptionally` handler.** `PackSwitch.apply`, `PackEditSession.apply` and `PackReload.reload`
   all chain the same `Minecraft.reloadResourcePacks()`-derived future; a listener throwing partway

@@ -280,24 +280,12 @@ public class GameRendererMixin {
     }
 
     /**
-     * TAA/TAAU branch of {@link #fornax$restoreNativeTarget}: gathers the render-res G-buffer
-     * motion/depth views, the native {@code sceneHistory} target, and this frame's jitter/blend/
-     * sharpen settings, then hands them to {@link ReconstructPass#reconstruct}.
-     *
-     * <p>{@code GBufferManager} never nulls its instance and {@code ShadersEnabledFlip} keeps the
-     * pack (and therefore the target registry) loaded, so both handles survive a shaders-off
-     * toggle intact and merely stop being WRITTEN -- they are never absent. {@link TemporalInputs}
-     * owns the question of whether they hold current data. {@code fornax$ssaaBeginFrame} skips the
-     * off-screen swap for the whole frame whenever that predicate says no, so arriving here anyway
-     * means pack state changed <em>within</em> the frame -- the user enabling, disabling or switching
-     * a pack between begin-frame and end-frame. That is an ordinary thing to do from the settings
-     * screen, not a corrupt state.
-     *
-     * <p>Reconstruction is skipped for the frame in that window: {@link #fornax$restoreNativeTarget}
-     * restores {@code mainRenderTarget} either way, so the cost is one unreconstructed frame at the
-     * moment of the toggle rather than losing the session. A pack whose targets never allocate would
-     * hit this every frame, so the skip is logged (rate-limited) rather than silent -- a pack bug has
-     * to stay visible in the log without being fatal.
+     * Rate-limits {@link #fornax$reconstruct}'s skip warning to once per distinct reason: a pack
+     * whose targets never allocate would otherwise log every frame. {@code GBufferManager} never
+     * nulls its instance and {@code ShadersEnabledFlip} keeps the pack (and therefore the target
+     * registry) loaded, so a skip here means pack state changed within the frame, ordinarily from
+     * the settings screen enabling, disabling or switching a pack between begin-frame and end-frame,
+     * not a corrupt state.
      */
     @Unique
     private void fornax$warnReconstructSkipped(String reason) {
@@ -310,6 +298,15 @@ public class GameRendererMixin {
                 + " if it persists, the active pack's targets are not being allocated.", reason);
     }
 
+    /**
+     * TAA/TAAU branch of {@link #fornax$restoreNativeTarget}: gathers the render-res G-buffer
+     * motion/depth views, the native {@code sceneHistory} target, and this frame's jitter/blend/
+     * sharpen settings, then hands them to {@link ReconstructPass#reconstruct}. {@link
+     * TemporalInputs} decides whether those handles hold current data; when they don't, the frame's
+     * reconstruction is skipped (logged via {@link #fornax$warnReconstructSkipped}) and {@link
+     * #fornax$restoreNativeTarget} restores {@code mainRenderTarget} either way, so the cost is one
+     * unreconstructed frame, not a lost session.
+     */
     @Unique
     private void fornax$reconstruct() {
         GBuffer gbuffer = GBufferManager.getInstance();
