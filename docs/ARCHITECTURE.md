@@ -1917,3 +1917,21 @@ else entirely.
   `lastPublishedPageCount` and clears Sodium's terrain program cache in the same call that nulls
   `current`, so a reload that never reaches `rebuild()` afterward cannot leave cached terrain
   programs compiled for a page count the actual binding no longer has.
+- **A `vkWaitForFences` result is checked before anything treats the waited slot as drained.**
+  `ComputePassRunner.fenceWaitSucceeded` logs and returns false on any non-`VK_SUCCESS` result; a
+  ring-slot recycle that fails skips `vkResetFences`/`pool.reset()` and returns without dispatching
+  rather than recycle a command pool the GPU may still be executing, and teardown logs and destroys
+  anyway since it has no retry option.
+- **A descriptor bind re-reads its target by name every call and refuses a null lookup by name.**
+  `ComputePassRunner`'s and `ParticlePassRunner`'s `STORAGE_BUFFER` branches call
+  `TargetRegistry.getBuffer` fresh each frame because the descriptor type was decided once at build
+  time from a then-non-null buffer; `TargetRegistry.releaseBuffer` can drop that buffer from lookup
+  between builds (e.g. `reconcilePackSizedBuffers` releasing one that fell out of the plan), so both
+  runners throw naming the pass and the target instead of dereferencing null.
+- **A cross-queue compute-to-graphics handoff needs the correct destination stage bit for every
+  reader type, not just the ones a first pass covered.** `GraphRunner.computeGraphicsWaitStages`
+  assigns `VERTEX_SHADER` for a `PARTICLES` reader, `FRAGMENT_SHADER` for
+  `FULLSCREEN`/`GEOMETRY`/`TEMPORAL`/`MIPCHAIN`, and `TRANSFER` for `COPY` (`CopyRunner` moves the
+  target via `copyTextureToTexture`, which executes at transfer stage, not fragment). A reader type
+  with no branch contributes 0, which skips both the semaphore signal and the wait entirely — not a
+  conservative default, an absent one.

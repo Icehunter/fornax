@@ -400,13 +400,19 @@ public final class ComputePassRunner implements AutoCloseable {
         frameIndex++;
 
         if (slot.submitted && slot.fence != 0) {
-            VK13.vkWaitForFences(backend.device().vkDevice(), slot.fence, true, FENCE_WAIT_TIMEOUT);
+            int waitResult = VK13.vkWaitForFences(backend.device().vkDevice(), slot.fence, true, FENCE_WAIT_TIMEOUT);
+            if (!fenceWaitSucceeded(waitResult, "ring-slot recycle in '" + spec.name() + "'")) {
+                // The fence never signalled, so this slot's prior buffer may still be in flight.
+                // Resetting the pool now would be a use-after-free of a live command buffer; skip
+                // this frame's dispatch entirely rather than recycle an undrained slot.
+                return;
+            }
             VK13.vkResetFences(backend.device().vkDevice(), slot.fence);
             slot.submitted = false;
         }
         VulkanCommandPool pool = slot.commandPool;
         if (pool != null) {
-            pool.reset(); // safe: this slot's prior buffer was drained by the fence wait above
+            pool.reset(); // this slot's prior buffer was drained by the checked fence wait above
         }
 
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
@@ -505,9 +511,14 @@ public final class ComputePassRunner implements AutoCloseable {
                 if (synchronousWait) {
                     // Legacy host wait for passes with a current-frame graphics -> compute input
                     // dependency that has not yet been converted to a bidirectional semaphore chain.
-                    VK13.vkWaitForFences(backend.device().vkDevice(), slot.fence, true, FENCE_WAIT_TIMEOUT);
-                    VK13.vkResetFences(backend.device().vkDevice(), slot.fence);
-                    slot.submitted = false;
+                    int waitResult = VK13.vkWaitForFences(backend.device().vkDevice(), slot.fence, true, FENCE_WAIT_TIMEOUT);
+                    if (fenceWaitSucceeded(waitResult, "synchronous wait in '" + spec.name() + "'")) {
+                        VK13.vkResetFences(backend.device().vkDevice(), slot.fence);
+                        slot.submitted = false;
+                    }
+                    // On failure, leave slot.submitted = true: the dispatch this call just made has
+                    // not been confirmed complete, so the caller's assumption that the compute result
+                    // already landed does not hold. Next frame's ring-slot recycle wait retries it.
                 }
             }
         }
@@ -561,6 +572,14 @@ public final class ComputePassRunner implements AutoCloseable {
                             .pBufferInfo(uniformBufferInfo(stack, name, options, globals));
                 } else if (type == VK13.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
                     BufferInstance buf = registry.getBuffer(name);
+                    if (buf == null) {
+                        // descriptorTypeFor decided STORAGE_BUFFER at build time from a then-non-null
+                        // buffer; a release (e.g. reconcilePackSizedBuffers dropping a pack-sized
+                        // buffer that fell out of the plan) can land between that decision and this
+                        // re-read. Name the pass and the target instead of an unnamed NPE.
+                        throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
+                                + "' storage-buffer input '" + name + "' is not allocated");
+                    }
                     VkDescriptorBufferInfo.Buffer bufferInfo = VkDescriptorBufferInfo.calloc(1, stack)
                             .buffer(buf.vkBuffer()).offset(0).range(VK13.VK_WHOLE_SIZE);
                     write.descriptorType(VK13.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo(bufferInfo);
@@ -645,7 +664,11 @@ public final class ComputePassRunner implements AutoCloseable {
         for (RingSlot slot : ring) {
             if (slot == null) continue;
             if (slot.submitted && slot.fence != 0) {
-                VK13.vkWaitForFences(device, slot.fence, true, FENCE_WAIT_TIMEOUT);
+                // Teardown has no retry option: log a failed wait and destroy anyway. Leaking the
+                // fence/pool would be strictly worse than the small chance of destroying a handle
+                // the GPU has already finished with.
+                fenceWaitSucceeded(VK13.vkWaitForFences(device, slot.fence, true, FENCE_WAIT_TIMEOUT),
+                        "ring teardown in '" + spec.name() + "'");
             }
             if (slot.fence != 0) {
                 VK13.vkDestroyFence(device, slot.fence, null);
@@ -671,6 +694,17 @@ public final class ComputePassRunner implements AutoCloseable {
 
     private long countType(int descriptorType) {
         return descriptorTypes.stream().filter(t -> t == descriptorType).count();
+    }
+
+    /** True if the wait actually drained the slot. False means the caller must not recycle a
+     * command pool or destroy a handle the GPU may still be using -- the fence never signalled. */
+    static boolean fenceWaitSucceeded(int result, String context) {
+        if (result != VK13.VK_SUCCESS) {
+            FornaxMod.LOGGER.error("[Fornax] ComputePassRunner: vkWaitForFences returned VkResult {} for {}",
+                    result, context);
+            return false;
+        }
+        return true;
     }
 
     private static void checkVk(int result, String call) {

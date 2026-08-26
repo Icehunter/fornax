@@ -1714,6 +1714,13 @@ public final class GraphRunner {
      * simulation dispatch was still writing it -- a race that would show up as flakes flickering
      * between two positions, not as a validation error.
      *
+     * <p>{@code TRANSFER}, for a {@code COPY} reader: {@code CopyRunner} moves the target with
+     * {@code copyTextureToTexture}, which lowers to {@code vkCmdCopyImage}/blit on the same
+     * persistent graphics encoder this method's semaphore wait is recorded into -- executing at
+     * transfer stage with {@code TRANSFER_READ} access, not fragment. Folding it into the fragment
+     * group would wait at the wrong stage and, depending on driver ordering, might not cover the
+     * copy at all.
+     *
      * <p>Pure function of the graph + compile values, extracted for the same reason {@link
      * #computePackDeclaresDepthCopyback} was: this is a correctness rule about which passes feed
      * which, and it should be provable without a GPU.
@@ -1734,6 +1741,8 @@ public final class GraphRunner {
                     } else if (reader.type() == PassType.FULLSCREEN || reader.type() == PassType.GEOMETRY
                             || reader.type() == PassType.TEMPORAL || reader.type() == PassType.MIPCHAIN) {
                         stages |= VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+                    } else if (reader.type() == PassType.COPY) {
+                        stages |= VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
                     }
                 }
             }

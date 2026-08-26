@@ -97,6 +97,20 @@ class ParticlePassBindingTest {
     }
 
     @Test
+    void computeStorageImageFeedingCopyWaitsAtTransferStage() {
+        // FRAGMENT is the wrong stage for a copy: CopyRunner moves the target with
+        // copyTextureToTexture, which lowers to vkCmdCopyImage/blit at TRANSFER, not fragment shader
+        // invocation. This pass type used to fall through both branches and contribute 0, leaving no
+        // semaphore signalled and no wait recorded -- an unsynchronized cross-queue read.
+        PassSpec compute = computePass("water_step", List.of("waveState"), null);
+        PassSpec copy = new PassSpec("water_copy", PassType.COPY, null, null, null,
+                List.of("waveState"), List.of("waveStateStable"), null, null, List.of(), null, null, null);
+        GraphSpec graph = new GraphSpec(Map.of(), List.of(compute, copy));
+        assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                GraphRunner.computeGraphicsWaitStages(compute, graph, Map.of()));
+    }
+
+    @Test
     void aParticlesPassIsNeverItsOwnHandoffSource() {
         // Only a COMPUTE submission has a cross-queue handoff to request; asking about any other
         // pass type must be 0, not an accidental match on its own outputs.
