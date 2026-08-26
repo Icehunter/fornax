@@ -282,10 +282,10 @@ public final class GraphRunner {
                 }
                 // Say so, once per input. The noise fallback is the right BIND -- a null view would
                 // fail the draw outright -- but it is the wrong DATA, and a shader cannot tell the
-                // difference: it reads plausible values and produces confidently wrong geometry. A
-                // pack whose declared input never resolves was previously indistinguishable from one
-                // whose shader maths was wrong, which cost a long debugging session chasing the
-                // latter while the former was the actual fault.
+                // difference: it reads plausible values and produces confidently wrong geometry.
+                // Without this log line, a pack whose declared input never resolves is
+                // indistinguishable from one whose shader maths is wrong, sending debugging toward
+                // the wrong cause.
                 if (views[i] == null) {
                     String key = slot.token() + "#" + i + "=" + inputs.get(i);
                     if (reportedUnresolvedInputs.add(key)) {
@@ -472,9 +472,9 @@ public final class GraphRunner {
      * group layouts, both stages see them. A stage that never references the block simply carries an
      * unused one, which is free.
      *
-     * <p>Extracted and made pure on the {@code wantsSunAndDebugParams} precedent -- the cloud-midnight
-     * bug was a pass missing from a list exactly like this one, and the fix was to make the list a
-     * function a test could interrogate.
+     * <p>Extracted and made pure on the {@code wantsSunAndDebugParams} precedent: a pass missing
+     * from a list exactly like this one is the kind of gap an inline check hides, so this stays a
+     * function a test can interrogate directly.
      */
     public static List<String> forwardGeometryShaderPaths(PassSpec pass) {
         if (pass.type() != PassType.GEOMETRY) {
@@ -666,8 +666,8 @@ public final class GraphRunner {
      * bind-group shape doesn't match the still-stale compiled shader text -- Blaze3D logs "Couldn't
      * compile pipeline ...: Unable to find shader defined uniform" and marks that pipeline object
      * permanently invalid; the NEXT frame's rebind of the same (never-valid) object then throws
-     * {@code IllegalStateException: Pipeline is not valid}, an unrecoverable crash (live-caught: a
-     * Settings Reset that toggled both HDR_ENABLE and EMITTER_LIGHTS off in one Apply). This is why
+     * {@code IllegalStateException: Pipeline is not valid}, an unrecoverable crash -- e.g. a
+     * Settings Reset that toggles both HDR_ENABLE and EMITTER_LIGHTS off in one Apply. This is why
      * {@code ensureRunnersBuilt()} gates on {@link #sourcesReady} rather than {@link #runnersBuilt}
      * alone -- set here, generation-guarded so a superseded rebuild's future landing late can never
      * mark a NEWER rebuild's (different) sources ready.
@@ -891,8 +891,8 @@ public final class GraphRunner {
                 // NO "color attachment count must match" check (bytecode-verified against the real
                 // MC 26.2 jar -- getOrCompilePipeline + isValid + vkCmdBindPipeline, nothing else),
                 // so a terrain pipeline compiled against a pre-republish shader snapshot binds fine
-                // and simply never writes the outputs the current text declares (live-caught as
-                // gAlbedoRaw / attachment 5 arriving black at resolve). Clearing here --
+                // and simply never writes the outputs the current text declares -- e.g. gAlbedoRaw /
+                // attachment 5 arriving black at resolve. Clearing here --
                 // generation-guarded, on the client executor between frames, the exact safety
                 // initRenderer's clear has -- makes the first terrain draw after the republish
                 // recompile SOLID/CUTOUT/shadow against the just-landed text, unconditionally.
@@ -941,13 +941,13 @@ public final class GraphRunner {
         // render-scale target before this runs (larger under SSAA, smaller under TAAU), so its own
         // width/height is this frame's RENDER size, never the display's true native size. Output size
         // instead comes from SsaaManager's captured native window size (set every frame at the HEAD of
-        // GameRenderer.renderLevel, before any swap) -- this is the fix for a latent bug: before this
-        // sourcing change, sceneHistory (OUTPUT-basis) was sized off mainRenderTarget too, so under
-        // SSAA it was allocated at the SUPERSAMPLED size instead of native, and the end-of-frame copy's
-        // Math.min(target, sceneHistory) clamp silently wrote only a native-sized sub-region of that
-        // oversized texture -- the rest never got a value, a stale gap in UV space every consumer
-        // samples across. Now that output sizing is genuinely native, sceneHistory shrinks to native
-        // under SSAA too and that gap closes; SSAA's own render size is unaffected.
+        // GameRenderer.renderLevel, before any swap): sizing sceneHistory (OUTPUT-basis) off
+        // mainRenderTarget instead would allocate it at the SUPERSAMPLED size under SSAA rather than
+        // native, and the end-of-frame copy's Math.min(target, sceneHistory) clamp would then silently
+        // write only a native-sized sub-region of that oversized texture -- the rest never getting a
+        // value, a stale gap in UV space every consumer samples across. Sourcing from the true native
+        // size keeps sceneHistory native under SSAA too, so no such gap opens; SSAA's own render size
+        // is unaffected.
         int outputWidth = SsaaManager.nativeWidth();
         int outputHeight = SsaaManager.nativeHeight();
 
@@ -970,18 +970,19 @@ public final class GraphRunner {
             // resolution, exactly like every sibling render-basis resource just above (ensureBufferSize
             // already no-ops when the requested size matches the current allocation, so this costs
             // nothing once steady-state) -- NOT a one-shot snapshot taken only the first time a pack
-            // build runs. It used to live inside ensureRunnersBuilt()'s one-shot-latched body, sized
-            // once at whatever render resolution happened to be live at that single moment; the compute
-            // dispatch group count, the kernel's own index math, and water_composite's consumer index
-            // math all instead read the LIVE render resolution every frame (computeDispatchOverride,
-            // computeParams -- see their own doc comments), so under TAA (render resolution pinned to
-            // native for the method's whole lifetime) the mismatch could never surface, but under TAAU
-            // (render resolution is a LIVE per-frame value that also transiently reverts to native for
-            // one frame around every pack rebuild -- see SsaaManager/GameRendererMixin) the frozen
-            // capacity and the live index math would disagree, corrupting this SSBO with a genuine
-            // std430 out-of-bounds write the instant live resolution ever exceeded the frozen snapshot
-            // -- live-caught as a screen-wide solid-blue frame with WORLD_REFLECTIONS on under TAAU
-            // (see .superpowers/sdd/taau-break-diagnosis.md). Freed only when it was actually allocated
+            // build runs. Sizing it once inside ensureRunnersBuilt()'s one-shot-latched body instead
+            // would freeze its capacity at whatever render resolution happened to be live at that
+            // single moment, while the compute dispatch group count, the kernel's own index math, and
+            // water_composite's consumer index math all instead read the LIVE render resolution every
+            // frame (computeDispatchOverride, computeParams -- see their own doc comments). Under TAA
+            // (render resolution pinned to native for the method's whole lifetime) that mismatch could
+            // never surface, but under TAAU (render resolution is a LIVE per-frame value that also
+            // transiently reverts to native for one frame around every pack rebuild -- see
+            // SsaaManager/GameRendererMixin) a frozen capacity and the live index math would disagree,
+            // corrupting this SSBO with a genuine std430 out-of-bounds write the instant live resolution
+            // ever exceeded the frozen snapshot -- surfacing as a screen-wide solid-blue frame with
+            // WORLD_REFLECTIONS on under TAAU (see .superpowers/sdd/taau-break-diagnosis.md). That is
+            // why this is re-checked every frame instead. Freed only when it was actually allocated
             // (registry.getBuffer != null): calling VoxelWaterReflBuffer.free on a never-allocated
             // buffer would vmaCreateBuffer a 0-byte buffer (invalid Vulkan usage, see that method's own
             // doc) -- the common case, since this pass defaults off (manual-only "Beyond" tier,
@@ -991,11 +992,10 @@ public final class GraphRunner {
             } else if (r.getBuffer(VoxelWaterReflBuffer.TARGET) != null) {
                 VoxelWaterReflBuffer.free(r);
             }
-            // The DDA sun-shadow prototype's own intermediate SSBO (SunShadowVoxelBuffer) was
-            // retired when sun_shadow_voxel/sun_shadow_resolve (compute + blit) collapsed into ONE
-            // fullscreen fragment pass, "sun_shadow" (queue-topology fix) -- it now writes the real
-            // celestialVisVoxel r8 target directly, exactly like every other fullscreen pass, so
-            // there is no engine-sized buffer left to (re)allocate here.
+            // "sun_shadow" is ONE fullscreen fragment pass, not a compute-plus-blit pair, so it needs
+            // no intermediate SSBO of its own: it writes the real celestialVisVoxel r8 target
+            // directly, exactly like every other fullscreen pass, so there is no engine-sized buffer
+            // left to (re)allocate here.
 
             // Analytic light list SSBO: FIXED size (not
             // render-resolution-dependent like VoxelWaterReflBuffer above), so no width/height args --
@@ -1198,8 +1198,8 @@ public final class GraphRunner {
             // COMPUTE passes are bracketed with a CPU wall-clock measurement below instead of
             // PassTimer's GPU-timestamp bracket -- see the COMPUTE case's own comment for why a GPU
             // timestamp pair straddling this call cannot observe a raw-Vulkan compute submission's
-            // real cost (root-caused live: sun_shadow_voxel's profiler row read a permanent 0.00ms
-            // even while its synchronous fence-wait demonstrably blocked the render thread).
+            // real cost -- e.g. a pass's profiler row reading a permanent 0.00ms even while its
+            // synchronous fence-wait demonstrably blocks the render thread.
             boolean gpuTimestampBracket = timer != null && p.type() != PassType.COMPUTE;
             if (gpuTimestampBracket) {
                 timer.bracketBegin(p.name());
@@ -1376,9 +1376,10 @@ public final class GraphRunner {
         // where the persisted pack values already have an FX_COMPUTE-gated option enabled (e.g.
         // WORLD_REFLECTIONS + SSR_WATER_MODE > 3) and the player never happens to dirty a COMPILE
         // option this session, every enabled_if referencing FX_COMPUTE stays permanently wrong for
-        // the pack's ENTIRE session lifetime. Live-caught: the voxel water reflection arm silently
-        // never activated while its plain-arm sibling's `!(... && FX_COMPUTE)` negation stayed
-        // permanently true instead, on a fresh relaunch with Beyond+World Reflections already saved.
+        // the pack's ENTIRE session lifetime: on a fresh relaunch with an FX_COMPUTE-gated option
+        // like Beyond+World Reflections already saved, the voxel water reflection arm silently never
+        // activates while its plain-arm sibling's `!(... && FX_COMPUTE)` negation stays permanently
+        // true instead.
         //
         // Fires at most once per rebuild: replays the exact same PackModel/shaderSources/pack-only
         // compileValues the LAST rebuild() call used (cached by rebuild() itself, see
@@ -1404,10 +1405,11 @@ public final class GraphRunner {
         // Allocate the voxel brick-grid buffers BEFORE building pass runners, not after: a compute pass
         // that reads voxelOccupancy (e.g. rt_shadow) must find it already allocated the moment its own
         // runner is built below, or ComputePassRunner.build() throws "neither an allocated buffer nor
-        // texture target" and the catch below aborts EVERY runner this frame (root-caused live: this used
-        // to happen only via VoxelDebugRaymarchPass.onFrame(), called from GraphRunner.finish() -- one
-        // frame AFTER this method runs at frame start -- so the very first frame of any session/rebuild
-        // guaranteed the race and shrieked the whole ERROR burst; it then silently succeeded next frame).
+        // texture target" and the catch below aborts EVERY runner this frame. VoxelDebugRaymarchPass's
+        // own onFrame() -- called from GraphRunner.finish(), one frame AFTER this method runs at frame
+        // start -- allocates the grid too late to rely on alone: the very first frame of any
+        // session/rebuild would race it, aborting every runner with an ERROR burst that frame before
+        // succeeding the next.
         if (anyEnabledComputePassReadsVoxelGrid(currentPack.graph(), compileValues)) {
             VoxelDebugRaymarchPass.ensureGridAllocated(registry);
         }
@@ -1418,8 +1420,7 @@ public final class GraphRunner {
         // (re)allocated it this frame (prepare() calls ensureRunnersBuilt() AFTER its own
         // VoxelWaterReflBuffer.ensureAllocated call), so ComputePassRunner.build/FullscreenPassRunner.build
         // still find it already allocated at the size this frame's dispatch/texelFetch expects -- the
-        // same ordering guarantee the old one-shot call here used to provide, just re-derived every
-        // frame instead of frozen at first build.
+        // same ordering guarantee re-derived every frame instead of frozen at first build.
 
         Map<String, FullscreenPassRunner> fullscreen = new LinkedHashMap<>();
         Map<String, MipchainRunner> mipchain = new LinkedHashMap<>();
@@ -1432,8 +1433,8 @@ public final class GraphRunner {
                     // A compile-disabled pass's output target may legitimately not exist (targets
                     // carry enabled_if too -- e.g. a half-res SSR variant only allocated on its own
                     // quality tier), so building its runner would throw "target not allocated" and
-                    // abort EVERY pass runner, retrying forever (live-caught: the whole post chain
-                    // never ran). Compile values only change via rebuild(), which clears all runners
+                    // abort EVERY pass runner, retrying forever with the whole post chain never
+                    // running. Compile values only change via rebuild(), which clears all runners
                     // first, so skipping here can never leave a stale-disabled runner behind.
                     continue;
                 }
@@ -1593,19 +1594,18 @@ public final class GraphRunner {
      */
     static boolean anyEnabledComputePassReadsVoxelGrid(GraphSpec graph, Map<String, Integer> compileValues) {
         for (PassSpec p : graph.passes()) {
-            // Originally COMPUTE-only (every voxel-grid consumer was a compute dispatch). Widened to
-            // also cover FULLSCREEN passes (queue-topology fix): the sun-shadow prototype's DDA
-            // moved from a compute pass (sun_shadow_voxel) to a fullscreen fragment
-            // pass (sun_shadow) that texelFetches voxelOccupancy directly -- without this widening,
-            // enabling that pass alone would never trip this predicate, VoxelDebugRaymarchPass.onFrame
-            // would treat the grid as unneeded, and the fragment pass's own texelFetch would read an
+            // Covers COMPUTE, FULLSCREEN and PARTICLES, not just COMPUTE, because a voxel-grid
+            // consumer can be any of the three: "sun_shadow" is a fullscreen fragment pass whose DDA
+            // texelFetches voxelOccupancy directly, so leaving FULLSCREEN out would mean enabling that
+            // pass alone never trips this predicate, VoxelDebugRaymarchPass.onFrame would treat the
+            // grid as unneeded, and the fragment pass's own texelFetch would read an
             // unallocated/never-streamed buffer (FullscreenPassRunner.run throws "buffer input is not
-            // allocated" the instant a buffer-kind input's registry entry is null). Widened again to
-            // PARTICLES for the identical reason: a particles pass binds a buffer-kind input as a real
-            // STORAGE_BUFFER descriptor, so one declaring voxelOccupancy (a shelter march deciding
-            // whether a flake is under cover) would otherwise fail its runner build with "neither an
-            // allocated buffer nor texture target" -- and that throw aborts EVERY runner in the
-            // attempt, retrying forever. MIPCHAIN/COPY/GEOMETRY passes are still not included: no pack
+            // allocated" the instant a buffer-kind input's registry entry is null). Same reasoning for
+            // PARTICLES: a particles pass binds a buffer-kind input as a real STORAGE_BUFFER
+            // descriptor, so one declaring voxelOccupancy (a shelter march deciding whether a flake is
+            // under cover) would otherwise fail its runner build with "neither an allocated buffer nor
+            // texture target" -- and that throw aborts EVERY runner in the attempt, retrying forever.
+            // MIPCHAIN/COPY/GEOMETRY passes are still not included: no pack
             // pass of those types has ever declared a voxel-buffer input, and admitting them here
             // would silently broaden this gate's meaning beyond "a pass that actually DDA-marches or
             // otherwise samples the grid this frame".
@@ -1925,10 +1925,10 @@ public final class GraphRunner {
      * even after the moon has taken over lighting.
      *
      * <p>{@code glint_occlusion} is a screen-space raymarch pass for the water glitter's sun/moon
-     * occlusion. It originally derived its own light direction from {@code u_SkyCelestial},
-     * assuming the moon sits exactly antipodal to the sun, to avoid adding a name here -- wrong for
-     * the moon (sun glitter worked, moon glitter never appeared even fully unobstructed), so it now
-     * reads the same real {@code u_SunDirection.xyz} every other glitter-relevant site uses, same as
+     * occlusion. Deriving its own light direction from {@code u_SkyCelestial} by assuming the moon
+     * sits exactly antipodal to the sun would be wrong for the moon (sun glitter works, moon glitter
+     * never appears even fully unobstructed), so it instead reads the same real
+     * {@code u_SunDirection.xyz} every other glitter-relevant site uses, same as
      * {@code water_composite}.
      */
     static boolean wantsSunAndDebugParams(String name) {
@@ -2010,11 +2010,11 @@ public final class GraphRunner {
             // see that block's own comment).
             Vector3f sunDirection = SunDirection.computeSunDirection(PASS_SUN_DIRECTION.get());
             // u_Param2: the TERRAIN render distance in blocks, the anchor the pack's border fog
-            // needs. The u_Globals render-fog end this used to key on can sit beyond the real chunk
-            // cutoff (it tracks fog attribute distances, not the chunk grid), leaving border fog
-            // below 1.0 where geometry actually ends -- edge chunks popped out of a half-veil instead
-            // of fading. Zero when no client options exist (headless); the shader falls back to its
-            // render-fog estimate then.
+            // needs. The u_Globals render-fog end is the wrong anchor for this: it tracks fog
+            // attribute distances, not the chunk grid, and can sit beyond the real chunk cutoff,
+            // leaving border fog below 1.0 where geometry actually ends -- edge chunks popping out of
+            // a half-veil instead of fading. Zero when no client options exist (headless); the shader
+            // falls back to its render-fog estimate then.
             float renderDistanceBlocks = 0.0f;
             Minecraft mcClient = Minecraft.getInstance();
             if (mcClient != null && mcClient.options != null) {
@@ -2025,9 +2025,10 @@ public final class GraphRunner {
                     .withSunDirection(sunDirection.x(), sunDirection.y(), sunDirection.z())
                     .withTrueSunHeight(SunDirection.trueSunHeight())
                     .withSunSpriteRect(CelestialSprites.sunRect())
-                    // Moon phase from the live probe. It used to read SkyFrameState.moonPhase(),
-                    // which only ever held a real value for packs that cancel vanilla's sky --
-                    // every other pack drew a full moon on every night of the cycle. See SkyProbe.
+                    // Moon phase from the live probe, not SkyFrameState.moonPhase(): that field only
+                    // ever holds a real value for packs that cancel vanilla's sky, so reading it here
+                    // would draw a full moon on every night of the cycle for every other pack. See
+                    // SkyProbe.
                     .withMoonSpriteRect(CelestialSprites.moonPhaseRect((int) SkyProbe.read().moonPhase()));
         } else if (name.startsWith("celestial_shadow")) {
             // Prefix match, not exact equals -- same reasoning as "resolve_hdr".startsWith
@@ -2048,7 +2049,7 @@ public final class GraphRunner {
             // ExtraPushConstants plumbing is needed.
             //
             // Keep this SunDirection.computeSunDirection() call distinct from the
-            // isEmitterLightPass branch below -- sharing it there once caused a night-glow bug (see
+            // isEmitterLightPass branch below -- sharing it there would cause a night-glow bug (see
             // that branch's own comment). A shadow march needs whichever body is up, sun by day,
             // moon by night; do not unify the two branches.
             Vector3f sunDirection = SunDirection.computeSunDirection(PASS_SUN_DIRECTION.get());
@@ -2071,14 +2072,14 @@ public final class GraphRunner {
             // PassParams' sun direction above, they receive it through the shared 32-byte
             // push-constant base (PassParams.PUSH_CONSTANT_BASE_SIZE), not a uniform buffer --
             // ComputePassRunner writes params.sunDirX/Y/Z into that push-constant range unconditionally
-            // for every compute pass, so this field ALREADY exists on the wire; the only gap was that
-            // no branch of this if/else chain ever populated it for these two pass names, leaving
+            // for every compute pass, so this field ALREADY exists on the wire; without this branch,
+            // no branch of this if/else chain would populate it for these two pass names, leaving
             // PassParams.of()'s zero default. light_inject.comp's own GI_SUN_BOUNCE header comment
-            // documents this same gap and fix.
+            // documents this same requirement.
             //
             // This branch does NOT call SunDirection.computeSunDirection() like the
-            // celestial_shadow* branch above does, even though both branches once shared that exact
-            // call (bug: every sky-exposed block glowed at night). The two branches need DIFFERENT
+            // celestial_shadow* branch above does: sharing that exact call between the two branches
+            // would make every sky-exposed block glow at night. The two branches need DIFFERENT
             // vectors and must stay different:
             //   - celestial_shadow* (shadow march) needs whichever body is actually casting light this
             //     frame -- sun by day, MOON by night -- because a night shadow march that ignored the
@@ -2094,11 +2095,11 @@ public final class GraphRunner {
             //     writes these same values into that uniform lane) -- which goes negative at night
             //     and stays negative, so `clamp(sunDir.y, 0, 1)` correctly gates to zero.
             //
-            //     This read used to come from SkyFrameState, which only held a real value for packs
-            //     that cancel vanilla's sky; for every other pack it was the zero vector, and the
-            //     clamp gated sun bounce off permanently rather than only at night. SkyProbe reads the
-            //     camera's environment attribute probe live, every frame, in every dimension, so it is
-            //     valid whenever this compute pass's params are built.
+            //     Reading this from SkyFrameState instead would be wrong: that field only holds a real
+            //     value for packs that cancel vanilla's sky, so for every other pack it would be the
+            //     zero vector, gating sun bounce off permanently rather than only at night. SkyProbe
+            //     reads the camera's environment attribute probe live, every frame, in every
+            //     dimension, so it is valid whenever this compute pass's params are built.
             //
             // This does NOT belong in EmitterLightExtra (computeExtraPushConstants below) even though
             // that record is these two passes' other source of extra push-constant data: EmitterLightExtra
@@ -2107,11 +2108,10 @@ public final class GraphRunner {
             // already has a first-class field in PassParams/the shared push-constant base -- adding a
             // second, redundant sun-direction copy into the extra payload would just be two sources of
             // truth for the same three floats. Both compute shaders' own PushConstants block already
-            // declares `vec3 sunDir` at the base's offset 16 (previously always zero, documented
-            // "unused" in each file's header); only light_inject.comp actually reads it today (its
-            // GI_SUN_BOUNCE-gated sunElevation term) -- light_propagate.comp declares the same field for
-            // push-constant-layout symmetry with light_inject (both share the base struct) but has no
-            // sun-driven term of its own to read it into.
+            // declares `vec3 sunDir` at the base's offset 16; only light_inject.comp actually reads it
+            // today (its GI_SUN_BOUNCE-gated sunElevation term) -- light_propagate.comp declares the
+            // same field for push-constant-layout symmetry with light_inject (both share the base
+            // struct) but has no sun-driven term of its own to read it into.
             SkyProbe.Values emitterSky = SkyProbe.read();
             base = applyEmitterSunDirection(base, emitterSky.sunDirX(), emitterSky.sunDirY(),
                     emitterSky.sunDirZ());
@@ -2151,19 +2151,16 @@ public final class GraphRunner {
 
     /**
      * The isEmitterLightPass branch's sun-direction write, extracted out of {@link #computeParams} as
-     * a pure function for unit-testability without a live {@code Minecraft.getInstance()} client.
-     * Unlike this method's earlier shape, which read {@link SkyFrameState}'s plain static fields
-     * directly -- the
-     * caller pre-resolves the Minecraft-dependent value and passes it in. The source moved to
-     * {@link SkyProbe}, whose {@code read()} does dereference {@code Minecraft.getInstance()}, so
-     * taking the vector as arguments is what keeps the night-glow regression guard headless: see
-     * {@code GraphRunnerTest}'s {@code emitterLightPassReceivesNegativeSunYWhenSunBelowHorizon}.
+     * a pure function for unit-testability without a live {@code Minecraft.getInstance()} client. The
+     * caller pre-resolves the value via {@link SkyProbe#read()} and passes it in, rather than this
+     * method reading {@link SkyFrameState}'s plain static fields directly: {@code SkyFrameState}'s sun
+     * direction is only ever populated for packs that cancel vanilla's sky, so for every other pack it
+     * would be a zero vector, and {@code light_inject.comp}'s {@code clamp(sunDir.y, 0, 1)} gate would
+     * silently disable indirect sun bounce at all hours. Taking the vector as arguments is what keeps
+     * the night-glow regression guard headless: see {@code GraphRunnerTest}'s
+     * {@code emitterLightPassReceivesNegativeSunYWhenSunBelowHorizon}.
      *
-     * <p>The move is itself a fix. {@code SkyFrameState}'s sun direction was only ever populated for
-     * packs that cancel vanilla's sky, so for every other pack this wrote a zero vector and
-     * {@code light_inject.comp}'s {@code clamp(sunDir.y, 0, 1)} gate silently disabled indirect sun
-     * bounce at all hours -- the night-glow fix's own mechanism turning into a permanent off switch.
-     * See this method's comment at its {@code computeParams} call site for why this branch needs the
+     * <p>See this method's comment at its {@code computeParams} call site for why this branch needs the
      * TRUE sun rather than {@code SunDirection.computeSunDirection()}'s sun/moon handoff.
      */
     static PassParams applyEmitterSunDirection(PassParams base, float sunX, float sunY, float sunZ) {
@@ -2394,13 +2391,11 @@ public final class GraphRunner {
                     diameter, window.centerX(), window.centerY(), window.centerZ(),
                     clampedAnalyticScanRadiusBlocks(diameter));
         }
-        // The sun-shadow prototype's own former compute pass (sun_shadow_voxel) used to build a
-        // SunShadowVoxelExtra push-constant payload here (unjittered invProjModelView + window
-        // geometry) -- retired along with the whole compute-pass shape when it became the fullscreen
-        // "sun_shadow" pass (queue-topology fix). A fullscreen fragment pass reads
-        // u_InvProjModelView/u_VoxelWindow/u_CameraAbs directly off u_Globals (see celestial_shadow.fsh's
-        // own header comment on why that is equally correct and needs no push-constant plumbing at
-        // all), so no ExtraPushConstants case is needed for it any more.
+        // "sun_shadow" is a fullscreen fragment pass, not a compute pass, so it needs no
+        // ExtraPushConstants case here (no SunShadowVoxelExtra payload of unjittered invProjModelView
+        // + window geometry): it reads u_InvProjModelView/u_VoxelWindow/u_CameraAbs directly off
+        // u_Globals instead (see celestial_shadow.fsh's own header comment on why that is equally
+        // correct and needs no push-constant plumbing at all).
         if (!isEmitterLightPass(p)) {
             return null;
         }
@@ -2448,10 +2443,10 @@ public final class GraphRunner {
      * A pass that should run this frame but has no built runner is a contract violation, never a
      * normal frame state: {@link #ensureRunnersBuilt()} builds every compile-enabled pass's runner
      * or none (its catch retries the whole set), and {@link GraphValidator} refuses graphs whose
-     * gating could leave an enabled pass without its targets. Skipping used to be silent -- the
-     * exact signature of the deferred chain producing nothing (terrain in the G-buffer, no resolve,
-     * empty screen) with zero log evidence. Logged at ERROR once per pass per pack session; the
-     * frame still renders without the pass rather than crashing mid-draw.
+     * gating could leave an enabled pass without its targets. Without this log line, skipping is
+     * silent -- indistinguishable from the deferred chain producing nothing (terrain in the
+     * G-buffer, no resolve, empty screen) with zero evidence of why. Logged at ERROR once per pass
+     * per pack session; the frame still renders without the pass rather than crashing mid-draw.
      */
     private static void logMissingRunnerOnce(String passName) {
         if (missingRunnerLogged.add(passName)) {
@@ -2485,19 +2480,20 @@ public final class GraphRunner {
         VoxelWindow.attachRegistry(null);
         VoxelDebugRaymarchPass.disable();
 
-        // Device-wide wait-idle before ANY GPU resource below is freed. Two crashes caught live, same
-        // call site, both faulting inside libMoltenVK.dylib's vkQueueSubmit2KHR (reached via
-        // VulkanQueue$Submission.close() -> VulkanCommandEncoder.submit()) -- i.e. mid-submission on
-        // the render thread, seconds after this method's own teardown ran (one from an HDR_ENABLE
-        // Apply toggling off 9 GPU-backed targets, one from an ordinary world-join ResourceManager
-        // reload racing this method's own target rebuild). Every .close()/.free() call
+        // Device-wide wait-idle before ANY GPU resource below is freed. Without it, this can fault
+        // inside libMoltenVK.dylib's vkQueueSubmit2KHR (reached via VulkanQueue$Submission.close() ->
+        // VulkanCommandEncoder.submit()) -- i.e. mid-submission on the render thread, seconds after
+        // this method's own teardown ran -- e.g. an HDR_ENABLE Apply toggling off 9 GPU-backed
+        // targets, or an ordinary world-join ResourceManager reload racing this method's own target
+        // rebuild. Every .close()/.free() call
         // in this method destroys a GpuTexture/GpuTextureView/GpuBuffer with no guarantee the GPU is
         // done with whatever frame(s) still reference them -- Blaze3D's own texture-close path
         // defers actual destruction through a per-GRAPHICS-submission ring, but this mod also
         // dispatches compute-pass work directly against the compute queue via raw vkQueueSubmit,
         // entirely invisible to that ring (see VulkanComputeBackend.waitForGpuIdleBeforeDestroy's
         // own doc for the full mechanism). Mirrors that exact guard -- itself mirroring
-        // TargetRegistry's buffer-teardown path, hardened after the VoxelDebugRaymarchPass incident
+        // TargetRegistry's buffer-teardown path, which guards VoxelDebugRaymarchPass's compute
+        // buffers against the same GPU-queue-invisible-destruction hazard
         // -- applied once here at the single point every OTHER GPU resource this method frees
         // (opaqueDepth, WaterSurfaceManager, mipchain/compute runners, the registry itself) funnels
         // through. Rare-path cost only (pack rebuild/unload, or a pack switch); never per-frame.
@@ -2505,7 +2501,7 @@ public final class GraphRunner {
 
         // Frame generation presents every frame regardless of pack state, so it must deactivate on
         // every pack teardown too, not just on its own settings toggle. Without this, it can submit
-        // against the GPU state this method is about to free (live-caught: crashed MoltenVK).
+        // against the GPU state this method is about to free, crashing MoltenVK.
         FrameGenPresenter.deactivateAll();
 
         // Engine-owned depth copy (see OpaqueDepth's own doc): freed here, on every pack teardown --

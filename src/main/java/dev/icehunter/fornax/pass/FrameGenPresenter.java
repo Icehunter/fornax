@@ -24,27 +24,26 @@ import java.util.Optional;
  * armed frame.
  *
  * <p><b>Two-phase, split across the frame ({@code prepareGeneratedFrame} then {@code
- * presentGeneratedIfReady}):</b> staging content is now assembled EARLIER in the frame, from {@code
+ * presentGeneratedIfReady}):</b> staging content is assembled from {@code
  * GuiRendererCaptureMixin}'s HUD-capture wrap, not from this class's own present-time injection
- * site. This split exists to fix a live-caught double-alpha bug: the sky fill (see {@link
- * FrameGenSkyFillPass}) needs a SCENE-ONLY (HUD-free) native color to fill sky/far-depth pixels
- * with, and by the time the present seam used to run, {@code GuiRendererCaptureMixin} had ALREADY
- * composited the captured HUD onto {@code GameRenderer.mainRenderTarget()} for the real frame --
- * sampling that HUD-contaminated target copied HUD pixels over sky-depth into {@code staging},
- * which {@link UiLayerCapture#compositeOnto} then blended a SECOND time on top when stamping the
- * generated frame's own HUD, double-alpha-ing every translucent HUD edge over sky on every
- * generated frame. {@code GuiRendererCaptureMixin}'s HUD-capture wrap is the one place in the frame
- * where a scene-only main target is naturally available (its own {@code realTarget} local, captured
- * before its own HUD composite runs), so {@link #prepareGeneratedFrame} moved there instead. See
- * that method's own header for why recording {@link FrameGenPass#copyGeneratedInto} at this earlier
- * point is still GPU-correct despite the interpolator having been encoded even earlier, in {@code
+ * site, because the sky fill (see {@link FrameGenSkyFillPass}) needs a SCENE-ONLY (HUD-free) native
+ * color to fill sky/far-depth pixels with. At present-seam time, {@code GuiRendererCaptureMixin} has
+ * ALREADY composited the captured HUD onto {@code GameRenderer.mainRenderTarget()} for the real
+ * frame -- sampling that HUD-contaminated target would copy HUD pixels over sky-depth into {@code
+ * staging}, which {@link UiLayerCapture#compositeOnto} then blends a SECOND time on top when
+ * stamping the generated frame's own HUD, double-alpha-ing every translucent HUD edge over sky on
+ * every generated frame. {@code GuiRendererCaptureMixin}'s HUD-capture wrap is the one place in the
+ * frame where a scene-only main target is naturally available (its own {@code realTarget} local,
+ * captured before its own HUD composite runs), which is where {@link #prepareGeneratedFrame} runs.
+ * See that method's own header for why recording {@link FrameGenPass#copyGeneratedInto} at this
+ * earlier point is still GPU-correct despite the interpolator being encoded even earlier, in {@code
  * renderLevel}.
  *
- * <p><b>Site (revised from an earlier, temporally-wrong design):</b> {@code PresentSeamMixin} calls
- * {@link #presentGeneratedIfReady} from inside {@code Minecraft.renderFrame(boolean)}, immediately
- * BEFORE vanilla's own {@code windowSurface.blitFromTexture(...)} call in the method's late
- * {@code "present"} profiler section -- NOT before vanilla's early {@code acquireNextTexture()} (an
- * earlier revision of this seam injected there; see below for why that was wrong). At this late
+ * <p><b>Site:</b> {@code PresentSeamMixin} calls {@link #presentGeneratedIfReady} from inside
+ * {@code Minecraft.renderFrame(boolean)}, immediately BEFORE vanilla's own {@code
+ * windowSurface.blitFromTexture(...)} call in the method's late {@code "present"} profiler section
+ * -- NOT before vanilla's early {@code acquireNextTexture()} (see below for why the early site is
+ * wrong). At this late
  * site, {@code windowSurface} is already acquired (vanilla's own {@code acquireNextTexture()} ran
  * earlier this same {@code renderFrame} call, before any rendering), and -- critically -- this
  * frame's own {@link FrameGenPass#run} has ALSO already happened by now (it runs from
@@ -91,8 +90,8 @@ import java.util.Optional;
  * ring image {@link FrameGenPass#copyGeneratedInto} copies in (an unscaled {@code vkCmdCopyImage})
  * and the {@code uiTarget} {@link UiLayerCapture#compositeOnto} composites on. It must NOT be sized
  * off the surface's own {@code Configuration}: on a Retina surface that is the swapchain image size
- * (2x native), which left the unscaled generated copy filling only a native-sized sub-rect and
- * stretched the HUD composite 2x -- the oversized/corner-displaced HUD this seam previously produced.
+ * (2x native), which would leave the unscaled generated copy filling only a native-sized sub-rect
+ * and stretch the HUD composite 2x into an oversized, corner-displaced HUD.
  * {@code surface.blitFromTexture} below scales this native staging up to the swapchain exactly as
  * vanilla's own real-frame blit scales the native {@code mainRenderTarget} up, so the two present
  * paths are size-symmetric.
@@ -102,11 +101,10 @@ import java.util.Optional;
  * ~622) -> {@code CommandEncoder.submit()} (offset ~689) -> {@code present()} (offset ~706): both
  * {@code GpuSurface.blitFromTexture} and {@code GpuSurface.present} only STAGE work on the encoder
  * (bytecode-verified -- neither one submits), so this seam's own generated-frame cycle calls
- * {@code encoder.submit()} between its own blit and present too, mirroring vanilla exactly -- an
- * earlier revision omitted this and left the generated present's semaphore signal never actually
- * submitted to the queue, which stalled {@code vkQueuePresentKHR}'s wait indefinitely and crashed
- * with a live-reproduced {@code VK_TIMEOUT}/device-lost error (a code-review pass caught and fixed
- * this before it shipped).
+ * {@code encoder.submit()} between its own blit and present too, mirroring vanilla exactly --
+ * omitting it leaves the generated present's semaphore signal never actually submitted to the
+ * queue, stalling {@code vkQueuePresentKHR}'s wait indefinitely and crashing with a
+ * {@code VK_TIMEOUT}/device-lost error.
  *
  * <p><b>Exception safety, phase by phase</b> (each of {@code GpuSurface}'s three mutating calls only
  * flips its internal flag(s) AFTER its backend call succeeds -- bytecode-verified, not assumed):
@@ -174,12 +172,12 @@ public final class FrameGenPresenter {
     // survive into a frame that never re-prepared staging.
     private static boolean stagingPrepared;
 
-    // Cadence instrumentation (Task 8): the actual console line in maybeLogCadence prints only
-    // behind -Dfornax.framegen.log=true, but the underlying counting/windowing this flag used to
-    // gate entirely now also runs whenever FrameGenPass.armed() is true (see recordSkip/
-    // recordPresented) -- ProfilerOverlay's own "FrameGen: ..." row (overlayLine(), profile
-    // package) reads the SAME per-second rates this window computes, and needs them live even for
-    // players who never set the dev log property. For the overwhelmingly common disarmed case
+    // Cadence instrumentation: the actual console line in maybeLogCadence prints only behind
+    // -Dfornax.framegen.log=true, but the underlying counting/windowing also runs whenever
+    // FrameGenPass.armed() is true (see recordSkip/recordPresented) -- ProfilerOverlay's own
+    // "FrameGen: ..." row (overlayLine(), profile package) reads the SAME per-second rates this
+    // window computes, and needs them live even for players who never set the dev log property.
+    // For the overwhelmingly common disarmed case
     // (no MetalFX / framegen off) this is still a single static boolean check per present-seam call
     // with no allocation, no extra branching, and no windowing work at all -- the cost only applies
     // to sessions that already pay far more for MetalFX itself.
@@ -297,8 +295,8 @@ public final class FrameGenPresenter {
             }
             // Native resolution -- NOT the surface/swapchain config size. See this class's own
             // header (staging-target paragraph) for why: everything written into staging is
-            // native-res, and sizing it to the (possibly 2x, Retina) swapchain image previously
-            // stretched the composited HUD 2x into a corner.
+            // native-res, and sizing it to the (possibly 2x, Retina) swapchain image would stretch
+            // the composited HUD 2x into a corner.
             RenderTarget staging = ensureStagingTarget(SsaaManager.nativeWidth(), SsaaManager.nativeHeight());
             if (!FrameGenPass.copyGeneratedInto(staging)) {
                 return;
@@ -454,7 +452,7 @@ public final class FrameGenPresenter {
      * anytime. The one shared implementation both {@code FornaxSettingsScreen}'s
      * {@code FRAMEGEN_DEACTIVATE} action and {@code GraphRunner.closeCurrent()} call, since frame
      * generation presents every frame regardless of pack state and must deactivate on pack teardown
-     * too (live-caught: crashed MoltenVK when it didn't).
+     * too -- leaving it active through a pack teardown crashes MoltenVK on the next present.
      */
     public static void deactivateAll() {
         FrameGenPass.deactivate();
@@ -471,9 +469,9 @@ public final class FrameGenPresenter {
      * distinguishes the two distinct not-FIFO causes this method is called for: an EMPTY {@code
      * currentConfiguration()} (surface mid-reconfigure/not-yet-configured -- a transient, likely
      * self-resolving state) versus a genuinely present but non-FIFO/FIFO_RELAXED mode (a standing
-     * vsync-off session, which will not self-resolve). Conflating the two into one message
-     * previously made a transient reconfigure window look identical to "vsync is permanently off,"
-     * which misdirected troubleshooting when the two ever alternated across a session.
+     * vsync-off session, which will not self-resolve). Conflating the two into one message would
+     * make a transient reconfigure window look identical to "vsync is permanently off," misdirecting
+     * troubleshooting if the two ever alternated across a session.
      */
     private static void logOnceNotFifo(boolean configEmpty) {
         if (loggedNonFifoSkip) {
@@ -492,7 +490,7 @@ public final class FrameGenPresenter {
     /**
      * Bumps a skip counter and checks the 5s cadence window. No-op when neither the dev log flag
      * nor an armed session needs the counting -- see {@link #LOG_ENABLED}'s own comment for why
-     * this is no longer LOG_ENABLED alone.
+     * an armed session is also checked here, not {@link #LOG_ENABLED} alone.
      */
     private static void recordSkip(SkipReason reason) {
         if (!LOG_ENABLED && !FrameGenPass.armed()) {

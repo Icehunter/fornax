@@ -64,8 +64,8 @@ public final class FullscreenPassRunner implements AutoCloseable {
      * building a brand-new runner (the next successful rebuild), never in place. */
     private boolean invalid;
     /** Consecutive {@link #run} failures. A permanently misclassified target throws every frame and
-     * still latches; a transient one (a frame-timing fence error from a settings change) no longer
-     * takes the pass down for the session. Reset on any successful frame. */
+     * still latches; a transient one (a frame-timing fence error from a settings change) does not
+     * take the pass down for the session. Reset on any successful frame. */
     private int consecutiveFailures;
     private static final int CONSECUTIVE_FAILURES_BEFORE_LATCH = 3;
 
@@ -81,9 +81,9 @@ public final class FullscreenPassRunner implements AutoCloseable {
     private final long[] texelWrapperHandles;
 
     /** Logged once, process-wide, the first time any fullscreen pass binds a TEXEL_BUFFER input --
-     * see {@link #logTexelBufferBindOnce}. This backend has never exercised a
-     * compute-written-buffer -> fragment-texelFetch bind before this task; the log gives a capture
-     * a concrete element count to compare against the device's maxTexelBufferElements limit. */
+     * see {@link #logTexelBufferBindOnce}. This is the first compute-written-buffer ->
+     * fragment-texelFetch bind this backend exercises; the log gives a capture a concrete element
+     * count to compare against the device's maxTexelBufferElements limit. */
     private static volatile boolean loggedTexelBufferBindOnce = false;
 
     private FullscreenPassRunner(PassSpec spec, RenderPipeline pipeline, boolean[] bufferInputs) {
@@ -143,22 +143,21 @@ public final class FullscreenPassRunner implements AutoCloseable {
         // (both factors ONE) -- e.g. for a light-scattering composite that only ever adds. "multiply"
         // is color/alpha = dst * src (src factor ZERO, dst factor SRC_COLOR) -- e.g. for a
         // pre-tonemap chromatic-extinction recolor pass that never samples its own destination.
-        // Cache-busting generation suffix (fullscreen-pass staleness livefix, 2026-07-19): mirrors
-        // ShaderChunkRendererConstantsMixin.fornax$generationConstant(), the already-proven,
-        // cold-relaunch-verified fix for the SAME root cause on terrain shaders -- blaze3d's device
-        // shader-module cache is keyed by Identifier WITHOUT hashing source text, so a pack republish
-        // that changes a fullscreen pass's shader TEXT under the same fixed "fornax_runtime:<name>"
-        // location could silently keep serving the stale compiled SPIR-V module from a PRIOR
-        // generation, even across a cold relaunch (the terrain-side bug was proven to survive exactly
-        // that). Unlike terrain (which appends a cache-busting DEFINE via a separate shader-constants
-        // list), this generic RenderPipeline.builder() path has no equivalent defines-list hook --
-        // the pipeline's OWN `location` identifier is what RenderPipeline registration/caching keys
-        // on here, so embedding the generation directly in THAT identifier is the equivalent fix:
-        // every pack rebuild gets a genuinely distinct location, forcing a fresh pipeline (and thus a
-        // fresh GLSL->SPIR-V compile) instead of ever risking a stale reuse. shaderPath(spec) below
-        // (the SEPARATE identifier RuntimeShaderPack actually resolves to real file content) is
-        // deliberately left untouched -- only the pipeline's own cache-key identity changes, not how
-        // the real shader source gets located.
+        // Cache-busting generation suffix: mirrors
+        // ShaderChunkRendererConstantsMixin.fornax$generationConstant(), the same fix applied for
+        // the same root cause on terrain shaders -- blaze3d's device shader-module cache is keyed
+        // by Identifier WITHOUT hashing source text, so a pack republish that changes a fullscreen
+        // pass's shader TEXT under the same fixed "fornax_runtime:<name>" location can silently
+        // keep serving the stale compiled SPIR-V module from a PRIOR generation, even across a
+        // cold relaunch. Unlike terrain (which appends a cache-busting DEFINE via a separate
+        // shader-constants list), this generic RenderPipeline.builder() path has no equivalent
+        // defines-list hook -- the pipeline's OWN `location` identifier is what RenderPipeline
+        // registration/caching keys on here, so embedding the generation directly in THAT
+        // identifier is the equivalent fix: every pack rebuild gets a genuinely distinct location,
+        // forcing a fresh pipeline (and thus a fresh GLSL->SPIR-V compile) instead of ever risking
+        // a stale reuse. shaderPath(spec) below (the SEPARATE identifier RuntimeShaderPack
+        // actually resolves to real file content) is deliberately left untouched -- only the
+        // pipeline's own cache-key identity changes, not how the real shader source gets located.
         Identifier pipelineLocation = Identifier.fromNamespaceAndPath("fornax_runtime",
                 spec.name() + "_gen" + GraphRunner.shaderCacheGeneration());
 
@@ -187,27 +186,25 @@ public final class FullscreenPassRunner implements AutoCloseable {
             consecutiveFailures = 0;
         } catch (RuntimeException e) {
             // Defense in depth against an input/output resolving to no allocated target -- most
-            // commonly a buffer-kind input this runner's build()-time classification
+            // commonly a buffer-kind input whose build()-time classification
             // (registry.getBuffer(name) != null, a live-registry SNAPSHOT -- see build()'s own doc)
-            // got wrong because the underlying compute buffer's own allocation raced ahead of this
-            // runner's construction (a transient "no compute backend available" window at
+            // is wrong because the underlying compute buffer's own allocation can race ahead of
+            // this runner's construction (a transient "no compute backend available" window at
             // world-join/pack-rebuild time -- see TargetRegistry.ensureBufferSize's own doc). That
             // misclassification is baked into bufferInputs[] for this runner's whole lifetime (a
             // texture-shaped bind-group slot can never correctly read a buffer target, and vice
             // versa), so retrying next frame would just throw again -- same permanent-until-rebuild
-            // degradation as the setPipeline catch below, live-caught crashing the whole render
-            // frame (mc-vulkan-realism crash investigation follow-up) before this catch existed.
-            // NOT latched on the first failure any more. This catch is deliberately broad
-            // (RuntimeException), and it turns out not every RuntimeException reaching it is the
-            // permanent, misclassified-target kind described above. A single slider drag used to
-            // throw IllegalStateException("Cannot wait on a fence for the current submit") out of
-            // PackOptionsBuffer.currentBuffer -- a purely transient frame-timing failure -- and land
-            // here, where it permanently disabled resolve, tonemap, water_composite,
-            // underwater_refraction and every SSR/SSAO pass at once. The frame then rendered with
-            // most of the pipeline switched off, which reads as a washed-out untonemapped scene
-            // rather than as an error, and was reported as a shader bug. That root cause is fixed
-            // (GraphRunner.updateRuntimeValues now defers the ring rotate to the frame boundary),
-            // but the policy that turned one bad frame into a dead pipeline is worth fixing too.
+            // degradation as the setPipeline catch below.
+            //
+            // This catch is deliberately broad (RuntimeException): not every RuntimeException
+            // reaching it is the permanent, misclassified-target kind described above. A transient
+            // frame-timing failure -- e.g. IllegalStateException("Cannot wait on a fence for the
+            // current submit") out of PackOptionsBuffer.currentBuffer during a slider drag -- must
+            // not permanently disable resolve, tonemap, water_composite, underwater_refraction and
+            // every SSR/SSAO pass at once: that reads as a washed-out untonemapped scene rather
+            // than as an error, not as a dead pipeline. GraphRunner.updateRuntimeValues defers the
+            // ring rotate to the frame boundary to keep this kind of failure rare, but the latch
+            // policy below still has to tolerate it when it happens.
             //
             // A genuinely misclassified target throws every frame, so it still latches -- just after
             // CONSECUTIVE_FAILURES_BEFORE_LATCH frames instead of one, which costs a few wasted
@@ -221,10 +218,10 @@ public final class FullscreenPassRunner implements AutoCloseable {
                 return;
             }
             invalid = true;
-            // Names the actual exception rather than asserting a cause. The old wording claimed
-            // "failed to resolve an input/output target" unconditionally, which sent an
-            // investigation after GLSL compile errors and option-registration gaps for a fence
-            // timing bug -- the log should say what happened, not what usually happens.
+            // Names the actual exception rather than asserting a cause -- the failure reaching
+            // this point is not always an unresolved input/output target (the transient
+            // fence-timing case above can land here too), so the log states what happened, not
+            // what usually happens.
             FornaxMod.LOGGER.error("[Fornax] FullscreenPassRunner: pass '{}' threw {} on {} "
                     + "consecutive frames ({}) -- skipping it for the rest of this runner's "
                     + "lifetime; deferred output will be incomplete until the next successful "

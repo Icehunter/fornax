@@ -114,12 +114,12 @@ public final class MetalFxUpscalePass {
             // Metal command buffer failed with its own IOGPU "Invalid Resource" error), or one of
             // VulkanMetalInterop's own named-fatal conditions (a failed cross-API timeline/fence
             // wait, a failed vkEndCommandBuffer, a nil Metal command buffer/blit encoder) -- each
-            // one just as unrecoverable, previously falling into the generic Throwable branch below
-            // and getting the same soft TAAU fallback an ordinary bug would. Nothing submitted to
-            // this device after any of these can succeed, so falling back to TAAU and returning
-            // false would hand the very next unrelated submit() the same dead device -- observed
-            // live as an unattributed native crash one frame later. Surface it here instead, where
-            // the cause is still named, rather than swallow it as a soft failure.
+            // one just as unrecoverable as the generic Throwable branch below, which gives ordinary
+            // bugs the same soft TAAU fallback. Nothing submitted to this device after any of these
+            // can succeed, so falling back to TAAU and returning false would hand the very next
+            // unrelated submit() the same dead device, surfacing as an unattributed native crash one
+            // frame later. Surface it here instead, where the cause is still named, rather than
+            // swallow it as a soft failure.
             FornaxMod.LOGGER.error("[Fornax] MetalFX scaler: Vulkan device lost, unrecoverable", e);
             throw e;
         } catch (Throwable t) {
@@ -312,8 +312,8 @@ public final class MetalFxUpscalePass {
         // buffer -- this pass's own timeline wait above has no visibility into that. Without this
         // call, a resize landing here while frame generation was engaged the previous frame can
         // free memory FrameGenPass's still-executing interpolator encode is still reading (a
-        // genuine cross-class GPU use-after-free, live-caught: see the mc-vulkan-realism crash
-        // investigation follow-up). No-op if frame generation has never run this session.
+        // genuine cross-class GPU use-after-free). No-op if frame generation has never run this
+        // session.
         FrameGenPass.waitForOwnGpuWork();
         VulkanMetalInterop.destroyImage(device, colorIn);
         VulkanMetalInterop.destroyImage(device, depthIn);

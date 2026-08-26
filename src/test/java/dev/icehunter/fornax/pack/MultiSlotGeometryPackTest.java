@@ -83,10 +83,10 @@ class MultiSlotGeometryPackTest {
         assertEquals(GeometrySlot.BANNER_PATTERNS, pack.graph().passes().get(3).slot());
 
         // Terrain, entities and banner patterns all draw today, by three DIFFERENT routes; hand is
-        // still declared, validated and inert. This assertion used to read "only terrain draws", which
-        // was true when it was written and stayed in the file long after entities started rendering --
-        // the same staleness GeometrySlot.isRendered() itself carried, and the same question a pack
-        // author asks before spending a round on a pass.
+        // still declared, validated and inert. Asserting all three here, not just terrain, keeps this
+        // test from going stale the way GeometrySlot.isRendered() itself can if a slot starts
+        // rendering and this assertion isn't updated to match -- the same question a pack author asks
+        // before spending a round on a pass.
         assertTrue(GeometrySlot.TERRAIN.isRendered());
         assertTrue(GeometrySlot.ENTITIES.isRendered());
         assertTrue(GeometrySlot.BANNER_PATTERNS.isRendered());

@@ -30,17 +30,15 @@ public final class DirectSectionReader {
      * slot with correct all-zero occupancy instead of leaving stale bits behind, and (unlike a real
      * section) never needs rebuilding since its content can never change.
      *
-     * <p><b>livefix7 update:</b> this narrow fix originally covered only the structurally-out-of-range
-     * case; every ORDINARY in-range section a normal camera-driven recenter newly exposes was still
-     * left reading a previous owner's stale bytes until the background harvester queue caught up
-     * (displaced/"teleported" geometry in reflections, worst on pan/movement bursts). That general
-     * case is now closed one layer up, synchronously: {@link VoxelWindow#recenterAndResync} zeroes GPU
-     * occupancy for every newly-exposed slot on the render thread, in the same call that publishes the
-     * new window geometry, BEFORE dispatching this class's background harvest -- see its own doc
-     * comment. That means every slot this reader's out-of-range branch used to specifically guard
-     * against is now ALSO covered by the general synchronous clear the moment it enters the window;
-     * this branch remains for the same reason it always did (a permanently-EMPTY harvest needs no
-     * rebuilding, unlike a transient occupancy-only clear waiting on a real harvest to land). */
+     * <p>Every ORDINARY in-range section a normal camera-driven recenter newly exposes would read a
+     * previous owner's stale bytes until the background harvester queue caught up (displaced/
+     * "teleported" geometry in reflections, worst on pan/movement bursts) without a separate
+     * safeguard: {@link VoxelWindow#recenterAndResync} zeroes GPU occupancy for every newly-exposed
+     * slot on the render thread, in the same call that publishes the new window geometry, BEFORE
+     * dispatching this class's background harvest -- see its own doc comment. This branch stays
+     * because a permanently-EMPTY harvest needs no rebuilding, unlike a transient occupancy-only
+     * clear waiting on a real harvest to land -- not because it is the only guard against stale
+     * bytes for out-of-range slots any more. */
     // Package-private (not private) so DirectSectionReaderTest can assert its shape directly --
     // read(Level, SectionPos) itself needs a real vanilla Level/LevelChunk this suite has no headless
     // seam to construct (same class of gap as ComputePassRunner.build(), documented in that class's

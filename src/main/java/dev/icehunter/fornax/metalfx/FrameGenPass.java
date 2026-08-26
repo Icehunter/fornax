@@ -36,9 +36,8 @@ import org.lwjgl.vulkan.VK13;
  * for the next frame's ring position. {@code MTLFXFrameInterpolator}'s configured input dims are the
  * RENDER-resolution depth/motion textures' own size (from {@code depthInterop().width/height}), not
  * the native output size the color ring uses -- mirroring {@code MTLFXTemporalScaler}'s own
- * input/output split; feeding it native dims for a render-res input produced the scale mismatch a
- * live A/B caught (motion-proportional lattice smearing on camera movement, clean when standing
- * still).
+ * input/output split; feeding it native dims for a render-res input produces a scale mismatch
+ * (motion-proportional lattice smearing on camera movement, clean when standing still).
  *
  * <p>{@link #copyGeneratedInto} is the ONLY way a generated frame leaves this package: it records a
  * Vulkan copy {@code generated -> dest} that waits the pass's {@code v+1} and signals {@code v+2},
@@ -64,15 +63,12 @@ public final class FrameGenPass {
     // reuses the scaler's own MV_FLIP/JITTER_FLIP_X/Y, so these never touch what MetalFxUpscalePass
     // feeds MTLFXTemporalScaler -- only what this pass feeds MTLFXFrameInterpolator.
     //
-    // FRAMEGEN_MV_FLIP semantics were INVERTED 2026-07-24: a live A/B on real hardware
-    // (-Dfornax.framegen.mvFlip=true, this knob's ORIGINAL sense) visibly reduced generated-frame
-    // dither, proving MTLFXFrameInterpolator's motion convention is the OPPOSITE sign of
-    // MTLFXTemporalScaler's (same live-A/B pinning method fornax.metalfx.mvFlip used historically to
-    // pin the scaler's own convention). The flipped (positive-dims) motion scale is now the DEFAULT
-    // feed for the interpolator; this knob, still named fornax.framegen.mvFlip and kept for future
-    // A/B, now flips BACK to the scaler-style negative-dims convention when set true -- see its use
-    // site in run() for the actual sign flip, and MetalFxUpscalePass/MetalFxConventions#motionScale
-    // for the untouched scaler-side convention this pass no longer defaults to matching.
+    // MTLFXFrameInterpolator's motion convention is the OPPOSITE sign of MTLFXTemporalScaler's, so
+    // the DEFAULT feed for the interpolator is the flipped (positive-dims) motion scale; this knob,
+    // still named fornax.framegen.mvFlip and kept for future A/B, flips BACK to the scaler-style
+    // negative-dims convention when set true -- see its use site in run() for the actual sign flip,
+    // and MetalFxUpscalePass/MetalFxConventions#motionScale for the scaler-side convention this pass
+    // does not default to matching.
     private static final boolean FRAMEGEN_MV_FLIP = Boolean.getBoolean("fornax.framegen.mvFlip");
     private static final boolean FRAMEGEN_JITTER_FLIP = Boolean.getBoolean("fornax.framegen.jitterFlip");
 
@@ -123,9 +119,8 @@ public final class FrameGenPass {
      * frame -- the SAME value {@code MetalFxUpscalePass.run} already read this same frame to jitter
      * {@code MTLFXTemporalScaler}'s input. This pass's interpolator receives that same jittered
      * render-res depth/color (reused from the upscale pass, see this class's own header), so it needs
-     * the identical jitter-pixels conversion or its reprojection reads sub-pixel-misaligned samples --
-     * the live symptom that motivated threading this through (uniform diagonal dither/stipple on
-     * generated frames).
+     * the identical jitter-pixels conversion or its reprojection reads sub-pixel-misaligned samples,
+     * producing uniform diagonal dither/stipple on generated frames.
      *
      * <p><b>Adaptive pacing (disengage below the display's own refresh rate)</b>: {@link
      * FrameGenPacer#update} runs here, ONCE per armed frame -- the single decision point both this
@@ -283,9 +278,7 @@ public final class FrameGenPass {
      * visibility into this pass's independently-timed Metal command buffer, so without this call a
      * resize landing on MetalFxUpscalePass while this pass was engaged the previous frame can free
      * memory this pass's still-executing interpolator encode is still reading -- a genuine
-     * cross-class GPU use-after-free, live-caught (see the mc-vulkan-realism crash investigation,
-     * docs/reference/vulkan-renderer-architecture-audit.md follow-up). No-op if this pass has never
-     * run or has no outstanding signal.
+     * cross-class GPU use-after-free. No-op if this pass has never run or has no outstanding signal.
      */
     static void waitForOwnGpuWork() {
         VulkanDevice device = VulkanMetalInterop.vulkanDevice();
@@ -397,11 +390,10 @@ public final class FrameGenPass {
             MetalFxConventions.motionScale(motionInterop.width, motionInterop.height, MV_FLIP, MOTION_SCALE);
             float mvScaleX = MOTION_SCALE.x;
             float mvScaleY = MOTION_SCALE.y;
-            // Interpolator motion convention A/B-pinned OPPOSITE the scaler's on live hardware
-            // 2026-07-24 (same pinning method as fornax.metalfx.mvFlip historically): default now
-            // flips to the positive-dims sign (negating the scaler-style baseline computed above);
+            // Interpolator motion convention is OPPOSITE the scaler's: the default flips to the
+            // positive-dims sign (negating the scaler-style baseline computed above);
             // FRAMEGEN_MV_FLIP=true flips BACK to that scaler-style negative-dims convention. See the
-            // field's own declaration comment for the full A/B history.
+            // field's own declaration comment for the details.
             if (!FRAMEGEN_MV_FLIP) {
                 mvScaleX = -mvScaleX;
                 mvScaleY = -mvScaleY;

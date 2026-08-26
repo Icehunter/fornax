@@ -19,12 +19,12 @@ import java.util.List;
  * model, so the voxel shadow march can treat it as a participating medium rather than alpha-testing a
  * surface that does not exist.
  *
- * <p>WHY THIS EXISTS. A cutout cube's shadow used to be resolved by mapping the ray's entry point to a
- * cube-face UV and alpha-testing the block's texture. That is only meaningful if the block IS a
- * textured cube. Live-verified 2026-07-20: every leaf model in the target pack is 7-24 ZERO-THICKNESS
- * rotated planes spilling nearly a full block outside its own cell. A cube-face parameterisation has no
- * relationship to that geometry, so the test produced structure that was confidently wrong -- shadow
- * where the model has a gap, none where it is dense.
+ * <p>WHY THIS EXISTS. Resolving a cutout cube's shadow by mapping the ray's entry point to a
+ * cube-face UV and alpha-testing the block's texture is only meaningful if the block IS a textured
+ * cube. Every leaf model in the target pack is 7-24 ZERO-THICKNESS rotated planes spilling nearly a
+ * full block outside its own cell. A cube-face parameterisation has no relationship to that
+ * geometry, so that test would produce structure that is confidently wrong -- shadow where the
+ * model has a gap, none where it is dense.
  *
  * <p>THE PHYSICS. Zero-thickness plate elements bake BOTH of a plate's facing sides as separate real
  * quads -- the four edge-on faces per plate are zero-area and rejected by {@link #sampleQuad}, but

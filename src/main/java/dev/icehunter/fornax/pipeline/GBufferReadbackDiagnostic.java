@@ -71,8 +71,7 @@ public final class GBufferReadbackDiagnostic {
             dumpAll(gbuffer);
         }
 
-        // Re-gated behind profilerOverlay (was unconditionally logging for a live-diagnosis round;
-        // that round is over -- requestDump()/F10 is now the on-demand path instead).
+        // Gated behind profilerOverlay; requestDump()/F10 is the on-demand path.
         if (!FornaxConfig.get().profilerOverlay) {
             return;
         }

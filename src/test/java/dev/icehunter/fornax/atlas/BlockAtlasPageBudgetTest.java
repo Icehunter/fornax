@@ -26,11 +26,10 @@ class BlockAtlasPageBudgetTest {
 
     @Test
     void maxPagesReturnsZeroRatherThanLyingThatOnePageFitsOnAStarvedBudget() {
-        // 1 byte cannot hold even one overflow page at any real page size. maxPages used to floor
-        // at 1 regardless, which let BlockAtlasPagedStitch.takeover plan a page the budget itself
-        // said could not be afforded; it now reports the honest 0 and the caller's own +1 for page
-        // 0 (allocated regardless of paging) is what keeps a starved device from being refused
-        // outright.
+        // 1 byte cannot hold even one overflow page at any real page size. maxPages reports the
+        // honest 0 rather than flooring at 1, so BlockAtlasPagedStitch.takeover cannot plan a page
+        // the budget says is unaffordable; the caller's own +1 for page 0 (allocated regardless of
+        // paging) is what keeps a starved device from being refused outright.
         int pages = BlockAtlasPageBudget.maxPages(1L, 1.0, 16384, 16384, 64);
 
         assertEquals(0, pages);

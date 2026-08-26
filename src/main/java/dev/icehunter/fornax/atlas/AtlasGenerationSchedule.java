@@ -22,7 +22,7 @@ import org.jspecify.annotations.Nullable;
  * allocation, and every Fornax rebuild inside one synchronous call with zero submits in between, so
  * nothing done entirely inside that call can force reclamation. Forcing extra synchronous submits
  * mid-reload was considered and rejected: each one also runs {@code awaitSubmitCompletion} (a 5s
- * timeout, the exact class of failure already live-caught once) and an unconditional
+ * timeout that would stall the frame) and an unconditional
  * {@code TracyGpuProfiler.endFrame()} with no matching begin, from a context Blaze3D never expects.
  * {@code TextureAtlas.cycleAnimationFrames} is invoked at most once per render-loop iteration, so
  * three poll invocations guarantee at least the two intervening submits the destroy ring needs. It
@@ -31,11 +31,10 @@ import org.jspecify.annotations.Nullable;
  * {@code RETIRE_GENERATIONS} generation-retirement ring -- the one place in this codebase that
  * already solves this exact class of problem for a different resource.
  *
- * <p><b>Why this needs no CPU/GPU split.</b> The previous attempt at deferring these atlases (an
- * async {@code prepare()}/{@code apply()} queue on a background executor, reverted this session)
- * failed twice live: uploading both lanes in one frame tripped a command-buffer backpressure
- * timeout, and a supersession path closed a still-published, reused lane. Neither failure mode
- * exists here, because nothing here runs off the render thread and nothing splits CPU compositing
+ * <p><b>Why this needs no CPU/GPU split.</b> An async {@code prepare()}/{@code apply()} queue on a
+ * background executor risks tripping a command-buffer backpressure timeout by uploading both lanes
+ * in one frame, and risks a supersession path closing a still-published, reused lane. Neither
+ * failure mode exists here, because nothing here runs off the render thread and nothing splits CPU compositing
  * from GPU upload -- {@link #tick} performs the exact same synchronous
  * {@code LabPbrAtlasPair.rebuild}/{@code BlockAtlasOverflow.rebuild} calls this reload would have
  * made immediately, just a few frames later than today.

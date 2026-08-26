@@ -58,7 +58,7 @@ import java.util.concurrent.CompletableFuture;
  * {@code GraphRunner.isActive()}, while the per-frame render-pass attachment count follows the
  * CURRENT value of that same flag -- flipping the active pack without a renderer reload crashes
  * {@code RenderPass.setPipeline} on the very next chunk draw with an attachment-count mismatch
- * (live-caught; see {@link RendererReload}'s own doc comment). The renderer reload below is
+ * (see {@link RendererReload}'s own doc comment). The renderer reload below is
  * therefore CHAINED on the rebuild/unload's resource-reload future, never requested directly: that
  * future resolves asynchronously, and reloading the renderer before it lands would resync the
  * terrain pipelines against a resource snapshot that doesn't yet reflect the new pack's (or no
@@ -72,8 +72,8 @@ public final class PackSwitch {
      * Activates {@code targetPackName} as the new active pack -- empty unloads back to vanilla
      * Sodium: saves and closes the OLD pack's values/filesystem, then loads and rebuilds the new one
      * (or unloads, for empty), persists the config, and chains a renderer reload onto the resulting
-     * resource-reload future -- exactly the sequence {@code ShaderPacksScreen.applyChanges}'s {@code
-     * packChanged} branch used to run inline.
+     * resource-reload future -- the same sequence {@code ShaderPacksScreen.applyChanges}'s {@code
+     * packChanged} branch needs for its own case.
      *
      * <p>On failure (a {@link FornaxPackError}, or a target that no longer discovers), {@code
      * activePack} is explicitly REVERTED to {@code previousPackName}. The legacy screen only ever
@@ -150,9 +150,9 @@ public final class PackSwitch {
                 // filesystem here is safe.
                 //
                 // The renderer reload must chain on unload()'s own future, never fire directly (RENDER-
-                // STATE LATCH LAW, this class's own doc): calling it directly resynced terrain pipelines
-                // against vanilla-override state that hadn't finished clearing, producing stale/ghosted
-                // geometry (live-caught testing this fix).
+                // STATE LATCH LAW, this class's own doc): calling it directly resyncs terrain pipelines
+                // against vanilla-override state that hasn't finished clearing, producing stale/ghosted
+                // geometry.
                 CompletableFuture<Void> unloaded = GraphRunner.unload();
                 if (oldModel != null) {
                     closeIfCustomFileSystem(oldModel.root());

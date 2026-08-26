@@ -8,15 +8,15 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
- * Disables Sodium's fog-occlusion culling while a pack is active -- the underwater world-vanishes
- * livefix. {@code RenderSectionManager.getSearchDistance} collapses the section-visibility search
- * radius to {@code fogParameters.cullDistance()} whenever the {@code useFogOcclusion} performance
- * option is on and VANILLA fog reads fully opaque. Underwater, vanilla fog is short-range and
- * opaque almost immediately, so with a pack active the visible world collapsed to a small bubble
- * around the camera (live-caught: "no blocks except at the very bottom, eventually they come in" --
- * the bubble expanding as sections re-enter the shrunken radius). The pack renders its OWN fog
- * (translucent, much longer range), so vanilla fog's opacity is the wrong signal entirely -- the
- * culled sections are plainly visible through pack fog.
+ * Disables Sodium's fog-occlusion culling while a pack is active. {@code
+ * RenderSectionManager.getSearchDistance} collapses the section-visibility search radius to {@code
+ * fogParameters.cullDistance()} whenever the {@code useFogOcclusion} performance option is on and
+ * VANILLA fog reads fully opaque. Underwater, vanilla fog is short-range and opaque almost
+ * immediately, so with a pack active the visible world collapses to a small bubble around the
+ * camera, most blocks missing except near the very bottom, with the bubble expanding as sections
+ * re-enter the shrunken radius as the player moves. The pack renders its OWN fog (translucent,
+ * much longer range), so vanilla fog's opacity is the wrong signal entirely -- the culled sections
+ * are plainly visible through pack fog.
  *
  * <p>The override is therefore blanket rather than conditional: once a pack owns fog, vanilla's
  * fog opacity describes nothing that is on screen, so there is no distance at which culling

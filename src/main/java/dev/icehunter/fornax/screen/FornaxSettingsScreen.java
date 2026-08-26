@@ -62,10 +62,10 @@ public final class FornaxSettingsScreen {
         // open with. A plain `before` captured once and left unmutated left every action gated on
         // SettingsApplyRouter.route() (PACK_REAPPLY, FRAMEGEN_DEACTIVATE, METAL_HUD_APPLY) comparing
         // against an increasingly stale baseline: e.g. toggle metalHud on and Save (fires apply(true)
-        // correctly), then toggle it back off and Save again -- the diff still saw the ORIGINAL
-        // (already-false) snapshot on both sides, so apply(false) silently never fired even though
-        // the persisted config value did flip. Live-caught: the live OS-level Metal HUD toggle got
-        // permanently stuck on for the rest of the session after exactly this sequence.
+        // correctly), then toggle it back off and Save again -- an unmutated `before` would still see
+        // the ORIGINAL (already-false) snapshot on both sides, so apply(false) would silently never
+        // fire even though the persisted config value did flip, leaving the live OS-level Metal HUD
+        // toggle permanently stuck on.
         FornaxSettings[] before = {snapshot(FornaxConfig.get())};
 
         YetAnotherConfigLib.Builder builder = YetAnotherConfigLib.createBuilder()
@@ -92,7 +92,7 @@ public final class FornaxSettingsScreen {
      * throw there must never cost the save that already succeeded in memory -- persisting first
      * makes disk state independent of whether any downstream apply action lands, instead of the
      * user's choice surviving only for the current session on the exact configurations where a
-     * downstream action fails (live-caught: `metalHud` "working but not saving").
+     * downstream action fails.
      * {@code PACK_REAPPLY} recompiles the active pack graph for the new {@code FX_*} engine
      * defines (an AA/scale change); {@code FRAMEGEN_DEACTIVATE} releases frame generation's interop
      * resources on the frameGeneration-off or AA-method-switched-away-from-METALFX transition --
@@ -251,9 +251,9 @@ public final class FornaxSettingsScreen {
                 .binding(AaMethod.TAA, () -> FornaxConfig.get().aaMethod, v -> FornaxConfig.get().aaMethod = v)
                 // Cycler, deliberately NOT the enum dropdown: YACL 3.9's dropdown is an
                 // editable text-filter combobox that renders its suggestion list transparently
-                // over neighboring rows on this MC version (live-caught) -- unusable. The full
-                // value menu lives in the DESCRIPTION instead, so the right pane shows every
-                // choice's meaning while cycling. Revisit if a custom list controller lands.
+                // over neighboring rows on this MC version, unusable. The full value menu lives in
+                // the DESCRIPTION instead, so the right pane shows every choice's meaning while
+                // cycling. Revisit if a custom list controller lands.
                 .controller(opt -> CyclingListControllerBuilder.create(opt)
                         .values(methods)
                         .formatValue(FornaxSettingsScreen::aaMethodLabel))

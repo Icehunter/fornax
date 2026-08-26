@@ -85,10 +85,10 @@ public abstract class UniformBufferManagerMixin implements UniformBufferManagerE
             index = 1
     )
     private int fornax$widenUniformBufferSize(int originalSize) {
-        // Sodium 0.9.1: the per-frame globals moved from a MappableRingBuffer (whose size literal
-        // this used to widen) into vanilla's DynamicUniformStorage ring -- the widened value is now
-        // the storage's per-block size (arg index 1 of (String,II)), same 800-byte u_Globals layout
-        // (184 official bytes + the 616-byte Fornax tail, sky tail + Water Round C Task 4's
+        // The per-frame globals live in vanilla's DynamicUniformStorage ring (Sodium 0.9.1), so
+        // this widens that storage's per-block size (arg index 1 of (String,II)) rather than a
+        // MappableRingBuffer size literal -- same 800-byte u_Globals layout (184 official bytes +
+        // the 616-byte Fornax tail, sky tail + Water Round C Task 4's
         // u_WaterState tail vec4 + the shadow-acne fix round's u_ShadowMapParams tail vec4 + the
         // cave/border-fog camera-sky-light round's u_CameraSkyLight tail vec4 + the TAAU
         // jitter-immunity round's u_InvProjModelViewNoJitter tail mat4 + u_FrameState + u_HeldLight
@@ -110,10 +110,9 @@ public abstract class UniformBufferManagerMixin implements UniformBufferManagerE
     }
 
     // The Std140Builder tail-append (previous-frame matrices, jitter, u_InvProjModelView,
-    // u_SunViewProj, u_VoxelWindow, u_CameraAbs) lived here as a @WrapOperation on update()'s
-    // terminal Std140Builder.get() until Sodium 0.9.1 moved the entire std140 chain into the
-    // GlobalUniforms record's write(ByteBuffer) -- see GlobalUniformsWriteMixin, which carries the
-    // identical append at the identical anchor in its new home.
+    // u_SunViewProj, u_VoxelWindow, u_CameraAbs) belongs in GlobalUniforms's write(ByteBuffer),
+    // not here, because Sodium 0.9.1's std140 chain lives entirely in that record -- see
+    // GlobalUniformsWriteMixin, which carries the identical append at the identical anchor there.
 
     /**
      * Re-uploads the PBR settings uniform block. Cheap (tens of bytes), so simplest to re-upload
@@ -133,9 +132,9 @@ public abstract class UniformBufferManagerMixin implements UniformBufferManagerE
      * with shaders off.
      *
      * <p><b>The write is a LOOP over {@link PbrSettingsLayout#MEMBERS}, and that is the point.</b>
-     * This used to be a hand-written {@code .putFloat(...)} chain paired with a hand-written member
-     * list in the pack's {@code terrain.fsh}, held in step by a comment. std140 matches the two
-     * POSITIONALLY, so a name added to one side only compiled cleanly and silently read its
+     * A hand-written {@code .putFloat(...)} chain paired with a hand-written member list in the
+     * pack's {@code terrain.fsh}, held in step only by a comment, is fragile: std140 matches the
+     * two POSITIONALLY, so a name added to one side only compiles cleanly and silently reads its
      * neighbour's float -- no validation layer can see that, because both sides are individually
      * well-formed. Iterating the shared list removes the Java half of the drift by construction:
      * there is no second ordering here to disagree with. The GLSL half is pinned by

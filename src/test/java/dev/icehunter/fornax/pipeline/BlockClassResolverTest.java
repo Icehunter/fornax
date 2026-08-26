@@ -32,10 +32,10 @@ class BlockClassResolverTest {
     static void bootstrap() {
         // Every other Bootstrap.bootStrap() caller in this suite calls tryDetectVersion() first --
         // Bootstrap.bootStrap() throws IllegalStateException("Game version not set") without it. This
-        // class previously got away with the omission only because some other test class's own
-        // correct call happened to run first in the same JVM and left SharedConstants already set; a
-        // JUnit discovery-order change (or simply another test class running standalone) makes that
-        // load-bearing coincidence break, and a broken Bootstrap.bootStrap() call poisons Blocks/
+        // Without this call, correctness depends on some other test class's own correct call
+        // happening to run first in the same JVM and leaving SharedConstants already set -- a
+        // JUnit discovery-order-dependent coincidence that breaks under reordering or standalone
+        // execution, and a broken Bootstrap.bootStrap() call poisons Blocks/
         // Items/EntityTypes for the rest of the JVM, cascading failures into every other test that
         // touches them -- not just this class's own.
         SharedConstants.tryDetectVersion();

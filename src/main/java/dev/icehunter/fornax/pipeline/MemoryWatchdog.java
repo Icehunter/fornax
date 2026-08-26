@@ -5,24 +5,11 @@ import dev.icehunter.fornax.FornaxMod;
 import java.lang.management.ManagementFactory;
 
 /**
- * Periodic process-memory sampling. Written to diagnose the Apple-Silicon device-loss crash
- * ({@code VK_ERROR_DEVICE_LOST} / {@code kIOGPUCommandBufferCallbackErrorOutOfMemory}) that ended
- * every session between 2026-07-27 and 2026-07-28, and KEPT afterwards -- it turned a three-minute
- * crash into a fifteen-second measurement, which is what made bisecting the cause affordable at one
- * short session per variable. A GPU leak in this engine is now a cheap thing to find.
- *
- * <p><b>What it found.</b> {@code PlayerShadowCaster} never called {@code RenderBuffers.endFrame()}
- * on the buffers it privately owns, retaining every frame's staged player geometry. The crash could
- * not be reproduced from the logs alone, and the crash reports' own timing pointed confidently at
- * the wrong commits. What they established was only that the failure was real and consistent:
- * every crash since 2026-07-27 01:02 is the same device loss, at 150-230s of uptime, on a machine
- * whose system-wide virtual memory sits near its ceiling with swap engaged. What they do NOT
- * establish is which allocation grows, and the cheap explanations were checked and eliminated
- * against the run logs -- the G-buffer rebuilds once per session, the sprite-bounds grid builds
- * once, every deferred/shadow pipeline is constructed exactly once, the resource manager reloads
- * once, the terrain vertex stride is unchanged at 24 bytes, the pack's own targets total 37.6 MB
- * and the voxel palette 91.6 MiB. None of those is a multi-gigabyte story, and none of them
- * repeats.
+ * Periodic process-memory sampling, kept resident to diagnose Apple-Silicon device-loss crashes
+ * ({@code VK_ERROR_DEVICE_LOST} / {@code kIOGPUCommandBufferCallbackErrorOutOfMemory}): a monotonic
+ * climb sampled here narrows a multi-minute crash-to-repro cycle to a measurement of seconds,
+ * turning what allocation is growing into a bisectable question instead of a guess against crash
+ * report timing that cannot be trusted to point at the responsible commit.
  *
  * <p>So the question this answers is the one that has to be answered first, and cannot be answered
  * by reading code: <b>does the process's memory climb, or is it flat and simply too high?</b>

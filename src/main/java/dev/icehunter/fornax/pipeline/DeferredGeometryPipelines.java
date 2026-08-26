@@ -564,7 +564,7 @@ public final class DeferredGeometryPipelines {
             // Logged because this is the one silent way a claimed slot ends up unshaded: every other
             // refusal below is an explicit error, so an unexplained gap here reads as "the hook never
             // ran" when it actually means "the pack program did not resolve".
-            // Rate-limited: this path is now retried rather than cached, so an unclaimed slot would
+            // Rate-limited: this path retries rather than caches, so an unclaimed slot would
             // otherwise warn every frame forever.
             if (NO_PROGRAM_REPORTED.putIfAbsent(base, Boolean.TRUE) == null) {
                 FornaxMod.LOGGER.warn("[Fornax] No pack fragment program resolved for slot '{}' while building a"

@@ -76,10 +76,9 @@ class PackSwitchContractTest {
     void rendererReloadAfterAFailureIsChainedOnUnloadsFutureNeverCalledDirectly() throws IOException {
         // This class's own doc names it "THE RENDER-STATE LATCH LAW": RendererReload.request() must
         // never run before the resource-reload future it depends on has landed, or the terrain
-        // pipelines resync against vanilla-override state that hasn't finished clearing yet.
-        // Live-caught testing the unload() fix above: calling request() directly right after unload()
-        // produced stale, ghosted terrain geometry on the very frame this catch was meant to fall back
-        // cleanly to vanilla.
+        // pipelines resync against vanilla-override state that hasn't finished clearing yet. Calling
+        // request() directly right after unload() produces stale, ghosted terrain geometry on the
+        // very frame this catch is meant to fall back cleanly to vanilla.
         String source = Files.readString(SOURCE);
         int catchStart = source.indexOf("} catch (FornaxPackError e) {");
         assertTrue(catchStart >= 0, "must still catch a rebuild failure");

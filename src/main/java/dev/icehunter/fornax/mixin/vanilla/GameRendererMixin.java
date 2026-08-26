@@ -200,24 +200,22 @@ public class GameRendererMixin {
      * injection site makes that ordering a plain-Java guarantee instead of a mixin-application
      * subtlety.
      *
-     * <p>Deliberately the RETURN boundary for EVERY method, including TAA/TAAU: an earlier
-     * mid-frame variant resolved before vanilla's first-person hand so the hand could draw onto
-     * the finished native frame, and three successive placements of it each corrupted some part
-     * of vanilla's hand/translucent phase state (live-caught). Vanilla's frame now runs completely
-     * untouched from HEAD to RETURN; the first-person ghosting that motivated the mid-frame
-     * attempt is instead solved inside the reconstruct shader by responsive-pixel masking (scene
-     * depth vs G-buffer depth -- see ReconstructPass/reconstruct.fsh), which needs no injection
-     * between vanilla draws at all.
+     * <p>Deliberately the RETURN boundary for EVERY method, including TAA/TAAU: injecting
+     * mid-frame -- before vanilla's first-person hand, so the hand could draw onto the finished
+     * native frame -- corrupts vanilla's hand/translucent phase state. Vanilla's frame runs
+     * completely untouched from HEAD to RETURN; the first-person ghosting that a mid-frame
+     * injection would address is instead solved inside the reconstruct shader by responsive-pixel
+     * masking (scene depth vs G-buffer depth -- see ReconstructPass/reconstruct.fsh), which needs
+     * no injection between vanilla draws at all.
      */
     @Inject(method = "renderLevel", at = @At("RETURN"))
     private void fornax$endFrame(CallbackInfo ci) {
         this.fornax$restoreNativeTarget();
         this.fornax$copySceneHistory();
-        // VoxelDebugRaymarchPass.presentIfEnabled was called here, DDA-raymarching the brick grid on a
-        // compute queue and blitting it over the native frame for the VOXEL_RAYMARCH debug view. REMOVED
-        // 2026-07-20: that per-frame dispatch + mapped readback could wedge the GPU, and on macOS a wedged
-        // GPU takes WindowServer down with it -- a hard power-off, not a recoverable game crash. It cost
-        // the user multiple forced reboots, including from merely cycling PAST the view with F9.
+        // VoxelDebugRaymarchPass's VOXEL_RAYMARCH debug view -- DDA-raymarching the brick grid on
+        // a compute queue and blitting it over the native frame -- is not presented here: that
+        // per-frame dispatch + mapped readback can wedge the GPU, and on macOS a wedged GPU takes
+        // WindowServer down with it -- a hard power-off, not a recoverable game crash.
         //
         // Only the PRESENTATION half is gone. VoxelDebugRaymarchPass still owns the voxel grid itself
         // (ensureGridAllocated / allocatedDiameter / onFrame), which the voxel sun-shadow path depends on
@@ -286,20 +284,16 @@ public class GameRendererMixin {
      * motion/depth views, the native {@code sceneHistory} target, and this frame's jitter/blend/
      * sharpen settings, then hands them to {@link ReconstructPass#reconstruct}.
      *
-     * <p>CORRECTED 2026-08-04, and the correction is the whole bug: this comment used to assert that
-     * "the G-buffer and sceneHistory are absent when {@code shadersEnabled} is off or no pack is
-     * loaded". <b>They are not.</b> {@code GBufferManager} never nulls its instance and {@code
-     * ShadersEnabledFlip} keeps the pack (and therefore the target registry) loaded, so both handles
-     * survive a shaders-off toggle intact and merely stop being WRITTEN. Believing otherwise is what
-     * let the guard below pass and fed a frozen G-buffer to the reconstruct -- see {@link
-     * TemporalInputs}, which now owns the question. {@code fornax$ssaaBeginFrame} skips the
+     * <p>{@code GBufferManager} never nulls its instance and {@code ShadersEnabledFlip} keeps the
+     * pack (and therefore the target registry) loaded, so both handles survive a shaders-off
+     * toggle intact and merely stop being WRITTEN -- they are never absent. {@link TemporalInputs}
+     * owns the question of whether they hold current data. {@code fornax$ssaaBeginFrame} skips the
      * off-screen swap for the whole frame whenever that predicate says no, so arriving here anyway
      * means pack state changed <em>within</em> the frame -- the user enabling, disabling or switching
      * a pack between begin-frame and end-frame. That is an ordinary thing to do from the settings
      * screen, not a corrupt state.
      *
-     * <p>This used to throw on that window, which turned a routine pack toggle into a crash to
-     * desktop. It now skips reconstruction for the frame instead: {@link #fornax$restoreNativeTarget}
+     * <p>Reconstruction is skipped for the frame in that window: {@link #fornax$restoreNativeTarget}
      * restores {@code mainRenderTarget} either way, so the cost is one unreconstructed frame at the
      * moment of the toggle rather than losing the session. A pack whose targets never allocate would
      * hit this every frame, so the skip is logged (rate-limited) rather than silent -- a pack bug has

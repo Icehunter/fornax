@@ -16,7 +16,7 @@ import net.minecraft.client.Minecraft;
  * are all baked into those cached pipelines at compile time, while the per-frame render-pass
  * attachment count follows the CURRENT isActive() value -- flipping one without rebuilding the
  * other crashes {@code RenderPass.setPipeline} with "color attachment count must match pipeline
- * color target state count" (live-caught on the shaders on/off toggle).
+ * color target state count" on the shaders on/off toggle.
  */
 public final class RendererReload {
     private RendererReload() {

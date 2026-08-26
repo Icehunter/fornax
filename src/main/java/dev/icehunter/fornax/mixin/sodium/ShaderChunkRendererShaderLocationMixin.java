@@ -31,9 +31,9 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  * CompactChunkVertexMixin} installs {@code FornaxChunkVertex} via a class-init {@code @Redirect},
  * so every chunk mesh in existence uses Fornax's attribute formats (e.g. RGBA16_UNORM position) --
  * stock {@code block_layer_opaque} declares CompactChunkVertex's packed-uint attributes and fails
- * pipeline compilation against them (live-caught on MoltenVK: "Vertex attribute a_Position(0) of
- * type uint2 cannot be read using MTLAttributeFormatUShort4Normalized", a hard crash at first
- * terrain draw with shaders toggled off). The fallback shader compiles without {@code USE_DEFERRED}
+ * pipeline compilation against them on MoltenVK ("Vertex attribute a_Position(0) of type uint2
+ * cannot be read using MTLAttributeFormatUShort4Normalized", a hard crash at first terrain draw
+ * with shaders toggled off). The fallback shader compiles without {@code USE_DEFERRED}
  * (see {@code ShaderChunkRendererConstantsMixin}), so its single forward output matches the
  * single-attachment pipeline state and render pass the other (isActive-gated) mixins leave in place.
  * Covers all four terrain passes (SOLID/CUTOUT/TRANSLUCENT share one shader file, differentiated

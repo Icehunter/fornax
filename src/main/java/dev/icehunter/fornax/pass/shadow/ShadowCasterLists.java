@@ -23,13 +23,11 @@ import java.util.Set;
 /**
  * Builds the sun-shadow pass's caster list directly from every loaded {@code RenderRegion} whose
  * world-space AABB intersects the sun's shadow ortho volume this frame, independent of {@code
- * RenderSectionManager}'s own player-frustum-culled {@code SortedRenderLists} -- the fix for shadows
- * silently disappearing for casters outside the player's current view AND (the root cause diagnosed
- * in {@code docs/reference/shadow-subsystem-trace.md}, mc-vulkan-realism repo) for casters inside the
- * light's own (possibly tilted) frustum but outside a world-XZ radius around the camera. See {@code
- * .superpowers/sdd/shadow-casterlist-research.md} for the original caster-list mechanism research
- * (Q7's direct-render() recommendation, still followed exactly here) and the trace doc above for the
- * light-frustum-vs-world-XZ-radius root-cause diagnosis this predicate fixes.
+ * RenderSectionManager}'s own player-frustum-culled {@code SortedRenderLists} -- this is what keeps
+ * shadows from silently disappearing for casters outside the player's current view AND for casters
+ * inside the light's own (possibly tilted) frustum but outside a world-XZ radius around the camera.
+ * See {@code .superpowers/sdd/shadow-casterlist-research.md} for the caster-list mechanism research
+ * (Q7's direct-render() recommendation, still followed exactly here).
  *
  * <p><b>Why not reuse Sodium's own render lists:</b> {@code RenderSectionManager.getRenderLists()}
  * is rebuilt once per frame from an octree traversal seeded by the PLAYER camera's frustum --
@@ -65,11 +63,11 @@ import java.util.Set;
  * AABB's 8 corners; the corner-bounding-box computed here is therefore EXACT for "does the AABB's
  * bounding box in NDC overlap the ortho cube" -- never a false negative. It CAN be a (safe) false
  * positive relative to the true rotated-parallelepiped-vs-cube test (the light view rotates the box
- * unless the sun is at true noon), which is the same "err inclusive" direction the predicate this
- * replaces used deliberately (a flat {@code camX,camZ}-vs-{@code radius} world-XZ cylinder test,
- * correct only at noon and Y-blind by construction -- see {@code shadow-subsystem-trace.md} for why
- * that missed occluders inside the true tilted frustum at low sun angles). This predicate has no such
- * blind spot: it tests a section's real position along the light's own tilted axes, not a world-axis
+ * unless the sun is at true noon), the same "err inclusive" direction a flat {@code camX,camZ}-vs-
+ * {@code radius} world-XZ cylinder test would take -- but that simpler test is correct only at noon
+ * and Y-blind by construction, missing occluders inside the true tilted frustum at low sun angles.
+ * This predicate has no such blind spot: it tests a section's real position along the light's own
+ * tilted axes, not a world-axis
  * proxy, so it is correct at every sun elevation and every camera height -- and at true noon (light
  * direction ~= world -Y) it degenerates to almost exactly the old world-XZ-cylinder-times-full-height
  * test, since the light's local XY then coincides with world XZ and its Z axis with world Y.

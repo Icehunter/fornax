@@ -64,10 +64,9 @@ public class SodiumWorldRendererOrchestrationMixin {
     private static final int FALLBACK_SHADOW_RESOLUTION = 2048;
     /** {@code u_ShadowDistance}'s fallback, same circumstances as {@link #FALLBACK_SHADOW_RESOLUTION}
      * -- BLOCKS, the option's own unit (the unit contract lives at {@link
-     * ShadowCamera#shadowDistanceOptionBlocks}, whose doc records the half-reverted 2026-07-25
-     * chunks conversion under which this was briefly, wrongly, {@code 6.0f} "chunks" times 16 at
-     * the read site). 96 blocks is the {@code sample_pack} fixture's declared default
-     * (bias 0.733 at the 2048 default map). */
+     * ShadowCamera#shadowDistanceOptionBlocks}: the raw option value is BLOCKS, not chunks, and
+     * must not be scaled at the read site). 96 blocks is the {@code sample_pack} fixture's declared
+     * default (bias 0.733 at the 2048 default map). */
     private static final float FALLBACK_SHADOW_DISTANCE_BLOCKS = 96.0f;
 
     /**
@@ -99,7 +98,7 @@ public class SodiumWorldRendererOrchestrationMixin {
      * Shadows {@code SodiumWorldRenderer}'s private {@code uniformBufferManager} field
      * (javap-verified: {@code private UniformBufferManager uniformBufferManager;}, no getter).
      * Bypassing {@code self.renderLayer} for the shadow draws (see {@link #fornax$renderShadowPass})
-     * also bypasses the {@code update(...)} call {@code renderLayer} used to make -- this field lets
+     * also bypasses the {@code update(...)} call {@code renderLayer}'s own body makes -- this field lets
      * {@link #fornax$renderShadowPass} make that same guarded call explicitly, so it stays this
      * frame's real (non-no-op) write. See {@link #fornax$renderShadowPass}'s "Matrix delivery" doc
      * for the full guard model.
@@ -138,13 +137,12 @@ public class SodiumWorldRendererOrchestrationMixin {
      * player-frustum-culled list, rebuilt once per frame from an octree traversal seeded by the
      * PLAYER camera. A section outside the player's current view never enters that list, so it never
      * casts a shadow either, even though the light doesn't care which way the player is facing --
-     * this was the whole bug (see {@code .superpowers/sdd/shadow-casterlist-research.md}). {@link
+     * exactly the mismatch {@link ShadowCasterLists#build} exists to close. {@link
      * ShadowCasterLists#build} replaces that list with a scan over every loaded region, testing each
      * candidate section's own world-space AABB against the light's shadow ortho volume ({@code
      * lightMatrices.viewProj()}, the same camera-relative matrix committed to {@link ShadowFrameState}
-     * below) -- correct at every sun angle and camera height, not just a world-XZ-radius proxy that
-     * was only exact at noon (see {@code docs/reference/shadow-subsystem-trace.md}, mc-vulkan-realism
-     * repo, for the root-cause diagnosis this predicate fixes). The two draws below call {@code
+     * below) -- correct at every sun angle and camera height, unlike a world-XZ-radius proxy, which is
+     * exact only at noon. The two draws below call {@code
      * renderSectionManager.getChunkRenderer().render(...)} directly against it, bypassing {@code
      * renderLayer} (and therefore {@code getRenderLists()}) entirely.
      *
@@ -161,32 +159,31 @@ public class SodiumWorldRendererOrchestrationMixin {
      * default whenever this gate is closed, which {@code UniformBufferManagerMixin}'s unconditional
      * per-frame append still safely uploads as an unused value (see that mixin's own doc comment).
      *
-     * <p><b>Matrix delivery (the true {@code update()} model) -- trigger moved here explicitly:</b>
+     * <p><b>Matrix delivery (the true {@code update()} model):</b>
      * {@code UniformBufferManager.update()} is guarded by a {@code hasUpdatedThisFrame} flag reset
      * once per frame -- only the FIRST {@code update()} call each frame actually writes {@code
      * u_ProjectionMatrix}/{@code u_ModelViewMatrix} (and, via {@code UniformBufferManagerMixin}'s
      * append, {@code u_SunViewProj}); every later call this frame is a no-op against those slots.
-     * Previously the shadow pass's own {@code self.renderLayer(...)} calls were what triggered that
-     * first {@code update()} (implicitly, inside {@code renderLayer}'s body). Now that this method
-     * bypasses {@code renderLayer} for the shadow draws (see above), NOTHING would call {@code
-     * update()} before those draws unless this method does so itself -- so it does, explicitly,
-     * immediately below, via the shadowed {@link #uniformBufferManager} field: {@code
-     * uniformBufferManager.update(matrices, realFog)} runs BEFORE either direct {@code render(...)}
-     * call, preserving the exact same "single guarded update per frame, main matrices + fog only"
-     * model this class has always documented -- only the call site moved from inside {@code
-     * renderLayer} to here. A single guarded, single-slot buffer cannot hold two different matrix
-     * sets in one frame, so this call is given {@code matrices} -- the MAIN camera's {@link
-     * ChunkRenderMatrices}, the same instance {@code drawChunkLayer} received and will pass to its
-     * own SOLID/CUTOUT/TRANSLUCENT draws later this frame -- never the light's. The light transform
-     * instead rides {@code u_SunViewProj}, the frame-constant extension member {@code
-     * UniformBufferManagerMixin} appends to every {@code update()} call regardless of which matrices
-     * that call's classic slots carry; {@code shadow.vsh} reads {@code u_SunViewProj} directly and
-     * never touches {@code u_ProjectionMatrix}/{@code u_ModelViewMatrix}. {@code ShadowCamera#compute}
-     * is still called here (for {@link ShadowCamera.LightMatrices#viewProj()}, committed to {@link
-     * ShadowFrameState} below) -- only its {@code proj}/{@code view} split is no longer threaded into
-     * any render call. The base method body's own later SOLID/CUTOUT/TRANSLUCENT {@code
-     * renderLayer(..., this.lastFogParameters, ...)} calls still exist unmodified and remain
-     * guard-suppressed no-ops against {@code update()}, exactly as before.
+     * The only other place that calls {@code update()} is inside {@code renderLayer}'s own body,
+     * and this method bypasses {@code renderLayer} entirely for the shadow draws (see above), so
+     * nothing would call {@code update()} before those draws unless this method does so itself --
+     * so it does, explicitly, immediately below, via the shadowed {@link #uniformBufferManager}
+     * field: {@code uniformBufferManager.update(matrices, realFog)} runs BEFORE either direct
+     * {@code render(...)} call, preserving the same "single guarded update per frame, main
+     * matrices + fog only" model {@code renderLayer} itself follows. A single guarded, single-slot
+     * buffer cannot hold two different matrix sets in one frame, so this call is given {@code
+     * matrices} -- the MAIN camera's {@link ChunkRenderMatrices}, the same instance {@code
+     * drawChunkLayer} received and will pass to its own SOLID/CUTOUT/TRANSLUCENT draws later this
+     * frame -- never the light's. The light transform instead rides {@code u_SunViewProj}, the
+     * frame-constant extension member {@code UniformBufferManagerMixin} appends to every {@code
+     * update()} call regardless of which matrices that call's classic slots carry; {@code
+     * shadow.vsh} reads {@code u_SunViewProj} directly and never touches {@code
+     * u_ProjectionMatrix}/{@code u_ModelViewMatrix}. {@code ShadowCamera#compute} is called here
+     * for {@link ShadowCamera.LightMatrices#viewProj()}, committed to {@link ShadowFrameState}
+     * below; its {@code proj}/{@code view} split is not threaded into any render call. The base
+     * method body's own later SOLID/CUTOUT/TRANSLUCENT {@code renderLayer(...,
+     * this.lastFogParameters, ...)} calls still exist unmodified and remain guard-suppressed
+     * no-ops against {@code update()}.
      *
      * <p><b>Ordering guarantee:</b> {@link ShadowFrameState#commit} runs below, before the explicit
      * {@code update()} call -- i.e. before this frame's first {@code update()}/append. {@link
@@ -245,11 +242,10 @@ public class SodiumWorldRendererOrchestrationMixin {
         PackOptionsBuffer options = GraphRunner.optionsBuffer();
         float shadowDistance = options != null
                 // The pack declares this runtime option as u_ShadowDistance (runtime u_ prefix
-                // convention) -- reading the bare name silently pinned the ortho extent at the
-                // fallback for every slider value above it (audit-caught). The raw option value is
-                // BLOCKS and passes through unconverted -- shadowDistanceOptionBlocks IS that unit
-                // contract (see its doc for the half-reverted chunks conversion that had a stale
-                // "* 16.0f" here for twelve days, building 16x-oversized light volumes).
+                // convention); reading the bare name would silently pin the ortho extent at the
+                // fallback for every slider value above it. The raw option value is BLOCKS and
+                // passes through unconverted -- shadowDistanceOptionBlocks IS that unit contract
+                // (see its doc for why no chunks-to-blocks conversion factor applies here).
                 ? ShadowCamera.shadowDistanceOptionBlocks(
                         options.get("u_ShadowDistance", FALLBACK_SHADOW_DISTANCE_BLOCKS))
                 : FALLBACK_SHADOW_DISTANCE_BLOCKS;
@@ -281,7 +277,7 @@ public class SodiumWorldRendererOrchestrationMixin {
         ChunkRenderListIterable casterLists = ShadowCasterLists.build(this.renderSectionManager, x, y, z, lightMatrices.viewProj());
 
         // Explicit trigger for the frame's single guarded update() -- see "Matrix delivery" above
-        // for why this can no longer ride inside self.renderLayer(...).
+        // for why this must run here rather than inside self.renderLayer(...).
         this.uniformBufferManager.update(matrices, realFog);
 
         // SodiumWorldRendererRenderLayerMixin normally does this at the HEAD of every renderLayer
@@ -325,9 +321,9 @@ public class SodiumWorldRendererOrchestrationMixin {
      * <p>Gated on {@link GraphRunner#isActive()} AND the pack's {@code SSR_WATER_MODE} compile value
      * being above 1. Opaque {@code SSR_QUALITY} deliberately does not participate: the resolve,
      * cloud composite, underwater refraction and tonemap all consume {@code builtin.waterDepth}
-     * while opaque SSR is off. Coupling allocation to {@code SSR_QUALITY != 0} made those ungated
-     * passes fail input resolution and skip permanently, leaving only the clear-colour frame.
-     * Water modes 0/1 still keep the cheap forward arm and pay no pre-pass allocation or draw.
+     * while opaque SSR is off, so gating allocation on {@code SSR_QUALITY != 0} would make those
+     * ungated passes fail input resolution and skip permanently, leaving only the clear-colour
+     * frame. Water modes 0/1 still keep the cheap forward arm and pay no pre-pass allocation or draw.
      *
      * <p><b>update()/PBR/context guard:</b> {@link #fornax$renderShadowPass} already ran this same
      * HEAD inject, immediately before this call. If {@code SHADOWS} is on, it already made this
@@ -373,8 +369,8 @@ public class SodiumWorldRendererOrchestrationMixin {
         // cachedBatches slots -- WATER_PREPASS is invisible to it. A block edit that compacts a
         // region's index arena rewrites every OTHER section's byte offsets in that region; with the
         // camera stationary (no clearAllCachedBatches from prepareForRender), this pass would keep
-        // replaying a frozen batch of stale offsets -- live-caught as an unrelated section-sized
-        // patch of open water vanishing the moment the user broke a block hundreds of blocks away.
+        // replaying a frozen batch of stale offsets, so an unrelated section-sized patch of open
+        // water can vanish the moment a block is broken hundreds of blocks away.
         // Clearing for exactly the regions this frame's list draws forces a fresh fillCommandBuffer,
         // the same per-frame rebuild the main passes already do on movement.
         for (Iterator<ChunkRenderList> it = translucentLists.iterator(false); it.hasNext(); ) {
@@ -385,7 +381,7 @@ public class SodiumWorldRendererOrchestrationMixin {
         // with WATER_PREPASS.isTranslucent() == true this selects useIndexedTessellation, the ONLY
         // index-buffer path whose bound buffer matches translucent sections' stored element offsets
         // (see FornaxRenderPasses.WATER_PREPASS's javadoc for the garbage-indices partial-coverage
-        // failure the previous false/false combination produced live).
+        // failure a false/false combination produces).
         this.renderSectionManager.getChunkRenderer().render(matrices, translucentLists,
                 FornaxRenderPasses.WATER_PREPASS, cameraTransform, realFog, true,
                 terrainSampler, this.uniformBufferManager.getUniformBuffer(),

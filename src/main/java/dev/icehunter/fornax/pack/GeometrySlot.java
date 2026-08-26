@@ -58,12 +58,11 @@ public enum GeometrySlot {
      * {@code executeTranslucentAfterTerrain}, which lands after that resolve. So the solid arm can be
      * deferred (and must be, or the tonemap paints over it) while the translucent arm can never be --
      * deferring it writes a G-buffer nothing will read. Independently, {@code TRANSLUCENT_PARTICLE}
-     * carries {@code BlendFunction.TRANSLUCENT} and a deferred variant drops the blend, which is what
-     * turned high-resolution partial-alpha smoke into solid flashing rectangles under TAAU jitter.
+     * carries {@code BlendFunction.TRANSLUCENT}, and a deferred variant drops the blend, turning
+     * high-resolution partial-alpha smoke into solid flashing rectangles under TAAU jitter.
      *
-     * <p>The symptom this closes: campfire smoke, torch flame and smoke, souls, spells and sculk all
-     * ride this arm, so they drew at full vividness in front of terrain that had been hazed to the sky
-     * colour. Bug 2's actual visible case.
+     * <p>Campfire smoke, torch flame and smoke, souls, spells and sculk all ride this arm; deferring
+     * it would draw them at full vividness in front of terrain that has been hazed to the sky colour.
      */
     PARTICLES_TRANSLUCENT("particles_translucent"),
     /** Rain and snow geometry. */
@@ -137,12 +136,10 @@ public enum GeometrySlot {
     /**
      * Whether geometry actually routes through this slot today, as opposed to being reserved.
      *
-     * <p>This answers "does declaring this slot do anything", and it was wrong for most of its life:
-     * it said TERRAIN and only TERRAIN long after entities, block entities, particles and the rest
-     * had started rendering through the draw chokepoint. Nothing in production reads it, so the
-     * staleness cost nothing directly -- but it is the exact question a pack author asks before
-     * spending a round on a pass, and answering it wrongly is how an inert pass ships. The weather
-     * pass was inert for its entire life on precisely this question.
+     * <p>This answers "does declaring this slot do anything", the question a pack author asks
+     * before spending a round on a pass. Nothing in production reads it, so getting it wrong here
+     * costs nothing directly to the engine -- but it is exactly how an inert pass ships unnoticed,
+     * as the {@link #WEATHER} case below shows.
      *
      * <p>"Renders" means A HOOK ROUTES TO IT, not "a pipeline maps to it", and the two differ in
      * exactly one place that matters:
@@ -151,8 +148,7 @@ public enum GeometrySlot {
      *   <li>{@link #WEATHER} IS mapped in {@code GeometryPipelineMap} and still does not render.
      *       {@code WeatherEffectRenderer.render} builds its own buffer and render pass and calls
      *       {@code setPipeline}/{@code drawIndexed} directly, so it never reaches
-     *       {@code PreparedRenderType.drawFromBuffer} -- the only place that map is consulted. Three
-     *       engine-side fixes were spent on the wrong axis before anyone read the bytecode.
+     *       {@code PreparedRenderType.drawFromBuffer} -- the only place that map is consulted.
      *   <li>{@link #SHADOW} is claimable in the pack format but the engine owns
      *       {@code fornax:blocks/shadow} outright; nothing routes to it.
      *   <li>{@link #PARTICLES} renders only because a SECOND hook ({@code QuadParticleDeferredMixin})
@@ -222,11 +218,11 @@ public enum GeometrySlot {
      * screen furniture, and replaying them produces a shadow map full of streaks and billboards that
      * darkens the whole scene through geometry the eye never reads as solid.
      *
-     * <p>This is a property of the slot rather than of the pipeline, and it must stay that way: the
-     * draw site previously treated "this pipeline is mapped at all" as "this pipeline casts", which
-     * silently enlisted every slot added to {@link dev.icehunter.fornax.pipeline.GeometryPipelineMap}
-     * as a shadow caster -- costing a shadow-map replay and a compiled pipeline variant per slot, and
-     * corrupting the shadow map with clouds and weather.
+     * <p>This is a property of the slot rather than of the pipeline, and it must stay that way:
+     * deriving cast-shadow from "this pipeline is mapped at all" would silently enlist every slot
+     * added to {@link dev.icehunter.fornax.pipeline.GeometryPipelineMap} as a shadow caster --
+     * costing a shadow-map replay and a compiled pipeline variant per slot, and corrupting the
+     * shadow map with clouds and weather.
      */
     public boolean castsShadow() {
         return switch (this) {

@@ -94,12 +94,11 @@ public final class PbrSettingsLayout {
             new Member("u_TmDarkDesaturation", 0.0f),
             new Member("u_Saturation", 1.0f),
             new Member("u_Contrast", 1.0f),
-            // --- Three scalars that used to be COMPILE percentages -------------------------------
+            // --- Three plain-multiplier scalars ----------------------------------------------------
             //
-            // Wave strength, snow amount and splash density were cycle buttons over a dozen
-            // hand-listed stops each, because a compile option's values are necessarily a discrete
-            // list. None of them is branched on -- each is a plain multiplier -- so the only thing
-            // the compile form bought was the cycle button, and they are runtime sliders now. They
+            // Wave strength, snow amount and splash density are runtime sliders, not compile
+            // options: none of them is branched on -- each is a plain multiplier -- so a compile
+            // option's necessarily-discrete value list buys nothing here but a cycle-button UI. They
             // ride here for the usual reason: their consumer is terrain.fsh.
             //
             // Fallbacks are the pack's own former 100%/60% defaults expressed as scalars. Unlike the

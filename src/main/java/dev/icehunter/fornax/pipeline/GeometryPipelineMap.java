@@ -118,26 +118,22 @@ public final class GeometryPipelineMap {
         // NOT REACHED FROM THIS FILE'S USUAL CALLER. Particles never pass through
         // PreparedRenderType.drawFromBuffer at all: QuadParticleFeatureRenderer.executeGroup builds
         // its own render pass off the CommandEncoder and its private static drawLayers calls
-        // setPipeline and drawIndexed directly. These two lines were therefore dead for their whole
-        // life, and a pack claiming 'particles' got nothing -- the same bypass the Plague pack's
-        // graph.toml records for weather. QuadParticleDeferredMixin is the second hook that makes
-        // them live; it consults this map exactly as the chokepoint does.
+        // setPipeline and drawIndexed directly. QuadParticleDeferredMixin is the hook that makes
+        // this map matter for particles; it consults it exactly as the chokepoint does.
         //
-        // Both arms write depth. OPAQUE_PARTICLE is PARTICLE_SNIPPET with no colour-target state of
-        // its own, so it carries no blend for the deferred variant to drop -- the caveat that makes
+        // OPAQUE_PARTICLE writes depth. It is PARTICLE_SNIPPET with no colour-target state of its
+        // own, so it carries no blend for the deferred variant to drop -- the caveat that makes
         // claiming translucent entities a pack decision simply does not arise for it.
         //
-        // TRANSLUCENT_PARTICLE USED TO BE MAPPED HERE AND HAS MOVED TO ForwardPipelineMap. It had to:
-        // the two tables are disjoint by construction (ForwardPipelineMap.put throws on an overlap),
-        // and the translucent arm now takes the FORWARD route so that campfire smoke gets fog without
-        // losing its blend.
+        // TRANSLUCENT_PARTICLE is deliberately NOT mapped here: it is mapped in
+        // ForwardPipelineMap instead (the two tables are disjoint by construction --
+        // ForwardPipelineMap.put throws on an overlap), so the translucent arm takes the FORWARD
+        // route and campfire smoke gets fog without losing its blend.
         //
-        // The reason originally given for keeping it here was CHECKED before removing it, and it was
-        // wrong. It said an unmapped pipeline inside a deferred group would bind a one-target pipeline
-        // into a five-attachment pass. It cannot: QuadParticleDeferredMixin's head gate walks every
-        // layer and returns "no deferral" the moment slotOf() is null, so an unmapped layer makes the
-        // WHOLE GROUP stay vanilla -- no pass is rewritten and no variant is bound. The mixed-group
-        // case is therefore strictly safer after the move than before it, and
+        // An unmapped pipeline inside a deferred group cannot bind a one-target pipeline into a
+        // five-attachment pass: QuadParticleDeferredMixin's head gate walks every layer and returns
+        // "no deferral" the moment slotOf() is null, so an unmapped layer makes the WHOLE GROUP stay
+        // vanilla -- no pass is rewritten and no variant is bound.
         // ParticleGroupDeferralContractTest asserts that rather than this paragraph.
         put(RenderPipelines.OPAQUE_PARTICLE, GeometrySlot.PARTICLES);
 

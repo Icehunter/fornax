@@ -10,7 +10,7 @@ class WaterPrepassLockstepTest {
         assertFalse(FornaxRenderPasses.isDeferred(FornaxRenderPasses.WATER_PREPASS),
                 "WATER_PREPASS must be excluded from the 5-attachment deferred path");
         assertTrue(FornaxRenderPasses.isWaterPrepass(FornaxRenderPasses.WATER_PREPASS));
-        // Index-path law (live-caught, dw-livefix-prepass-coverage.md): translucent sections' stored
+        // Index-path law: translucent sections' stored
         // element offsets are only valid against the per-region sorted index arena, which
         // DefaultChunkRenderer binds ONLY when the pass reports translucent. A non-translucent
         // identity read those offsets against the unrelated shared quad-index buffer -> garbage

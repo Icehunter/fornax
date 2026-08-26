@@ -49,12 +49,11 @@ class FornaxConfigWiringTest {
 
     @Test
     void metalHudChoiceFromTheFirstSessionSurvivesASecondLaunch() {
-        // Regression coverage for a live-reported "toggle works this session, gone after restart"
-        // bug (docs/reference/vulkan-renderer-architecture-audit.md follow-up) -- the root cause
-        // found there was an apply-ordering defect in FornaxSettingsScreen, not a persistence bug
-        // in this class, but metalHud never had its own round-trip test the way aaMethod does. This
-        // pins the half of the contract this class actually owns: mirrors
-        // aaMethodChoiceFromTheFirstSessionSurvivesASecondLaunch exactly, substituting metalHud.
+        // A "toggle works this session, gone after restart" bug is an apply-ordering defect in
+        // FornaxSettingsScreen, not a persistence bug in this class -- but metalHud has no round-trip
+        // test of its own the way aaMethod does. This pins the half of the contract this class
+        // actually owns: mirrors aaMethodChoiceFromTheFirstSessionSurvivesASecondLaunch exactly,
+        // substituting metalHud.
         Path path = configDir.resolve("fornax.json");
         FornaxConfig.install(new FornaxSettings());
         FornaxConfig.load(path);           // first launch, fresh install

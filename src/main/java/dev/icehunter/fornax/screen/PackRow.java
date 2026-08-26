@@ -70,10 +70,9 @@ abstract class PackRow extends AbstractWidget {
      * PackSettingsScreen}'s rows) byte-identical. */
     private boolean vanillaChrome;
 
-    /** Affordance icons are DRAWN with fills, not font glyphs: the undo/reset arrows previously
-     * rendered through the font chain, where a resource pack's glyph overrides colored them
-     * orange/gold against the monochrome translucent look (live-caught). Primitive fills can't be
-     * re-themed out from under us. */
+    /** Affordance icons are DRAWN with fills, not font glyphs: a resource pack's glyph overrides can
+     * color a font-rendered icon orange/gold against the monochrome translucent look. Primitive
+     * fills can't be re-themed out from under us. */
     enum AffordanceIcon { UNDO, RESET_DEFAULT }
 
     private record Affordance(AffordanceIcon icon, String description, BooleanSupplier visible, Runnable action) {}

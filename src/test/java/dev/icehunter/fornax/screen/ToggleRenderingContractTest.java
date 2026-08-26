@@ -19,10 +19,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * box.
  *
  * <p>Only the bracket-less {@code #define FOO //[]} form sets {@code PackOption.isBoolean()}, so the
- * other two -- {@code //[0 1]} and a runtime {@code //[0.0..1.0 step 1.0]} -- used to render as cycle
- * buttons a user has to click through to discover the current value. Every shadow, SSAO and parallax
- * toggle in Plague is declared the second way, so in practice almost nothing that was conceptually a
- * checkbox looked like one.
+ * other two -- {@code //[0 1]} and a runtime {@code //[0.0..1.0 step 1.0]} -- must still reach the
+ * settings screen as a checkbox rather than a cycle button a user has to click through to discover
+ * the current value. Every shadow, SSAO and parallax toggle in Plague is declared the second way, so
+ * a two-value option that renders as a cycler rather than a checkbox is the common case, not an edge
+ * case.
  *
  * <p>Pinned as a test because the distinction is invisible in the pack source: the same switch reads
  * identically in a shader whichever spelling it uses, and only the UI betrays the difference.
@@ -105,13 +106,15 @@ public class ToggleRenderingContractTest {
      * instant the governor's OWN row changes while the page is open, not just refresh correctly on
      * reopen -- whatever shape the governor itself rendered as.
      *
-     * <p>Before this fix, {@code YaclPackRows.category}'s live dependency-greying listener was wired
-     * only for governors collected into a toggleRows map that {@code rendersAsToggle(...)} populated
-     * -- and a two-state option the pack NAMED (a word-labeled cycler, {@link #namedTwoValueChoiceIsNotAToggle}'s
-     * exact shape) never entered that map. Its dependents' greyed state was still computed correctly
-     * from {@code session.getApplied} at page-open time, but flipping the governor while the page
-     * stayed open left dependents stuck at whatever they read on open -- only closing and reopening
-     * the page refreshed them. {@code LIGHT_MODEL} here mirrors Plague's real option of that name.
+     * <p>{@code YaclPackRows.category}'s live dependency-greying listener must be wired for every
+     * governor, not only governors collected into a toggleRows map that {@code rendersAsToggle(...)}
+     * populates -- a two-state option the pack NAMED (a word-labeled cycler,
+     * {@link #namedTwoValueChoiceIsNotAToggle}'s exact shape) does not enter that map. Its
+     * dependents' greyed state is still computed correctly from {@code session.getApplied} at
+     * page-open time, but wiring only the toggleRows governors would leave dependents of a named
+     * cycler stuck at whatever they read on open when the governor flips while the page stays open
+     * -- only closing and reopening the page would refresh them. {@code LIGHT_MODEL} here mirrors
+     * Plague's real option of that name.
      */
     @Test
     void wordLabeledTwoStateGovernorDependentsUpdateLiveOnGovernorFlip() {

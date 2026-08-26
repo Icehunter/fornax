@@ -49,9 +49,8 @@ import net.minecraft.core.Direction;
  *
  * <p>The lane is exact, not approximate: it is written as a raw UNORM16 code and the shader
  * recovers it with {@code uint(a_Position.w * 65535.0 + 0.5)}, so all 65536 bit patterns survive
- * unchanged and emission/flags unpack independently. (Before the flags joined it, the lane carried
- * {@code level/15.0}, exact because 65535/15 = 4369 with no remainder; the low nibble is now that
- * same level.)
+ * unchanged and emission/flags unpack independently. The low nibble carries the level, exact
+ * because 65535/15 = 4369 with no remainder over that 4-bit sub-range.
  *
  * <p>The lane is 16-bit UNORM because the format is RGBA16_UNORM and nothing narrower was
  * available for a fourth position component.
@@ -61,13 +60,14 @@ import net.minecraft.core.Direction;
  * builder's per-section overhang). a_Color is RGB = the vertex's biome tint (Sodium's own {@code
  * vertex.color}, unmultiplied -- white/identity for most untinted blocks) and A = vanilla's
  * per-face directional shade times AO (Sodium's own {@code vertex.ao}, a scalar broadcast to all
- * three colour channels before this class existed -- see {@code ColorMixer.mul}). This used to be
- * {@code ColorARGB.mulRGB(vertex.color, vertex.ao)}, fusing tint and shade/AO into one RGB product
- * before either reached the shader -- an irreversible fusion (a colour times a scalar cannot be
- * un-multiplied from the product alone) that forced a choice between decoding shade/AO as a picked
- * colour (wrong: raises every linear shade/AO factor to the 2.4 power, the original LabPBR-shine
- * defect) or never decoding tint at all (wrong the other way: a saturated dye/biome tint flattens
- * toward grey, since {@code decode(tint*scalar) != decode(tint)*scalar} for any scalar != 1).
+ * three colour channels -- see {@code ColorMixer.mul}). Keeping tint (RGB) and shade/AO (A)
+ * separate rather than fusing them into one RGB product ({@code ColorARGB.mulRGB(vertex.color,
+ * vertex.ao)}) before either reaches the shader matters because that fusion is irreversible (a
+ * colour times a scalar cannot be un-multiplied from the product alone): decoding a fused value
+ * either treats shade/AO as a picked colour (wrong: raises every linear shade/AO factor to the 2.4
+ * power, the LabPBR-shine defect) or never decodes tint at all (wrong the other way: a saturated
+ * dye/biome tint flattens toward grey, since {@code decode(tint*scalar) != decode(tint)*scalar} for
+ * any scalar != 1).
  * Sodium itself never fuses them -- {@code vertex.color} (pure tint, from {@code
  * BlockRenderer.tintQuad}) and {@code vertex.ao} (shade x AO, from {@code
  * SmoothLightPipeline.applyAmbientLighting}) are separate fields on {@code

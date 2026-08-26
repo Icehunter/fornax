@@ -61,15 +61,13 @@ public final class PackSettingsScreen extends Screen {
      * Opens a fresh editing session at {@code screenId}, falling back to an error screen if
      * screens.toml is malformed.
      *
-     * <p><b>Known cross-session gap, not fixed by the YACL apply-on-close round</b> ({@code
-     * mixin.yacl.YACLScreenCloseMixin}): this constructs a BRAND-NEW {@link PackEditSession} below,
-     * independent of whatever {@link PackEditSession} a {@link PackManageScreen}'s YACL categories are
-     * sharing -- reached exclusively via the "Shader Options" bridge button. A customization made on a
-     * migrated YACL category and a profile pick made here can clobber each other on whichever session
-     * applies second, since both do a full-map {@link dev.icehunter.fornax.pack.PackValuesFile#save}.
-     * This is mechanism #3 in the settings-persistence diagnosis (lower confidence than the YACL
-     * close-path gap that round fixed, and requires touching this separate legacy screen's own
-     * session lifecycle -- out of scope this round).
+     * <p><b>Known cross-session gap</b>, distinct from what {@code mixin.yacl.YACLScreenCloseMixin}
+     * covers: this constructs a BRAND-NEW {@link PackEditSession} below, independent of whatever
+     * {@link PackEditSession} a {@link PackManageScreen}'s YACL categories are sharing -- reached
+     * exclusively via the "Shader Options" bridge button. A customization made on a migrated YACL
+     * category and a profile pick made here can clobber each other on whichever session applies
+     * second, since both do a full-map {@link dev.icehunter.fornax.pack.PackValuesFile#save}. Fixing
+     * this requires touching this separate legacy screen's own session lifecycle.
      */
     static void open(Screen parent, PackModel model, String screenId) {
         Minecraft minecraft = Minecraft.getInstance();

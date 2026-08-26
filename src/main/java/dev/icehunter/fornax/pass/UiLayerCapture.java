@@ -35,9 +35,9 @@ import java.util.Optional;
  * the target to vanilla for the HUD draw. Sized from the caller-supplied width/height -- the REAL
  * {@code mainRenderTarget}'s own {@code .width}/{@code .height} at capture time, i.e. exactly the
  * target vanilla's HUD draw would have used had this mixin not swapped it out -- rather than any
- * independently-derived size (a window/{@code SsaaManager}-based read was tried first and produced
- * logical-point dimensions on a Retina display instead of the physical-pixel size every other target
- * in the chain uses, stretching the composited HUD to a corner quadrant; live-caught and reverted).
+ * independently-derived size: a window/{@code SsaaManager}-based read produces logical-point
+ * dimensions on a Retina display instead of the physical-pixel size every other target in the
+ * chain uses, which would stretch the composited HUD to a corner quadrant.
  * {@link #compositeOnto(RenderTarget)} is a pure read afterward -- callable any number of times
  * against any destination (the real native target from the capturing mixin itself, and separately
  * the generated frame from Task 6) without touching the captured content.
@@ -132,10 +132,9 @@ public final class UiLayerCapture {
     public static void deactivate() {
         if (uiTarget != null) {
             // Same live-per-frame-resize crash class GBufferManager/ShadowMapManager/etc. already
-            // guard against (see VulkanComputeBackend.waitForGpuIdleBeforeDestroy's own doc) --
-            // this and SsaaManager were the two texture-owning managers in the codebase missing the
-            // guard, live-caught via the METALFX+frame-generation crash investigation
-            // (mc-vulkan-realism docs/reference/vulkan-renderer-architecture-audit.md follow-up).
+            // guard against (see VulkanComputeBackend.waitForGpuIdleBeforeDestroy's own doc):
+            // FrameGenPresenter reads this exact target as its HUD-capture source, so destroying it
+            // mid-flight races that read.
             VulkanComputeBackend.waitForGpuIdleBeforeDestroy();
             uiTarget.destroyBuffers();
             uiTarget = null;

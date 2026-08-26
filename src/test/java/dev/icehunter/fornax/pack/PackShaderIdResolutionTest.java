@@ -20,8 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * {@code fornax_runtime:blocks/terrain} looks up the resource path
  * {@code "shaders/blocks/terrain.vsh"} -- which {@code RuntimeShaderPack} serves straight out of
  * {@code PackDiscovery.loadShaderSources}' key set. A key-prefix drift here is invisible to every
- * other test but renders the world black at runtime (live-caught once: sources were keyed
- * shaders-dir-relative, every terrain pipeline failed to compile).
+ * other test but renders the world black at runtime.
  */
 class PackShaderIdResolutionTest {
     private static final Pattern MOJ_IMPORT = Pattern.compile("#moj_import\\s*<([a-z0-9_]+):([^>]+)>");

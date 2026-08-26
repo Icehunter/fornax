@@ -85,8 +85,8 @@ public final class NormalMapAtlasReloadListener {
         }
 
         // Sidecars are stored at half their OWN resolution, which is not the same thing as half the
-        // block atlas's -- see PbrSidecarAtlasScale for what that constant used to mean, what it
-        // means now, and how the size is capped against the device limit and a VRAM budget.
+        // block atlas's -- see PbrSidecarAtlasScale for what that constant means and how the size
+        // is capped against the device limit and a VRAM budget.
         List<TextureAtlasSprite> sprites = new ArrayList<>(preparations.regions().values());
         LabPbrSidecarSurvey.Result survey =
                 LabPbrSidecarSurvey.survey(sprites, resourceManager, "_n");
@@ -279,10 +279,10 @@ public final class NormalMapAtlasReloadListener {
                     int[] robust = robustBounds(histogram, texels);
                     // Published in NORMALISED UV, never in the texels the histogram was just counted
                     // over. The rectangle above is in SIDECAR texels, whose relationship to the
-                    // block atlas's is now whatever PbrSidecarAtlasScale chose for this pack -- and
-                    // the consumer lays these into a grid over the BLOCK atlas. That the ratio is no
-                    // longer even a fixed 1:2 is exactly why the unit must stay normalised; see
-                    // SpriteHeightRanges.Range for what handing it texels cost the last time.
+                    // block atlas's is whatever PbrSidecarAtlasScale chose for this pack -- and the
+                    // consumer lays these into a grid over the BLOCK atlas. Because that ratio is not
+                    // a fixed 1:2, the unit must stay normalised; see SpriteHeightRanges.Range for why
+                    // handing it texels breaks.
                     heightRanges.add(new SpriteHeightRanges.Range(
                             sprite.getU0(), sprite.getV0(), sprite.getU1(), sprite.getV1(),
                             trueBound(histogram, true), trueBound(histogram, false),
@@ -366,11 +366,11 @@ public final class NormalMapAtlasReloadListener {
             }
         }
 
-        // Dimensions and resident bytes, not just counts. The atlas's size is now a property of the
+        // Dimensions and resident bytes, not just counts. The atlas's size is a property of the
         // PACK's maps rather than a fixed fraction of the block atlas, so "how big did this get and
         // what did it cost" is the question a user on a 3 GB card needs answered from the log rather
         // than from a crash -- and the scale exponent reports whether the maps got the resolution
-        // they asked for or were capped (0 = the historical half-the-albedo sizing, 3 = 8x that).
+        // they asked for or were capped (0 = half-the-albedo sizing, 3 = 8x that).
         FornaxMod.LOGGER.info("[LabPBR] Normal map atlas built: {} sprites with _n maps, {} without;"
                         + " {}x{} at scale 2^{} (pack asked for 2^{}), {} MB resident with {} overflow"
                         + " layer(s), in {} ms (level 0 {})",
@@ -802,7 +802,7 @@ public final class NormalMapAtlasReloadListener {
      * atlas on its authored base level" -- not an oversight, since averaging unit normal vectors
      * across a mip level produces a non-unit, visually flattened normal). No
      * consumer of this atlas ever reads past level 0, so generating, extruding and GPU-uploading a
-     * full chain down to 1x1 was pure waste -- CPU time on every build (fresh or disk-cache-hit
+     * full chain down to 1x1 would be pure waste -- CPU time on every build (fresh or disk-cache-hit
      * alike) and VRAM for texels nothing samples.
      *
      * <p>{@link #downsampleLevel}/{@link #boxDownsampleRect}/{@link #scaleRect} are kept rather than
@@ -811,7 +811,7 @@ public final class NormalMapAtlasReloadListener {
      * see its doc on {@code scaleRect}. Returning 1 here means {@link #upload}'s
      * {@code for (level = 1; level < levelCount; level++)} loops never execute, so none of that code
      * runs; it costs nothing to leave in place, and reinstating a real chain (should mip-blended
-     * normals ever become wanted) is a one-line revert of this method, not a rewrite.
+     * normals ever become wanted) is a one-line change to this method, not a rewrite.
      */
     static int computeMipLevelCount(int width, int height) {
         return 1;

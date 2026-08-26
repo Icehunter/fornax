@@ -5,11 +5,11 @@ package dev.icehunter.fornax.config;
  * {@code _s} specular maps) is kept in Fornax's own atlases.
  *
  * <p><b>Why this is a setting.</b> {@code PbrSidecarAtlasScale} sizes a sidecar atlas from the
- * block atlas's dimensions and used to be governed only by a hardcoded resident-byte budget,
- * derived against the smallest device in the fleet. On a large pack that silently cost the user the
- * resolution their pack author actually shipped, with no way to see or change it: measured on a
- * 512x pack with the paged block atlas active, full resolution needs ~1.43 GB per atlas, so both
- * landed on half and every map was resampled. The log said so and nothing else did.
+ * block atlas's dimensions. Left governed only by a hardcoded resident-byte budget derived against
+ * the smallest device in the fleet, a large pack silently loses the resolution its pack author
+ * actually shipped, with no way to see or change it: measured on a 512x pack with the paged block
+ * atlas active, full resolution needs ~1.43 GB per atlas, so the budget alone forces half
+ * resolution with every map resampled, visible only in the log.
  *
  * <p>Each tier is a CAP on the scale exponent, not a forced value. The chooser still only ever
  * steps DOWN from the resolution the pack asked for, so a pack shipping maps below its own albedo
@@ -17,11 +17,12 @@ package dev.icehunter.fornax.config;
  * resident-byte ceiling both still apply underneath, so no tier can allocate past what the hardware
  * can hold. A tier chooses how much detail to ASK for; the limits decide what is actually possible.
  *
- * <p><b>{@link #HALF} is the default, deliberately.</b> It is what the previous byte budget already
- * produced on the large packs this exists for, so the machines that motivated the setting see no
- * change. Note the consequence for SMALL packs, stated rather than buried: a pack whose atlas fits
- * comfortably used to reach full resolution on the byte budget alone and now caps at half until the
- * user selects {@link #FULL}. That is the cost of a predictable default, and it is one click.
+ * <p><b>{@link #HALF} is the default, deliberately.</b> It matches the byte-budget-only outcome on
+ * the large packs this exists for, so the machines that motivated the setting see no change. Note
+ * the consequence for SMALL packs, stated rather than buried: a pack whose atlas fits comfortably
+ * within the byte budget still caps at half until the user selects {@link #FULL}, even though the
+ * budget alone would allow full resolution. That is the cost of a predictable default, and it is
+ * one click.
  *
  * <p>Changing this rebuilds the atlases, so it takes effect on a resource reload — the settings
  * screen triggers one on save rather than leaving the row silently inert until F3+T.
@@ -53,7 +54,7 @@ public enum SidecarMapResolution {
          * Resident-byte ceiling for one atlas on the bounded tiers, mip chain included. 512 MB,
          * derived against the smallest device in the fleet -- a 3 GB card. At HALF and QUARTER the
          * scale cap has usually already brought the atlas well under this, so it is a backstop for
-         * an unusually large pack rather than the primary control it used to be.
+         * an unusually large pack rather than the primary control.
          */
         static final long DEFAULT_MAX_ATLAS_BYTES = 512L * 1024L * 1024L;
 

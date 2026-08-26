@@ -62,12 +62,11 @@ public class DefaultChunkRendererRenderPassMixin {
     private static Object fornax$lastLoggedGBuffer;
     private static int fornax$gbufferGenerations;
     // Same once-per-generation instrumentation the deferred branch below carries, mirrored onto the
-    // SHADOW branch. Its absence was not a neutral gap: every layer of the terrain-shadow chain
-    // (this file's shadow branch, ShaderChunkRendererConstantsMixin's shadow branch) was silent
-    // while every equivalent layer of the deferred chain logged, so "no terrain shadow lines in the
-    // log" carried no information at all -- it looked like evidence of a missing draw during the
-    // Bug A investigation, and was not. This answers "does the terrain shadow pass run this
-    // session" empirically, which nothing previously could.
+    // SHADOW branch: without it, every layer of the terrain-shadow chain (this file's shadow
+    // branch, ShaderChunkRendererConstantsMixin's shadow branch) stays silent while every
+    // equivalent layer of the deferred chain logs, so "no terrain shadow lines in the log" carries
+    // no information about whether the shadow pass actually ran. This answers "does the terrain
+    // shadow pass run this session" empirically.
     private static Object fornax$lastLoggedShadowView;
     private static int fornax$shadowGenerations;
 
@@ -93,10 +92,9 @@ public class DefaultChunkRendererRenderPassMixin {
         }
 
         if (FornaxRenderPasses.isShadow(renderPass)) {
-            // LIVE-FIX (see shadowmap-livefix-2-report.md): a genuinely zero-color-attachment render
-            // pass is NOT legal against this Blaze3D version, despite Task 3's static verification --
-            // decompiling RenderPipeline.Builder.build() shows it silently substitutes a single
-            // ColorTargetState.DEFAULT (RGBA8_UNORM) whenever zero withColorTargetState calls were
+            // A genuinely zero-color-attachment render pass is NOT legal against this Blaze3D
+            // version: decompiling RenderPipeline.Builder.build() shows it silently substitutes a
+            // single ColorTargetState.DEFAULT (RGBA8_UNORM) whenever zero withColorTargetState calls were
             // made (no Builder API forces a true zero-length color-target-state list), so the shadow
             // pipeline always reports color-target-state count 1 -- never 0. Decompiling
             // CommandEncoder.createRenderPass(RenderPassDescriptor) additionally shows it

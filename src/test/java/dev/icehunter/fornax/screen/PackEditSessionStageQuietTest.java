@@ -102,8 +102,8 @@ class PackEditSessionStageQuietTest {
 
     @Test
     void stageMovesGetButNotGetApplied() {
-        // LIVE-FIX-4 (the "Save never enables" bug): a row's .listener() live-preview write must
-        // move ONLY the staged (get) view, never the applied (getApplied) view -- getApplied is now
+        // A row's .listener() live-preview write must
+        // move ONLY the staged (get) view, never the applied (getApplied) view -- getApplied is
         // the YACL binding GETTER's source of truth, and the listener runs synchronously inside the
         // same STATE_CHANGE that changed() checks immediately after. If stage() moved getApplied too,
         // the getter would agree with the just-set pending value in that same frame and YACL's
@@ -253,7 +253,7 @@ class PackEditSessionStageQuietTest {
     @Test
     void stageAllFiresOncePerCallAndOnlyCarriesTheChangedKeys() {
         // Mixed changed/unchanged batch: the hook must still fire exactly once (stageAll's
-        // single-combined-call contract, unchanged from before this fix) but the map it receives
+        // single-combined-call contract) but the map it receives
         // must contain only the entries that actually changed.
         PackModel model = PackFixtures.miniModelWithFourRuntimeSliders();
         List<Map<String, Float>> captured = new ArrayList<>();

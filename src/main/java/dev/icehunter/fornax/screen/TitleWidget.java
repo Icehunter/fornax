@@ -9,8 +9,8 @@ import net.minecraft.network.chat.Component;
 /**
  * Non-interactive, genuinely CENTERED title text for Fornax's screens. Replaces vanilla
  * {@code StringWidget} in the headers: that widget renders its text from its own left edge, so a
- * full-width title overlapped the Back button top-left (live-caught: "LightingBack" mangled
- * together). This one centers within its bounds unconditionally and never takes focus or clicks.
+ * full-width title overlaps the Back button top-left (e.g. "LightingBack" mangled together). This
+ * one centers within its bounds unconditionally and never takes focus or clicks.
  */
 final class TitleWidget extends AbstractWidget {
     TitleWidget(int x, int y, int width, int height, Component title) {

@@ -115,13 +115,15 @@ public final class VoxelWindow {
      * render-thread fence-wait time directly (a 24-slot sync slice now costs roughly one flush's
      * ~0.2ms, not {@code 24 * 0.2ms}) -- it still exists to bound how MUCH of a section-cross's shell
      * is worth harvesting synchronously at all (packing + map bookkeeping for hundreds of slots is not
-     * free even without a GPU round trip per slot), sized the same as before the batching fix. On the
-     * priority side: a sprint-flying player (~20 blocks/sec, a conservative middle between vanilla
+     * free even without a GPU round trip per slot). On the priority side: a sprint-flying player (~20
+     * blocks/sec, a conservative middle between vanilla
      * sprint-walk and rocket-boosted elytra) crosses a 16-block section boundary roughly every 0.8s
      * (~48 frames at 60fps) on its dominant axis, so the ~24-slot synchronous pass only needs to cover
      * the immediate, camera-forward-facing wedge of ONE newly-exposed shell face per cross -- typically
      * far narrower than the whole face -- while the executor drains whatever the sync budget didn't
-     * reach during the (long, by comparison) interval before the next cross adds more work. See {@link
+     * reach during the (long, by comparison) interval before the next cross adds more work. This
+     * bound is independent of the batching cost above, since it bounds packing/bookkeeping cost, not
+     * fence-wait cost. See {@link
      * #priorityComparator} for the ordering that decides which slots fall inside vs. outside the
      * budget. */
     private static final int SYNC_BUDGET = 24;
@@ -318,8 +320,7 @@ public final class VoxelWindow {
      * shell enumeration + per-section {@link DirectSectionReader#read} + GPU {@link
      * BrickGridUpload#uploadSlot} are handed to {@link #RESYNC_EXECUTOR} and run on its background
      * thread, so this method returns to the caller immediately regardless of how large the shell is --
-     * a frame is never blocked on harvest/upload cost. (Previously this whole body ran inline on the
-     * render thread, producing a user-visible pause proportional to shell size on large moves.)
+     * a frame is never blocked on harvest/upload cost.
      *
      * <p>For the common incremental move (the new center still within the old window's bounds) the
      * dispatched task touches only the newly-exposed shell, NOT the whole {@code diameter^3} cube:
@@ -332,10 +333,10 @@ public final class VoxelWindow {
      * one at a time in submission order. A second {@code recenterAndResync} issued before a prior
      * task finishes simply queues another task scoped to ITS OWN captured (old, new) transition, so
      * every section that is ever newly exposed at any point along the movement is still enqueued for
-     * harvest exactly once per transition -- nothing is silently skipped. The only behavioral change
-     * from the old synchronous path is latency: a newly-exposed section may show stale/missing data
-     * for a few extra frames until its queued task runs, instead of being guaranteed-fresh the same
-     * frame. A stale task cannot corrupt a valid slot: {@link #harvestAndUploadBatch}/{@link
+     * harvest exactly once per transition -- nothing is silently skipped. The tradeoff is latency: a
+     * newly-exposed section may show stale/missing data for a few extra frames until its queued task
+     * runs, rather than being guaranteed-fresh the same frame. A stale task cannot corrupt a valid
+     * slot: {@link #harvestAndUploadBatch}/{@link
      * #onSectionHarvested} re-map the absolute section through the CURRENT window at write time and
      * discard (via {@code slotFor < 0}) anything no longer in-window, and the toroidal invariant
      * guarantees at most one in-window section maps to any given slot.

@@ -22,9 +22,9 @@ import java.util.Optional;
  * Builds the 6-attachment G-buffer color-target-state set for deferred (SOLID/CUTOUT) terrain
  * pipelines, replacing the single {@code ColorTargetState.DEFAULT} the official (non-translucent)
  * branch uses. The shadow pass (see {@code FornaxRenderPasses#SHADOW}) is deliberately NOT
- * special-cased here -- see the LIVE-FIX comment inline below for why the pipeline must keep exactly
+ * special-cased here -- see the comment inline below for why the pipeline must keep exactly
  * one {@code ColorTargetState} (matching the real, unread dummy color attachment {@code
- * DefaultChunkRendererRenderPassMixin} now builds for the shadow render pass), even though {@code
+ * DefaultChunkRendererRenderPassMixin} builds for the shadow render pass), even though {@code
  * shadow.fsh} has no {@code out} variable and never writes it.
  *
  * <p>{@code ShaderChunkRenderer.createShader(String, TerrainRenderPass)} calls the single-argument
@@ -81,19 +81,16 @@ public class ShaderChunkRendererDeferredPipelineMixin {
             return original.call(builder, state);
         }
 
-        // LIVE-FIX (see shadowmap-livefix-2-report.md): the shadow pass used to drop this wrapped
-        // call entirely here (depth-only, "no color targets at all"), but decompiling
-        // RenderPipeline.Builder.build() (game jar) shows dropping the call does NOT yield a
-        // zero-length color-target-state array -- build() silently substitutes a single
-        // ColorTargetState.DEFAULT whenever zero withColorTargetState calls were made, and there is
-        // no Builder API to force a genuine zero-length list. So the shadow pipeline was already
-        // reporting color-target-state count 1 even with the call dropped -- while
-        // DefaultChunkRendererRenderPassMixin's render pass reported 0 color attachments, tripping
-        // RenderPass.setPipeline's "attachment count must match" check at runtime. Falling through to
-        // the unmodified original call below (SHADOW.isTranslucent() == false, same as
-        // SOLID/CUTOUT) gives the *same* ColorTargetState.DEFAULT explicitly instead of relying on
-        // that implicit substitution, matching the real (now non-empty) dummy color attachment
-        // DefaultChunkRendererRenderPassMixin builds for the shadow render pass.
+        // Decompiling RenderPipeline.Builder.build() (game jar) shows dropping the wrapped call
+        // does NOT yield a zero-length color-target-state array -- build() silently substitutes a
+        // single ColorTargetState.DEFAULT whenever zero withColorTargetState calls were made, and
+        // there is no Builder API to force a genuine zero-length list. The shadow pipeline reports
+        // color-target-state count 1 regardless, so it must match DefaultChunkRendererRenderPassMixin's
+        // render pass, which builds a real, non-empty dummy color attachment for the shadow render
+        // pass -- RenderPass.setPipeline enforces its "attachment count must match" check at runtime.
+        // Falling through to the unmodified original call below (SHADOW.isTranslucent() == false,
+        // same as SOLID/CUTOUT) gives the *same* ColorTargetState.DEFAULT explicitly instead of
+        // relying on that implicit substitution, matching that dummy color attachment.
         if (FornaxRenderPasses.isWaterPrepass(pass)) {
             // LOCKSTEP: exactly ONE color-target-state, matching the single waterNormal color
             // attachment DefaultChunkRendererRenderPassMixin builds for this identity. RGBA16_SNORM =

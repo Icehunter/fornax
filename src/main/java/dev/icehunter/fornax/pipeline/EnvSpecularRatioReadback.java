@@ -308,15 +308,12 @@ public final class EnvSpecularRatioReadback {
                                 + "  (needs u_AlbedoIdentityDebug ON)  (crosshair px %d,%d, %dx%d window)",
                         r, g, b, a, tintLuma, x, y, w, h);
             };
-            // REPURPOSED 2026-08-11 with the closure's own rewrite. The old near/far/width triple
-            // described a smoothstep BOUNDARY that no longer exists: keying the transition on
-            // length(worldPos) made its surface a sphere centred on the eye, which drew a curved,
-            // camera-following edge across the view. Two prior rounds retuned those constants and
-            // failed, because moving a sphere is not removing one. The closure is now
-            // plagueGetWaterFog (Beer-Lambert, asymptotic, no boundary anywhere), which takes a
-            // single scale rather than a near/far pair -- so two of the four old channels no longer
-            // exist to report. Pinned literal: gbuffer_resolve.fsh's
-            // vec4(uwClosureScale, uwClosureDist, horizonClosure, uwVisibilityMult).
+            // The closure is plagueGetWaterFog (Beer-Lambert, asymptotic, no boundary anywhere),
+            // which takes a single scale rather than a near/far pair, so two of the four channels
+            // here go unused. A smoothstep boundary keyed on length(worldPos) would draw its
+            // transition as a sphere centred on the eye -- a curved, camera-following edge across
+            // the view -- which is exactly what this asymptotic model avoids. Pinned literal:
+            // gbuffer_resolve.fsh's vec4(uwClosureScale, uwClosureDist, horizonClosure, uwVisibilityMult).
             case UW_CLOSURE_DEBUG -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] uwClosureScale=%s\nuwClosureDist=%s\nhorizonClosure=%s"
                             + "\nvisibilityMult=%s"
@@ -332,9 +329,8 @@ public final class EnvSpecularRatioReadback {
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, a, x, y, w, h);
             // Pack write: fragColor = vec4(dbgRawDepth, 0.0, dbgStoredDepth, 0.0); -- the compared
-            // value IS the raw light-clip depth now (the depth-scale constant that used to sit
-            // between them was removed from both repos), so green is intentionally empty and
-            // matching red/blue means the comparison would pass.
+            // value is the raw light-clip depth with no scale constant between the two sides, so
+            // green is intentionally empty and matching red/blue means the comparison would pass.
             case SHADOW_QUERY_3 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] rawDepth(compared)=%s\nstoredDepth=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",

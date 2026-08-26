@@ -29,7 +29,7 @@ import java.util.Set;
  *       actually reach disk.</li>
  *   <li>{@code frameGeneration} true-&gt;false, OR {@code aaMethod} METALFX-&gt;anything else
  *       -&gt; {@link Action#FRAMEGEN_DEACTIVATE}: frame generation's interop resources need
- *       releasing. Deliberately NOT done from the YACL option listeners that used to call this
+ *       releasing. Deliberately NOT done from the YACL option listeners, which would call this
  *       directly on click -- YACL applies every option's binding (including this exact field)
  *       BEFORE the save callback runs (see the apply-semantics note above), so a listener firing on
  *       click sees the OLD `armed()` truth (config still true) for every frame rendered while the

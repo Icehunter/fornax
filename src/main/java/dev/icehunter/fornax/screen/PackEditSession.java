@@ -440,9 +440,8 @@ final class PackEditSession {
      * mixin.yacl.YACLScreenCloseMixin}'s {@code undo()} injection routes here via {@link
      * PackChromeActions.Context#discardPending()}). Every OTHER way of leaving the screen (Done,
      * Escape, or YACL's own "Cancel" button, which despite its label still just calls {@code
-     * onClose()} under the hood) now settles on {@link #apply()} instead, via that same mixin's
-     * {@code onClose()} injection -- so this is no longer "unreachable"; it's reachable from exactly
-     * one place, on purpose.
+     * onClose()} under the hood) settles on {@link #apply()} instead, via that same mixin's
+     * {@code onClose()} injection -- so this method is reachable from exactly one place, on purpose.
      */
     void discard() {
         this.staged.clear();

@@ -10,9 +10,9 @@ package dev.icehunter.fornax.pipeline;
  * group: the render-pass wrapper decides whether to REPLACE the attachments, and the pipeline wrapper
  * decides which variant to bind. Chaining a second {@code @WrapOperation} onto the same instruction to
  * carry a second decision was the obvious alternative and is rejected outright -- with two wrappers on
- * one call, which one fired for a given draw is no longer attributable from a log, and this project
- * has repeatedly paid for exactly that (three engine-side fixes spent on the wrong axis for weather).
- * One enum, taken once at HEAD, read twice.
+ * one call, which one fired for a given draw is not attributable from a log, making a route bug
+ * indistinguishable from a pipeline bug at the point of failure. One enum, taken once at HEAD, read
+ * twice.
  *
  * <p><b>The two rules are disjoint by construction, not by ordering.</b>
  * {@link DeferredGeometryPipelines#wantsDeferredParticleGroup} requires the group to be NON-translucent
@@ -61,11 +61,10 @@ public enum ParticleGroupRoute {
      *                              {@code improvedTransparency} option ("Improved Transparency" in
      *                              Video Settings), where a translucent group draws into a separate
      *                              transparency buffer instead of the tonemapped frame. NOT the
-     *                              {@code graphicsMode} / "Fabulous!" setting, which 26.2 no longer
-     *                              has: the transparency post chain moved onto its own boolean, and
-     *                              reading {@code graphicsMode}'s absence from {@code options.txt} as
-     *                              "this cannot be the cause" is exactly how this input was ruled out
-     *                              wrongly once already
+     *                              {@code graphicsMode} / "Fabulous!" setting, which 26.2 does not
+     *                              have: the transparency post chain reads its own boolean, and
+     *                              {@code graphicsMode}'s absence from {@code options.txt} says
+     *                              nothing about this input
      */
     public static ParticleGroupRoute decide(boolean groupTranslucent, boolean anyLayerTranslucent,
                                             boolean allLayersTranslucent, boolean packActive,
@@ -86,14 +85,11 @@ public enum ParticleGroupRoute {
      * Why {@link #decide} returned {@link #VANILLA} for these inputs, named as the FIRST condition that
      * refused -- or {@code null} when it did not return {@code VANILLA} at all.
      *
-     * <p><b>This exists because a route log that says "no" without saying why cost a launch.</b> Both
-     * rules above are plain conjunctions of five booleans and the log recorded NONE of them, so
-     * {@code route=VANILLA} was true, useless and indistinguishable from every other way of being true.
-     * It took the user finding the cause by hand -- a video setting -- to close a round the engine had
-     * every input needed to explain. This is the third instrument on this project to fail that way (the
-     * POM debug views were overpainted; the reachability census was added for exactly this reason), so
-     * the reason is now computed from the same inputs the decision is, in the same call, and asserted
-     * by test rather than left to the log site to remember.
+     * <p><b>This exists because {@code route=VANILLA} alone says nothing about which of five booleans
+     * refused.</b> Both rules above are plain conjunctions of five booleans; without this, every way of
+     * landing on VANILLA is indistinguishable in the log from every other way. The reason is computed
+     * from the same inputs the decision is, in the same call, and asserted by test rather than left to
+     * the log site to remember.
      *
      * <p><b>Which rule is reported is decided by the ARM, not by trying both.</b> A non-translucent
      * group can only ever have been a candidate for deferral and a translucent one only ever for the

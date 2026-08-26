@@ -9,15 +9,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * {@link ShadowCasterLists#aabbIntersectsShadowVolume} is the new caster-selection predicate --
+ * {@link ShadowCasterLists#aabbIntersectsShadowVolume} is the caster-selection predicate --
  * exercised directly (package-private, no Sodium/GPU dependency) against real {@link
  * ShadowCamera#compute} matrices, exactly like {@link ShadowCameraTest} exercises {@code compute}
- * itself. The scenarios below reproduce the root-cause bug diagnosed in {@code
- * docs/reference/shadow-subsystem-trace.md} (mc-vulkan-realism repo): the OLD predicate was a flat
- * world-XZ radius test around the camera (correct only at noon, Y-blind), which missed occluders
- * that sit inside the light's true (tilted) frustum but outside that world-XZ cylinder at low sun
- * angles. Each test's AABB is expressed CAMERA-RELATIVE (min/max deltas from camera position),
- * matching {@link ShadowCasterLists}'s own contract.
+ * itself. A flat world-XZ radius test around the camera is correct only at noon (Y-blind), and
+ * misses occluders that sit inside the light's true (tilted) frustum but outside that world-XZ
+ * cylinder at low sun angles; the scenarios below exercise exactly that boundary. Each test's AABB
+ * is expressed CAMERA-RELATIVE (min/max deltas from camera position), matching {@link
+ * ShadowCasterLists}'s own contract.
  */
 class ShadowCasterListsTest {
     private static final Vector3f NOON_SUN = new Vector3f(0.0f, 1.0f, 0.0f);
@@ -33,13 +32,11 @@ class ShadowCasterListsTest {
     }
 
     /**
-     * THE fix, verified directly: at a low sun angle, a section far along the sun's ground azimuth
-     * (world +X here) sits well outside the OLD world-XZ-radius cylinder (radius ~ shadowDistance +
-     * one section = 112 blocks) but inside the light's true tilted frustum, because at low sun that
-     * horizontal offset maps mostly onto the light's generous Z (depth) axis, not its tight XY ortho
-     * extent -- exactly the mechanism {@code shadow-subsystem-trace.md} section 2 "Symptom 3" traces.
-     * The new predicate must include it; the old predicate (a bare {@code Math.abs(dx) > radius}
-     * check) provably would not have.
+     * At a low sun angle, a section far along the sun's ground azimuth (world +X here) sits well
+     * outside a world-XZ-radius cylinder (radius ~ shadowDistance + one section = 112 blocks) but
+     * inside the light's true tilted frustum, because at low sun that horizontal offset maps mostly
+     * onto the light's generous Z (depth) axis, not its tight XY ortho extent. The predicate under
+     * test must include it; a bare {@code Math.abs(dx) > radius} check provably would not.
      */
     @Test
     void lowSunIncludesOccluderOutsideOldXzRadius() {

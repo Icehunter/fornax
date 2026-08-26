@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * scene AFTER the engine copyback; terrain-only G-buffer beneath) AND {@code sceneDepth >
  * proximity} (inside the ~2.5m first-person volume).
  *
- * <p>The proximity bound exists because the delta alone also fires on WATER (live-caught): the
+ * <p>The proximity bound exists because the delta alone also fires on WATER: the
  * translucent water surface writes scene depth nearer than the seafloor's G-buffer depth — the
  * identical delta signature as the hand. Hand/held items (translucent included) always satisfy
  * proximity; water beyond arm's reach never does. Known accepted edge: standing chest-deep, water
@@ -64,7 +64,7 @@ class ReconstructHandMaskTest {
 
     @Test
     void waterSurfaceBeyondArmsReachIsNotMasked() {
-        // The live-caught regression the proximity bound exists for: a water surface whose
+        // The case the proximity bound exists for: a water surface whose
         // seafloor is far beneath it has the same POSITIVE delta signature as the hand. The
         // nearest such case (4m surface, 8m seafloor -- reversed-Z compresses distant deltas
         // below the epsilon on its own) is exactly where only proximity saves it.

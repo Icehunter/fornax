@@ -37,8 +37,7 @@ public final class PackOptionValues {
             // Name the offending option and value. A bare NumberFormatException here surfaces as
             // "Unexpected failure loading configured pack; falling back to vanilla Sodium" with a stack
             // trace that points at Integer.parseInt and says nothing about WHICH option is malformed --
-            // a pack author then has to bisect their own shaders to find it (live-caught 2026-07-20, cost
-            // a full launch cycle over a compile option declared as 0.35 instead of an integer).
+            // a pack author would otherwise have to bisect their own shaders to find it.
             throw new IllegalArgumentException(
                     "Compile option '" + option.name() + "' has non-integer value \"" + value
                             + "\". Compile options must be whole numbers -- declare a fraction as an"

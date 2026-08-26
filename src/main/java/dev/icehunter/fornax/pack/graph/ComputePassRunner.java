@@ -51,10 +51,8 @@ import java.util.Map;
  * own command pool + fence, submitted via a raw {@code vkQueueSubmit} (Blaze3D's own
  * {@code VulkanQueue.Submission.close()} hardcodes a null fence -- verified via {@code javap} -- so it
  * cannot be used to attach a completion fence). A slot's fence is waited on only when that SAME slot
- * is about to be reused ({@code FRAMES_IN_FLIGHT} frames later), never every frame -- this is the
- * exact fix for the anti-pattern the original version of this class carried (a whole-queue
- * {@code waitIdle()} every single call, harmless only because no real pack ever exercised this path
- * until now).
+ * is about to be reused ({@code FRAMES_IN_FLIGHT} frames later), never every frame, avoiding a
+ * whole-queue {@code waitIdle()} on every dispatch.
  *
  * <p>Each pass's descriptor set is built from its declared {@code inputs} + {@code outputs}
  * (see {@link #combinedBindingOrder}): buffer-kind targets bind as {@code STORAGE_BUFFER}, texture-kind
@@ -260,8 +258,8 @@ public final class ComputePassRunner implements AutoCloseable {
             // downstream) -- deliberately NOT builtin.-prefixed (GraphValidator.checkInputRef treats
             // it as a peer of BUILTINS, not a member: see that method's own isShadowMapRef branch) and never
             // a TargetRegistry entry, so neither the BUILTINS check above nor the registry lookups
-            // below ever match it -- this was the exact gap that made a compute pass declaring
-            // "sunShadowMap" throw here instead of building (the wsrw-computebind fix).
+            // below ever match it -- without this branch a compute pass declaring "sunShadowMap"
+            // would throw here instead of building.
             // FullscreenPassRunner never needed an equivalent special case: it classifies every
             // non-buffer input as a plain sampler unconditionally and defers entirely to
             // GraphInputResolver.resolveView at run time, which already resolves
@@ -471,9 +469,9 @@ public final class ComputePassRunner implements AutoCloseable {
                         // already proved correct for its own (non-TOML) dispatch.
                         TargetInstance out = registry.get(spec.outputs().get(0));
                         if (out == null) {
-                            // The trap the emitter research documented: registry.get() is the TEXTURE
-                            // map -- a buffer-only-output pass has no pixel size to derive groups from
-                            // and used to NPE right here. Fail loudly with the fix named.
+                            // registry.get() is the TEXTURE map -- a buffer-only-output pass has no
+                            // pixel size to derive groups from, so fail loudly instead of dispatching
+                            // against a null target.
                             throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
                                     + "' declares local_size but its first output '" + spec.outputs().get(0)
                                     + "' is not a texture target -- buffer-only passes need a literal"

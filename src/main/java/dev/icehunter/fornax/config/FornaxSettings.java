@@ -4,9 +4,9 @@ import dev.icehunter.fornax.pass.ssaa.SsaaPreset;
 
 /**
  * Plain GSON-serializable settings POJO for Fornax's rendering engine. PBR/SSAO/TAA/reflection
- * tunables that used to live here moved into the active pack's own runtime/compile options (see
- * {@code dev.icehunter.fornax.pack.option.PackOption} and a pack's {@code screens.toml}). This
- * class now holds only engine-owned settings, independent of whichever pack (if any) is loaded.
+ * tunables belong to the active pack's own runtime/compile options (see {@code
+ * dev.icehunter.fornax.pack.option.PackOption} and a pack's {@code screens.toml}), not here. This
+ * class holds only engine-owned settings, independent of whichever pack (if any) is loaded.
  */
 public class FornaxSettings {
     /**
@@ -54,12 +54,12 @@ public class FornaxSettings {
     public boolean profilerOverlay = false;
 
     /**
-     * The engine's own AA/upscale method selector -- replaces the pack-owned {@code TAA_ENABLED}
-     * compile option (now retired) as the single source of truth for whether/how the frame
-     * gets a temporal resolve, and the ONLY on/off switch for supersampling (see {@link
-     * #ssaaPreset}). Defaults to {@code TAA} to match the legacy pack default it replaces. The
-     * Sodium Engine page's apply hook calls {@code PackReload.reapplyActivePack()} on change (a
-     * compile-state change -- see {@code EngineDefines}), never {@code RendererReload}.
+     * The engine's own AA/upscale method selector, engine-owned in place of the pack-owned {@code
+     * TAA_ENABLED} compile option -- the single source of truth for whether/how the frame gets a
+     * temporal resolve, and the ONLY on/off switch for supersampling (see {@link #ssaaPreset}).
+     * Defaults to {@code TAA}. The Sodium Engine page's apply hook calls {@code
+     * PackReload.reapplyActivePack()} on change (a compile-state change -- see {@code
+     * EngineDefines}), never {@code RendererReload}.
      */
     public AaMethod aaMethod = AaMethod.TAA;
 
@@ -71,8 +71,8 @@ public class FornaxSettings {
     public TaauRatio taauRatio = TaauRatio.BALANCED;
 
     /**
-     * Temporal blend factor, migrated from the retiring pack option {@code u_TaaBlendFactor}. This
-     * is the STEADY-STATE history weight, not the whole story: after a reset/disocclusion the
+     * Temporal blend factor, engine-owned in place of the pack option {@code u_TaaBlendFactor}.
+     * This is the STEADY-STATE history weight, not the whole story: after a reset/disocclusion the
      * reconstruct shader's confidence ramp blends 1/n-style (history weight (n-1)/n over n frames
      * accumulated) and this value is only the cap that ramp saturates at -- at the 0.9 default a
      * static pixel reaches it by frame 10. Raising it deepens steady-state smoothing (and ghosting
@@ -209,10 +209,9 @@ public class FornaxSettings {
         }
         // Same rule for the sidecar resolution, and it needs it MORE than the two above: a config file
         // written by any build before this field existed simply has no key for it, which Gson also
-        // leaves as null -- as does a config holding the earlier `sidecarAtlasBudget` key, which
-        // this field replaced. Normalizing to HALF is what keeps the first atlas build from
-        // dereferencing null, and HALF is what the retired byte budget already produced on the
-        // packs the setting exists for.
+        // leaves as null -- as does a config holding the `sidecarAtlasBudget` key instead of this
+        // field. Normalizing to HALF is what keeps the first atlas build from dereferencing null,
+        // and HALF is what that byte budget already produced on the packs the setting exists for.
         if (settings.sidecarMapResolution == null) {
             settings.sidecarMapResolution = SidecarMapResolution.HALF;
         }

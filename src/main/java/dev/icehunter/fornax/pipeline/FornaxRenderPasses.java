@@ -110,8 +110,8 @@ public final class FornaxRenderPasses {
      * per-section element offsets are read against. Translucent sections' offsets are only valid
      * against the per-region dynamically-sorted local index arena; a non-translucent identity made
      * the renderer read those same offsets against its unrelated {@code SharedQuadIndexBuffer},
-     * decoding garbage vertex indices -- live-caught as sparse wedge-shaped partial water coverage
-     * (most of a lake missing from waterNormal/waterDepth; see dw-livefix-prepass-coverage.md).
+     * decoding garbage vertex indices and producing sparse wedge-shaped partial water
+     * coverage (most of a lake missing from waterNormal/waterDepth).
      * Pipeline/color-target/render-pass shape is unaffected by the flag: every lockstep mixin
      * (constants, CTS, attachments) special-cases this pass by IDENTITY ({@link #isWaterPrepass})
      * before any {@code isTranslucent()} branch. fragmentDiscard=true because the pre-pass shader

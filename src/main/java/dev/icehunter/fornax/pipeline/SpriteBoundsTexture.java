@@ -402,14 +402,14 @@ public final class SpriteBoundsTexture {
      *
      * <p>Shared deliberately rather than written twice. The two grids are read by a shader with a
      * single {@code texelFetch} coordinate and are only meaningful together: a fragment takes its
-     * sprite rectangle from one and that same sprite's height range from the other. When the two
-     * loops each did their own conversion they were free to disagree, and they did -- the range loop
-     * converted from the SIDECAR atlas's texels while dividing by the BLOCK atlas's width, putting
-     * every range at half its true position. Bounds resolved, ranges did not, and the shader's
-     * fallback to the raw height made it look like a pack with no height data.
+     * sprite rectangle from one and that same sprite's height range from the other. A separate
+     * conversion per loop lets the sidecar and block atlas's differing texel dimensions diverge --
+     * one converting from the SIDECAR atlas's texels while dividing by the BLOCK atlas's width would
+     * put every range at half its true position, with bounds resolving and ranges not, and the
+     * shader's fallback to the raw height masking it as a pack with no height data.
      *
-     * <p>There is no atlas size in either signature any more, which is the point: the only unit that
-     * survives a half-resolution sidecar is the normalised one, so the mismatch has nowhere to live.
+     * <p>Neither signature takes an atlas size, which is the point: the only unit that survives a
+     * half-resolution sidecar is the normalised one, so the mismatch has nowhere to live.
      */
     static int firstCell(float uv) {
         // Clamped at BOTH ends, so this is the same total function the shader's

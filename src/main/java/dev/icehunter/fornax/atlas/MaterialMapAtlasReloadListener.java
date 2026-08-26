@@ -42,7 +42,7 @@ public final class MaterialMapAtlasReloadListener {
 
     /**
      * Resident-size multiplier for a full mip chain: the levels below the base sum to 1/3 of it.
-     * Now matches {@link NormalMapAtlasReloadListener}'s, which this atlas shares a chain shape
+     * Matches {@link NormalMapAtlasReloadListener}'s, which this atlas shares a chain shape
      * with. Feeding it to {@link PbrSidecarAtlasScale#chooseLog2Scale} is what stops the chain
      * pushing this atlas over the device's budget and forcing a HALF-RESOLUTION base -- which would
      * be self-defeating, because halving the base resamples every {@code _s} sidecar, and a

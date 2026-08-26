@@ -17,11 +17,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * immediately BEFORE vanilla's own {@code windowSurface.blitFromTexture(...)} call inside {@code
  * Minecraft.renderFrame(boolean)}'s late {@code "present"} profiler section.
  *
- * <p><b>Revised from an earlier design that injected before {@code acquireNextTexture()}
- * instead</b> (a code-review pass caught a temporal-ordering bug in that version, verified against
- * the bytecode below before this fix). Discovery on the deobf jar (26.2, {@code javap -c -p} on
- * {@code Minecraft.renderFrame(Z)V}) found the acquire/blit/present triple is NOT co-located at
- * present time the way a naive "double present" would assume:
+ * <p>The acquire/blit/present triple is NOT co-located at present time the way a naive "double
+ * present" would assume, per {@code javap -c -p} disassembly of {@code Minecraft.renderFrame(Z)V}
+ * (26.2 deobf jar):
  * <ul>
  *   <li>The method HEAD early-returns if {@code windowSurface.isAcquired()} is already true --
  *   vanilla itself never re-enters with an outstanding acquire.
@@ -35,9 +33,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  *   profiler section, each individually preceded by its own {@code isAcquired()} check.
  * </ul>
  *
- * <p><b>Why the early (pre-acquire) site was wrong:</b> injecting before {@code
- * acquireNextTexture()} runs BEFORE this same {@code renderFrame} invocation's own {@code
- * GameRenderer.render()} has produced this frame's generated image -- {@code
+ * <p><b>Why the injection sits after {@code acquireNextTexture()}, not before it:</b> injecting
+ * before {@code acquireNextTexture()} would run BEFORE this same {@code renderFrame} invocation's
+ * own {@code GameRenderer.render()} has produced this frame's generated image -- {@code
  * FrameGenPass.generatedFrameReady()} at that point could only ever reflect the PREVIOUS
  * invocation's result. Presenting that stale image immediately before the real frame gives
  * presented scene-times that step backward every other frame (verified: {@code ...,

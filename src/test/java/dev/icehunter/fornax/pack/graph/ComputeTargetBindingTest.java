@@ -217,18 +217,18 @@ class ComputeTargetBindingTest {
         assertFalse(GraphValidator.BUILTINS.contains(ComputePassRunner.PACK_OPTIONS_INPUT));
     }
 
-    // --- wsrw-computebind: sunShadowMap classification boundary for ComputePassRunner.build()'s
-    // descriptor-type loop. Before this fix, a compute pass declaring "sunShadowMap" (voxel_water_refl,
-    // added Task 3) fell all the way through build()'s classification loop -- it is NOT builtin.-
-    // prefixed (GraphValidator.checkInputRef treats ShadowMapManager.TARGET as a peer of BUILTINS, not
-    // a member: see that method's own `base.equals(ShadowMapManager.TARGET)` branch, and
-    // ShadowMapManager's own class doc: "Deliberately NOT a TargetRegistry target") and it is never a
-    // TargetRegistry entry, so neither the BUILTINS check nor the registry.getBuffer/get checks below
-    // it ever matched, and the runner build perpetually threw "references target 'sunShadowMap' which
-    // is neither an allocated buffer nor texture target" every frame (the whole graph never built).
-    // build() itself needs a live Vulkan device (SPIRV compile, descriptor pool/layout creation) so it
-    // can't run headless -- this covers the same pure, GPU-free boundary condition the Task 5c tests
-    // above do: the exact name membership build()'s branches depend on. -------------------------------
+    // --- sunShadowMap classification boundary for ComputePassRunner.build()'s descriptor-type loop.
+    // A compute pass declaring "sunShadowMap" (voxel_water_refl) needs its own name-match branch in
+    // that loop: it is NOT builtin.-prefixed (GraphValidator.checkInputRef treats ShadowMapManager.TARGET
+    // as a peer of BUILTINS, not a member: see that method's own `base.equals(ShadowMapManager.TARGET)`
+    // branch, and ShadowMapManager's own class doc: "Deliberately NOT a TargetRegistry target") and it
+    // is never a TargetRegistry entry, so without that branch neither the BUILTINS check nor the
+    // registry.getBuffer/get checks below it would ever match, and the runner build would throw
+    // "references target 'sunShadowMap' which is neither an allocated buffer nor texture target" every
+    // frame (the whole graph never building). build() itself needs a live Vulkan device (SPIRV compile,
+    // descriptor pool/layout creation) so it can't run headless -- this covers the same pure, GPU-free
+    // boundary condition the Task 5c tests above do: the exact name membership build()'s branches
+    // depend on. -------------------------------
 
     // --- The reserved 'globals' input's descriptor classification and binding index ---------------
     // descriptorTypeFor is pure over (spec, name, registry): no GPU, no allocation, so the whole

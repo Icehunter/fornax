@@ -19,10 +19,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * bilinear/mip filtering box-averages across the flame's long, detailed silhouette edge,
  * manufacturing intermediate alpha values an 8x8 vanilla sprite's short edge never produces in
  * meaningful quantity. Under TAAU's per-frame subpixel jitter, which filtered edge texels clear the
- * 0.1 discard shifts every frame -- the torch-flame quad visibly flashes (2026-07-21 live report;
- * this flame sits directly above the same torches whose smoke the sibling mixin already fixed,
- * which is why fixing smoke alone read as "no change"). Same gate, same vanilla-untouched no-pack
- * path, same shared-atlas safety argument as the sibling.
+ * 0.1 discard shifts every frame -- the torch-flame quad visibly flashes. This flame sits directly
+ * above the same torches whose smoke the sibling mixin fixes separately; flame and smoke each need
+ * their own translucent-layer gate. Same gate, same vanilla-untouched no-pack path, same
+ * shared-atlas safety argument as the sibling.
  */
 @Mixin(FlameParticle.class)
 public abstract class FlameParticleLayerMixin {

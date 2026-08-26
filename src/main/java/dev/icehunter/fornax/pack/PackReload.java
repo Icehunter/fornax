@@ -133,12 +133,12 @@ public final class PackReload {
             GraphRunner.unload();
             closeQuietly(picked);
         } catch (Throwable t) {
-            // A broken pack (or a bug of ours) must never kill the caller -- live-caught at boot: MC
-            // 26.2's registry throws IllegalStateException on tag access before the first datapack
-            // tag bind, which sailed straight through the FornaxPackError-only catch above and took
-            // the whole boot down. GraphRunner.rebuild mutates its statics before its final resolve
-            // step, so unload() here rolls a half-installed pack back to the same "GraphRunner stays
-            // inactive, vanilla rendering" state a missing pack leaves behind.
+            // A broken pack (or a bug of ours) must never kill the caller: MC 26.2's registry throws
+            // IllegalStateException on tag access before the first datapack tag bind, which the
+            // FornaxPackError-only catch above does not recognize as a pack failure. GraphRunner.rebuild
+            // mutates its statics before its final resolve step, so unload() here rolls a half-installed
+            // pack back to the same "GraphRunner stays inactive, vanilla rendering" state a missing
+            // pack leaves behind.
             FornaxMod.LOGGER.error("[Fornax] Unexpected failure loading configured pack '{}'; falling back to vanilla Sodium", settings.activePack, t);
             GraphRunner.unload();
             closeQuietly(picked);

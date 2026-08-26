@@ -53,15 +53,11 @@ public final class SectionPalette {
      * cross model override, so vanilla's cross geometry, which the per-texel test correctly represents,
      * is exactly what renders), so {@code extinction} stays {@code 0} for them.
      *
-     * <p>There used to be a {@code shapeTruncated} flag here (light-leak fix, adversarial review
-     * finding S2, 2026-07-20): when {@link VoxelShapeClassifier#classify}'s real vanilla shape
-     * decomposed into more boxes than {@link VoxelShapeClassifier#MAX_BOXES}, the excess was dropped
-     * and this flag told the shader to distrust the (incomplete) surviving {@code boxes} and fall back
-     * to full-cube occlusion. That fixed the light leak but over-shadowed badly -- confirmed live on
-     * Diagonal Fences' thin, mostly-open geometry rendering as a solid blob. Removed the same day:
-     * {@link VoxelShapeClassifier#classify} now MERGES the excess into one extra union box instead of
-     * dropping it, so {@code boxes} is always a complete description of the shape's real footprint and
-     * no "distrust this" signal is needed. */
+     * <p>No {@code shapeTruncated} flag exists here: when {@link VoxelShapeClassifier#classify}'s
+     * real vanilla shape decomposes into more boxes than {@link VoxelShapeClassifier#MAX_BOXES}, it
+     * MERGES the excess into one extra union box rather than dropping it, so {@code boxes} is always
+     * a complete description of the shape's real footprint and no "distrust this" signal is needed
+     * by the shader. */
     public record Entry(VoxelShapeKind shapeKind, List<VoxelShapeClassifier.PackedBox> boxes,
                          int[] faceColors, double emissiveStrength, boolean lightTransmissive,
                          int emissionColor, boolean cutout, float[] uvRect, float extinction,

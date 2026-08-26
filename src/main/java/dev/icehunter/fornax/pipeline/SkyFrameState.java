@@ -8,15 +8,13 @@ package dev.icehunter.fornax.pipeline;
  * garbage through LOAD semantics) are both impossible by construction -- each flag IS the
  * cancellation, not a parallel re-derivation of the same conditions that could drift.
  *
- * <p>This class used to carry the sky's DATA too -- sky colour, sunrise colour, star brightness,
- * sun direction, moon phase, rain level, sun angle -- committed by the same
- * {@code LevelRendererSkyPassMixin} call site. That was wrong in a way that cost real debugging
- * time: the commit only ran down the branch that cancels vanilla's sky, which requires the pack's
- * {@code SKY_PROCEDURAL} compile option, so any pack that did not paint its own sky read every one
- * of those lanes as zero. The engine was withholding data because of a styling decision. All of it
- * moved to {@link SkyProbe}, which reads the same values live from the camera's environment
- * attribute probe every frame in every dimension -- see that class for the full rationale and for
- * the two other consumers that were quietly reading zeroes. What remains here is what genuinely IS
+ * <p>The sky's DATA -- sky colour, sunrise colour, star brightness, sun direction, moon phase, rain
+ * level, sun angle -- lives in {@link SkyProbe}, not here, which reads those values live from the
+ * camera's environment attribute probe every frame in every dimension regardless of which compile
+ * options a pack enables: see that class for the full rationale. Committing DATA from
+ * {@code LevelRendererSkyPassMixin} would only run down the branch that cancels vanilla's sky (the
+ * pack's {@code SKY_PROCEDURAL} compile option), gating a DATA lane behind a STYLING decision and
+ * reading zero for any pack that does not paint its own sky. What remains here is what genuinely IS
  * conditional: a record of a decision this engine made this frame.
  *
  * <p>Committed on the render thread during sky/clouds pass registration (before the frame graph
@@ -65,8 +63,8 @@ public final class SkyFrameState {
     /**
      * Commits the sky did-cancel flag (u_SkyColor.w), set by LevelRendererSkyPassMixin during
      * sky-pass registration. Called unconditionally every frame that {@code addSkyPass} runs,
-     * whether or not the pass was actually cancelled -- there is no longer an "inactive" variant,
-     * because there is no longer any data here that a non-cancelling frame would need to zero.
+     * whether or not the pass was actually cancelled -- there is no "inactive" variant, since there
+     * is no data here that a non-cancelling frame would need to zero.
      *
      * @param cancelled  true iff the mixin actually cancelled vanilla's sky pass this frame
      */

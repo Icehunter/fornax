@@ -9,9 +9,8 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Coverage for {@link PackEditSession#discard()} -- previously implemented but never exercised by a
- * test (and, in production, never CALLED at all before {@code mixin.yacl.YACLScreenCloseMixin} wired
- * YACL's "Undo" button to it). This is the "settings changes don't stick" fix's secondary mechanism:
+ * Coverage for {@link PackEditSession#discard()}: {@code mixin.yacl.YACLScreenCloseMixin} wires
+ * YACL's "Undo" button to it. This is the secondary mechanism for reverting an abandoned edit:
  * a live-previewed RUNTIME edit that gets abandoned must revert {@code PackEditSession#staged} (and
  * {@code PackEditSession#committed}, reachable only via {@link PackEditSession#getApplied}) back to
  * the last-applied snapshot, not just leave the GPU buffer's write orphaned.

@@ -142,11 +142,9 @@ public final class SsaaManager {
     public static void deactivate() {
         if (scaledTarget != null) {
             // Same live-per-frame-resize crash class GBufferManager/ShadowMapManager/etc. already
-            // guard against (see VulkanComputeBackend.waitForGpuIdleBeforeDestroy's own doc) -- this
-            // was the one texture-owning manager in the codebase missing the guard, live-caught via
-            // the METALFX+frame-generation crash investigation (mc-vulkan-realism
-            // docs/reference/vulkan-renderer-architecture-audit.md follow-up): MetalFxUpscalePass
-            // reads this exact target as its low-res source every frame.
+            // guard against (see VulkanComputeBackend.waitForGpuIdleBeforeDestroy's own doc):
+            // MetalFxUpscalePass reads this exact target as its low-res source every frame, so
+            // destroying it mid-flight races that read.
             VulkanComputeBackend.waitForGpuIdleBeforeDestroy();
             scaledTarget.destroyBuffers();
             scaledTarget = null;

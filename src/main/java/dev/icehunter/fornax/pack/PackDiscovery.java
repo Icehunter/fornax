@@ -205,8 +205,8 @@ public final class PackDiscovery {
                         // FileToIdConverter("shaders", ".vsh"/".fsh") -- a pipeline asking for
                         // fornax_runtime:blocks/terrain looks up the resource path
                         // "shaders/blocks/terrain.vsh" (javap-confirmed against the real 26.2 client
-                        // jar). Dropping the prefix here made every pack shader unresolvable: terrain
-                        // pipelines failed to compile and the world rendered black (live-caught).
+                        // jar). Dropping the prefix here makes every pack shader unresolvable: terrain
+                        // pipelines fail to compile and the world renders black.
                         // Matches PassSpec.shader()'s own "shaders/..." path convention exactly.
                         try { out.put("shaders/" + shadersDir.relativize(p).toString().replace('\\', '/'), Files.readString(p)); }
                         catch (IOException e) { throw new FornaxPackError(p.toString(), "", "unreadable shader: " + e.getMessage()); }

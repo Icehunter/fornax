@@ -183,8 +183,8 @@ public final class PassTimer {
             return;
         }
         if (openDepth == 0 || !label.equals(slotLabels[slot][openStack[openDepth - 1]])) {
-            // Mispaired end (a genuine caller nesting bug -- NOT an overrun, which is now tracked as
-            // an open phantom entry and matches this check normally): poison the whole frame rather
+            // Mispaired end (a genuine caller nesting bug -- NOT an overrun, which tracks as an open
+            // phantom entry and matches this check normally): poison the whole frame rather
             // than ever pairing a begin timestamp with the wrong end. endFrame() zeroes the slot's
             // bookkeeping so the poisoned indices are never drained.
             frameCorrupt = true;

@@ -17,20 +17,17 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Load-time-blocking gap found wiring the voxel water reflection pass (WSR round Task 1): {@code
- * GraphValidator.checkEnabledIf} required every {@code enabled_if}-referenced name to be a
- * pack-declared {@link PackOption} (scanned from a {@code //[...] compile} annotation in pack shader
- * source) -- but {@link EngineDefines}' {@code FX_TAA}/{@code FX_UPSCALE}/{@code FX_METHOD_*}/{@code
- * FX_COMPUTE} keys are NEVER pack-declared: they exist only as a runtime overlay {@code
- * GraphRunner.rebuild} always applies to {@code compileValues}. Referencing {@code FX_COMPUTE} in a
- * pack's {@code graph.toml} (exactly what {@code voxelWaterRefl}'s tier-4 gate does) therefore threw
- * "enabled_if references unknown option 'FX_COMPUTE'" at pack load -- not a tier-4-only failure, a
- * whole-pack load failure, since {@code GraphValidator.validate} runs unconditionally over every
- * target/pass. Fixed by {@link EngineDefines#KEYS} + the {@code checkEnabledIf} carve-out mirroring
+ * {@link EngineDefines}' {@code FX_TAA}/{@code FX_UPSCALE}/{@code FX_METHOD_*}/{@code FX_COMPUTE}
+ * keys are NEVER pack-declared: they exist only as a runtime overlay {@code GraphRunner.rebuild}
+ * always applies to {@code compileValues}, never as a pack-declared {@link PackOption} (scanned from
+ * a {@code //[...] compile} annotation in pack shader source). {@code
+ * GraphValidator.checkEnabledIf} carves these names out via {@link EngineDefines#KEYS}, mirroring
  * the existing {@code sunShadowMap}/{@code sceneHistory}/{@code packOptions} engine-owned-name
- * precedent. This test proves the fix with the pack's REAL gate string (byte-identical target/pass
- * gates, so {@code checkGateConsistency}'s short-circuit is also exercised, not just
- * {@code checkEnabledIf}).
+ * precedent, so a pack's {@code graph.toml} can reference {@code FX_COMPUTE} in an {@code
+ * enabled_if} (exactly what {@code voxelWaterRefl}'s tier-4 gate does) without {@code
+ * GraphValidator.validate} refusing the whole pack over an unrecognized option name. This test
+ * proves it with the pack's REAL gate string (byte-identical target/pass gates, so {@code
+ * checkGateConsistency}'s short-circuit is also exercised, not just {@code checkEnabledIf}).
  */
 class EngineDefinesEnabledIfTest {
     private static final String GATE = "SSR_WATER_MODE > 3 && SSR_QUALITY != 0 && FX_COMPUTE";

@@ -118,8 +118,8 @@ class PbrSidecarAtlasScaleTest {
 
     @Test
     void theDefaultTierIsBitIdenticalToTheHistoricalSizing() {
-        // The claim the tiering rests on: a user who never opens the setting gets what the byte
-        // budget alone used to give on the packs this exists for. Checked across the shapes that
+        // The claim the tiering rests on: a user who never opens the setting gets exactly what the
+        // byte budget alone gives on the packs this exists for. Checked across the shapes that
         // actually differ, not just one, because "identical" is a per-input property.
         int[][] cases = {{16384, 16384, 1}, {8192, 8192, 4}, {8192, 4096, 8}};
         for (int[] c : cases) {

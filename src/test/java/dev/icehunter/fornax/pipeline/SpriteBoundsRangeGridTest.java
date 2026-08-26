@@ -155,8 +155,8 @@ class SpriteBoundsRangeGridTest {
     void theRangeGridAndTheBoundsGridUseOneMapping() {
         // The two grids are read with a SINGLE texelFetch coordinate and are only meaningful
         // together: the fragment takes its rectangle from one and that rectangle's height range from
-        // the other. Their cell mapping is now literally one pair of methods, and this is what says
-        // so -- if a future change gives either grid its own conversion again, the sprite whose
+        // the other. Their cell mapping is one pair of methods, and this is what says
+        // so -- if a future change gives either grid its own conversion, the sprite whose
         // bounds resolve while its range does not is the exact failure this file exists for.
         // Exercised as the PAIR they are -- a rectangle's opening and closing edge -- because that is
         // the only way they are ever called. Asking lastCell about a left edge is meaningless (a
@@ -181,10 +181,10 @@ class SpriteBoundsRangeGridTest {
 
     @Test
     void aRangeMeasuredOnASIDECARRECTANGLEStillLandsOnTheSPRITE() {
-        // The same boundary, now that the sidecar atlas is no longer a fixed half of the block
-        // atlas. Its scale is chosen per pack -- 1/2 for maps that match the colour, up to 4x that
-        // for a pack shipping 512px maps over 64px colour -- so "divide by two" is no longer even
-        // the WRONG constant, it is a constant that does not exist any more. The producer measures
+        // The same boundary, given the sidecar atlas is not a fixed half of the block atlas: its
+        // scale is chosen per pack -- 1/2 for maps that match the colour, up to 4x that for a pack
+        // shipping 512px maps over 64px colour -- so a fixed "divide by two" is not a valid
+        // conversion; there is no single constant to use. The producer measures
         // its histogram over a rectangle in sidecar texels and must publish the SPRITE's normalised
         // edges; this walks every scale the sizing can pick and checks the fragment still finds it.
         int blockAtlas = 4096;

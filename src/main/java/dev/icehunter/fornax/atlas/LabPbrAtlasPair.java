@@ -19,9 +19,9 @@ import org.jspecify.annotations.Nullable;
  * builds, as a correctness fallback for any caller reached without a prior release. Changed atlas
  * generations normally rebuild through {@link AtlasGenerationSchedule}, after the release hook's
  * render-loop-separated retirement window; an unchanged block generation deliberately retains the
- * exact pair and schedules only its albedo overflow/grid resources. Old and new WERE briefly
- * double-resident by design here (Blaze3D's frame-fenced deferred destroy made that seem safe)
- * until that doubling was live-caught contributing to a native out-of-memory crash during a
+ * exact pair and schedules only its albedo overflow/grid resources. Close-after-build here briefly
+ * double-resides old and new: Blaze3D's frame-fenced deferred destroy does not reclaim VRAM
+ * synchronously, so relying on this fallback path is a native out-of-memory risk during a
  * resource-pack switch.
  */
 public final class LabPbrAtlasPair implements AutoCloseable {

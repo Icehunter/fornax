@@ -22,14 +22,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <p><b>Why this needs a test at all.</b> Omitting a pass is not a loud failure.
  * {@code PassParams.reset()} defaults {@code trueSunHeight} to <b>1.0</b>, so an unlisted pass reads
  * a perfectly valid "sun overhead" rather than a zero, a NaN, or anything a shader could defend
- * against. Live-caught 2026-08-03: Plague's clouds rendered SUNSET-ORANGE at midnight beneath a
- * correct night sky, because {@code sunVisibility} pinned to 1.0 (full day) while {@code noonFactor}
- * -- sourced from the GLOBAL {@code u_SkyState.y}, and therefore right -- read 0.0, and
- * {@code mix(sunset, noon, 0.0)} selects pure sunset colour at full strength. The sky looked correct
- * throughout, because {@code gbuffer_resolve} was on the list and the clouds pass was not. Two passes
- * disagreeing about what time it is, with no error anywhere.
- *
- * <p>Costs a test run to catch; cost a launch to find.
+ * against. A pack pass that is on the list disagreeing with one that isn't produces no error: one
+ * pass computes {@code sunVisibility} from the correct GLOBAL {@code u_SkyState.y}-derived {@code
+ * noonFactor} while the other silently pins to 1.0 (full day), so e.g. a clouds pass can render
+ * sunset colour at midnight beneath a correctly night-lit sky -- each pass individually plausible,
+ * the two disagreeing about what time it is.
  */
 class GraphRunnerSunParamsTest {
 

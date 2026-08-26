@@ -91,13 +91,13 @@ public class ShaderChunkRendererConstantsMixin {
     }
 
     /**
-     * Cache-busting constant (ecv2 attachment fix, round 2): blaze3d's device shader-module cache
-     * is keyed (Identifier, type, defines) WITHOUT source text, so a pack republish that changes
-     * shader TEXT under the same identifier+defines silently serves the stale SPIR-V module --
-     * pipelines recompiled after the sourcesReady cache clear still drew with the old 5-output
-     * fragment, never writing the gAlbedoRaw attachment (live-caught, cold-relaunch-verified).
-     * Embedding the rebuild generation in the define NAME makes every republish a distinct cache
-     * key; the define itself is never referenced by any shader (a harmless no-op in the source).
+     * Cache-busting constant: blaze3d's device shader-module cache is keyed (Identifier, type,
+     * defines) WITHOUT source text, so a pack republish that changes shader TEXT under the same
+     * identifier+defines would silently serve the stale SPIR-V module -- a pipeline recompiled
+     * after the sourcesReady cache clear would still draw with the old fragment, never writing
+     * the gAlbedoRaw attachment. Embedding the rebuild generation in the define NAME makes every
+     * republish a distinct cache key; the define itself is never referenced by any shader (a
+     * harmless no-op in the source).
      */
     private static String fornax$generationConstant() {
         return "FORNAX_PACK_GEN_" + GraphRunner.shaderCacheGeneration();

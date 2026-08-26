@@ -16,8 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
  * Pins the sampler-kind split {@link ShadowMapManager#RAW_TARGET}'s own doc comment describes: two
  * pack-visible names for one texture, routed to two different sampler kinds by name alone. This is
  * the "structurally impossible to route the raw alias into the PCF path or vice versa" guarantee --
- * a GPU-free unit test can reach it directly now that it's a pure function, where previously only a
- * comment inside {@code FullscreenPassRunner.runFrame} guarded the same branch.
+ * a GPU-free unit test reaches it directly since {@code samplerKindFor} is a pure function.
  */
 class FullscreenPassRunnerSamplerKindTest {
     @Test

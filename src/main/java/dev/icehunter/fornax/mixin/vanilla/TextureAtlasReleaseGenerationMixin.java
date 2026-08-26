@@ -35,34 +35,29 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * {@link AtlasGenerationSchedule} needs before the freed VRAM is genuinely reclaimed, not before.
  *
  * <p>Every Fornax atlas subsystem hooked off this same {@code upload} method (the LabPBR sidecar
- * lanes, the paged block-atlas overflow layers, the sprite-bounds grid) used to publish the new
- * generation and only then close the old one -- documented as deliberate on {@link LabPbrAtlasPair}
- * ("the replacement is visible before the previous GPU objects are closed") and, for the overflow
- * layers, simply the unexamined default. That means every resource-pack switch had BOTH
- * generations of every one of these resident at once, on top of vanilla's own old+new base atlas
- * textures -- multiple gigabytes, unbounded by anything closing them any sooner. Three back-to-back
- * switches (a large pack, a different large pack, back to the first) accumulated past a 48 GB
- * machine's free memory and swap, crashing natively inside Metal's {@code setTexture} with no Java
- * exception at all (confirmed from the JVM's own {@code hs_err} dump: 11.5 GB physical free, swap
- * nearly exhausted, at the exact crash instant).
+ * lanes, the paged block-atlas overflow layers, the sprite-bounds grid) must close the old
+ * generation before the new one publishes, not after. Publish-then-close would leave BOTH
+ * generations of every one of these resident at once for a resource-pack switch, on top of
+ * vanilla's own old+new base atlas textures -- multiple gigabytes, unbounded by anything closing
+ * them any sooner, a native-crash-class VRAM risk across back-to-back switches.
  *
- * <p><b>Closing this earlier is not enough on its own.</b> A first version of this mixin closed
- * unconditionally here and let the new generation build immediately, at this same {@code upload}
- * RETURN -- but Blaze3D's own destroy ring only reclaims a closed texture's VRAM on the SECOND
+ * <p><b>Closing this earlier is not enough on its own.</b> Closing unconditionally here and letting
+ * the new generation build immediately, at this same {@code upload} RETURN, is still unsafe:
+ * Blaze3D's own destroy ring only reclaims a closed texture's VRAM on the SECOND
  * {@code VulkanCommandEncoder.submit()} after the close, and {@code submit()} runs once per real
- * rendered frame; {@code upload()} has zero of those in between. Old and new were still 100%
- * resident together the whole time. See {@link AtlasGenerationSchedule}'s own doc for the fix: this
- * mixin now only RELEASES here (still worth doing early -- it starts the destroy ring's clock as
- * soon as possible) and schedules the actual rebuild after three render-loop-separated polls, once
- * reclamation has genuinely had time to happen.
+ * rendered frame; {@code upload()} has zero of those in between, so old and new would still be
+ * 100% resident together the whole time. See {@link AtlasGenerationSchedule}'s own doc for the
+ * mechanism this mixin relies on: it only RELEASES here (still worth doing early -- it starts the
+ * destroy ring's clock as soon as possible) and schedules the actual rebuild after three
+ * render-loop-separated polls, once reclamation has genuinely had time to happen.
  *
  * <p><b>Only the part that changed.</b> The two lanes' own fingerprint-skip path (measured at
  * 14.6s/~24s combined on a 512x pack, meant to make an unchanged F3+T reload or shader-only F8 free)
- * used to be defeated by an earlier version of this mixin, which cleared the published pair
- * unconditionally on every reload -- by the time each listener's own
- * {@code existing != null && fingerprint.equals(...)} check ran, {@code existing} was always null.
- * This mixin now computes both fingerprints itself, the same way each listener already does
- * internally. An unchanged non-block atlas is a complete no-op. An unchanged block atlas retains
+ * depends on this mixin computing both fingerprints itself before touching anything, the same way
+ * each listener already does internally, rather than clearing the published pair unconditionally on
+ * every reload -- an unconditional clear would leave {@code existing} always null by the time each
+ * listener's own {@code existing != null && fingerprint.equals(...)} check runs, defeating the skip
+ * entirely. An unchanged non-block atlas is a complete no-op. An unchanged block atlas retains
  * its exact sidecar pair and animation state, but still retires and defers the albedo overflow
  * array and sprite grid because their bytes come from the vanilla atlas, not those fingerprints.
  *

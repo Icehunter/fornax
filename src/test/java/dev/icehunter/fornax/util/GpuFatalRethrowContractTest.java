@@ -71,7 +71,7 @@ class GpuFatalRethrowContractTest {
     @Test
     void frameGenPassRunIfEnabledRethrowsBeforeMarkingFailed() throws IOException {
         // run() records and submits real GPU work (the Vulkan copy-in plus the Metal interpolator
-        // encode); this catch used to swallow a fatal failure from either into the same soft
+        // encode); this catch must not swallow a fatal failure from either into the same soft
         // failed=true fallback as an ordinary bug.
         assertRethrowsBeforeMarker(FRAME_GEN_PASS, "\"runIfEnabled\"", 0);
     }
@@ -85,8 +85,7 @@ class GpuFatalRethrowContractTest {
     @Test
     void presentSeamPrepareRethrowsBeforeMarkingFrameGenerationFailed() throws IOException {
         // Wraps copyGeneratedInto plus the sky-fill/UI composites, all real GPU work on the shared
-        // render-thread queue -- the fourth present-seam catch in this file, previously the only
-        // one of the four missing the rethrow.
+        // render-thread queue -- the fourth present-seam catch in this file.
         assertRethrowsBeforeMarker(FRAME_GEN_PRESENTER, "\"present seam (prepare G)\"", 0);
     }
 

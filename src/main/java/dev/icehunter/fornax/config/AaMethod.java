@@ -44,9 +44,9 @@ public enum AaMethod {
      * METALFX needs the same inputs for the ML scaler and writes its output through the same
      * sceneHistory slot. When those resources are not being WRITTEN (shaders disabled, no pack, or a
      * transient resize/world-join rebuild window), the frame must render plain -- reaching the
-     * end-of-frame resolve anyway was live-caught as a hard crash under METALFX when they were
-     * absent, and as heavy vanilla ghosting when they were merely stale. "Not being written" is
-     * strictly weaker than "null": see {@code TemporalInputs}, which owns that distinction.
+     * end-of-frame resolve anyway causes a hard crash under METALFX when they are absent, and heavy
+     * vanilla ghosting when they are merely stale. "Not being written" is strictly weaker than
+     * "null": see {@code TemporalInputs}, which owns that distinction.
      *
      * <p>TAA/TAAU and METALFX both need these resources but do different things with them: TAA/TAAU
      * run the ENGINE's own temporal reconstruction/blend pass ({@code ReconstructPass}) over the

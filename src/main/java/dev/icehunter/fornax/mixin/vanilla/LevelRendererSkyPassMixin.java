@@ -31,14 +31,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * literally "this mixin cancelled the pass": the resolve shader paints exactly on that flag, so
  * the cancel/paint pair cannot drift apart no matter how these guards evolve.
  *
- * <p>Water Round C Task 4 originally also committed {@link SkyFrameState}'s camera-eye-in-water
- * flag ({@code u_WaterState.x}) from this same call site, unconditionally. The fix-wave finding-1
- * review caught the resulting gap: the Nether never calls {@code addSkyPass} at all (see the
- * paragraph above), so a camera that went underwater in the Overworld and then portalled into the
- * Nether kept the flag frozen until the next dimension that registers a sky pass. That commit
- * moved to {@code GlobalUniformsWriteMixin}, which computes the flag live every frame instead
- * (see its water-tail comment) -- this mixin's {@code addSkyPass} hook has nothing to do with
- * camera fluid state anymore.
+ * <p>{@link SkyFrameState}'s camera-eye-in-water flag ({@code u_WaterState.x}) is not committed
+ * from this call site: {@code addSkyPass} does not run in the Nether (see the paragraph above), so
+ * a value committed here would go stale for a camera that went underwater in the Overworld and
+ * then portalled into the Nether, frozen until the next dimension that registers a sky pass. That
+ * flag is computed live every frame in {@code GlobalUniformsWriteMixin} instead (see its
+ * water-tail comment); this mixin's {@code addSkyPass} hook has nothing to do with camera fluid
+ * state.
  */
 @Mixin(LevelRenderer.class)
 public abstract class LevelRendererSkyPassMixin {
@@ -54,12 +53,12 @@ public abstract class LevelRendererSkyPassMixin {
         boolean cancel = !vanillaWouldSkip
                 && sky.skybox == DimensionType.Skybox.OVERWORLD
                 && GraphRunner.packOwnsSky();
-        // The flag is committed unconditionally; only the cancellation itself is conditional. The
-        // sky's DATA no longer travels through here at all -- it used to ride the cancel branch of
-        // this very if/else, which meant a pack that did not paint its own sky read zero for sky
-        // colour, rain, sun angle and moon phase. It now comes from SkyProbe, read live every frame
-        // in every dimension; see that class for why, and for the two engine-side consumers that
-        // were quietly reading zeroes alongside the shader.
+        // The flag is committed unconditionally; only the cancellation itself is conditional. Sky
+        // DATA does not travel through here: routing it through the cancel branch would leave a
+        // pack that does not paint its own sky reading zero for sky colour, rain, sun angle and
+        // moon phase whenever this hook does not cancel. It comes from SkyProbe instead, read live
+        // every frame in every dimension; see that class for why, and for the two engine-side
+        // consumers that would otherwise read zeroes alongside the shader.
         SkyFrameState.commitSky(cancel);
         if (cancel) {
             ci.cancel();

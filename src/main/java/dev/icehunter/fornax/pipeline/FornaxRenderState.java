@@ -8,7 +8,7 @@ package dev.icehunter.fornax.pipeline;
  * {@code FornaxConfig.get().shadersEnabled} live means a settings apply flips the per-frame reads
  * instantly while pipelines stay compiled under the old state -- crashing {@code
  * RenderPass.setPipeline} with "color attachment count must match pipeline color target state
- * count" (live-caught twice: the renderer reload alone does NOT recompile pipelines, because
+ * count": the renderer reload alone does NOT recompile pipelines, because
  * {@code ShaderChunkRenderer.programs} is a process-wide static cache whose {@code delete()} is a
  * no-op -- javap-verified against sodium-fabric-0.9.0).
  *

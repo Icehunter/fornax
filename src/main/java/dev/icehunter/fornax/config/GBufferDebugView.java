@@ -55,7 +55,7 @@ public enum GBufferDebugView {
     // ^ RETIRED, retained only to hold ordinal 11 (see isSelectable). Its presentation path -- a
     // per-frame compute dispatch plus mapped readback, blitted over the native frame -- could wedge the
     // GPU, and on macOS a wedged GPU takes WindowServer down with it: a hard power-off, not a recoverable
-    // crash. Selecting it now does nothing; the call site in GameRendererMixin is gone. The class behind
+    // crash. Selecting it does nothing; GameRendererMixin has no call site for it. The class behind
     // it lives on because it also owns the voxel grid the sun-shadow path needs every frame.
     /**
      * The sun/moon shadow-map visibility factor as grayscale -- 0/black = fully shadowed, 1/white =
@@ -64,12 +64,12 @@ public enum GBufferDebugView {
      * Instrumentation for diagnosing shadow instability: shows the visibility mask itself, isolating
      * shadow-map sampling behavior from the lit composite.
      *
-     * <p>Formerly the filtered voxel-ray-traced shadow mask ({@code rtDirect}) before the
-     * ray-traced-shadow path was retired in favor of the sun/moon shadow map; the constant keeps its
-     * {@code RT_SHADOW} name (rather than renaming to {@code SUN_SHADOW}) because {@link
-     * FornaxConfig} persists {@link FornaxSettings#debugView} through Gson's default enum handling,
-     * which serializes/deserializes by {@link Enum#name()} with no fallback for unrecognized names --
-     * renaming would silently break this field on any {@code fornax.json} saved before the retirement.
+     * <p>The name refers to the voxel-ray-traced shadow mask ({@code rtDirect}) this ordinal no
+     * longer renders -- it shows the sun/moon shadow-map visibility factor instead -- and keeps the
+     * {@code RT_SHADOW} name (rather than {@code SUN_SHADOW}) because {@link FornaxConfig} persists
+     * {@link FornaxSettings#debugView} through Gson's default enum handling, which
+     * serializes/deserializes by {@link Enum#name()} with no fallback for unrecognized names:
+     * renaming would silently break this field on any existing {@code fornax.json}.
      */
     RT_SHADOW,
     /**
@@ -179,13 +179,11 @@ public enum GBufferDebugView {
      * {@code PLAGUE_ENV_SPECULAR} is currently compiled in. {@code tonemap.fsh} passes it through
      * untonemapped.
      *
-     * <p>REPLACES a first attempt (two separate raw-linear views, one per term) that could not
-     * answer the question: routed-around-the-grade raw linear renders anything in the 0.01-0.15
-     * range as visually black, so a few-percent-too-bright contribution and a correct one looked
-     * identical on screen. This packs the RATIO instead of relying on two absolute magnitudes being
-     * visually comparable, and pairs with {@link dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback}
-     * for an on-demand numeric crosshair readback -- exact numbers settle what no palette or
-     * side-by-side comparison could.
+     * <p>Packs the RATIO rather than two separate raw-linear views because raw linear values in the
+     * 0.01-0.15 range render as visually black, so a few-percent-too-bright contribution and a
+     * correct one would look identical on screen; pairs with {@link
+     * dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback} for an on-demand numeric crosshair
+     * readback -- exact numbers settle what no palette or side-by-side comparison can.
      * LabPBR decode audit instrumentation. INVALID OVER WATER: {@code
      * water_composite.fsh} runs after this branch and overwrites/blends water pixels with the real
      * composited reflection, with no debug-view awareness at all -- point the crosshair at opaque
@@ -310,21 +308,17 @@ public enum GBufferDebugView {
      */
     ENV_DECOMP_ALBEDO_IDENTITY_INPUTS,
     /**
-     * Water/underwater investigation round: item 4's horizon-closure regression fix was PREDICTED
-     * from the formula alone twice (transition width, then a noon/night visibility unification) and
-     * the artifact it predicted away persisted anyway -- this ordinal exists to MEASURE the actual
-     * applied values instead of re-deriving them from source a third time. Number carrier, same
-     * shape as {@link #ENV_SPEC_RATIO} through {@link #ENV_DECOMP_ALBEDO_IDENTITY_INPUTS}.
+     * Number carrier, same shape as {@link #ENV_SPEC_RATIO} through {@link
+     * #ENV_DECOMP_ALBEDO_IDENTITY_INPUTS}. Measures the underwater closure's actual applied values
+     * rather than re-deriving them from the formula.
      *
-     * <p><b>REPURPOSED.</b> The measurement this ordinal was built for succeeded and
-     * closed its own question: the artifact survived two predicted fixes because it was never a
-     * tuning problem. Keying the transition on {@code length(worldPos)} -- radial distance from a
-     * camera-relative origin -- made the {@code smoothstep}'s transition surface a SPHERE centred
-     * on the eye, and a sphere intersecting the view frustum draws exactly the curved,
-     * camera-following edge that was reported. Retuning near/far/width only slid that sphere in and
-     * out; it could never remove it. The closure is now {@code plagueGetWaterFog} (Beer-Lambert,
-     * asymptotic, no boundary anywhere by construction), which takes one scale instead of a
-     * near/far pair -- so two of the original four channels no longer exist.
+     * <p>The closure keys on {@code length(worldPos)} -- radial distance from a camera-relative
+     * origin -- which makes the {@code smoothstep}'s transition surface a SPHERE centred on the eye;
+     * a sphere intersecting the view frustum draws a curved, camera-following edge. Retuning
+     * near/far/width only slides that sphere in and out; it cannot remove the edge. The closure is
+     * {@code plagueGetWaterFog} (Beer-Lambert, asymptotic, no boundary anywhere by construction),
+     * which takes one scale instead of a near/far pair, so two of the original four channels no
+     * longer exist.
      *
      * <p>Channels now: R = {@code uwClosureScale} (the exponential's scale distance, blocks),
      * G = {@code uwClosureDist} ({@code length(worldPos)}, radial distance from the eye, blocks),
@@ -334,23 +328,21 @@ public enum GBufferDebugView {
      * -- none of R/G/B/A exist as values until the underwater closure block has run.
      *
      * <p>Gated on {@code fragSubmerged} (the eye is underwater, looking at opaque terrain/seabed),
-     * NOT on being a water surface -- unlike {@link #ENV_SPEC_RATIO} and its siblings, this reading
-     * IS valid at the exact framing under investigation. Point the crosshair at submerged seabed or
-     * terrain while the camera itself is underwater; reads all-zero (the branch's own explicit
-     * fallback) otherwise.
+     * not on being a water surface -- unlike {@link #ENV_SPEC_RATIO} and its siblings, this reading
+     * is valid at this framing. Point the crosshair at submerged seabed or terrain while the camera
+     * itself is underwater; reads all-zero (the branch's own explicit fallback) otherwise.
      */
     UW_CLOSURE_DEBUG,
     /**
-     * Shadow-wedge investigation, part 1 of 3 (with {@link #SHADOW_QUERY_2}, {@link
-     * #SHADOW_QUERY_3}) -- six independent theories for a large, elevation-periodic misshadowed
-     * region on solid terrain were each eliminated in turn (player-relative face culling, caster-
-     * list frustum margin, shadow bias collapse, sun/moon direction desync, texel density by
-     * distance, texel density by resolution) without explaining what's actually on screen. This
-     * triple reads the REAL {@code sunVisibility()} call's own internals at the crosshair instead of
-     * a further guess. R = {@code sunDir.x}, G = {@code sunDir.y}, B = {@code sunDir.z}, A = {@code
-     * ndotl} at this fragment. Resolve-branch ordinal 31 in {@code gbuffer_resolve.fsh}, same deep-
-     * placement/number-carrier shape as {@link #ENV_SPEC_RATIO}. Appended last per this enum's own
-     * lockstep rule.
+     * Shadow-wedge instrument, part 1 of 3 (with {@link #SHADOW_QUERY_2}, {@link
+     * #SHADOW_QUERY_3}). Reads the REAL {@code sunVisibility()} call's own internals at the
+     * crosshair directly, rather than reasoning indirectly about a large, elevation-periodic
+     * misshadowed region on solid terrain through player-relative face culling, caster-list frustum
+     * margin, shadow bias, sun/moon direction, or texel density by distance or resolution -- none of
+     * which explains what's actually on screen on its own. R = {@code sunDir.x}, G = {@code
+     * sunDir.y}, B = {@code sunDir.z}, A = {@code ndotl} at this fragment. Resolve-branch ordinal 31
+     * in {@code gbuffer_resolve.fsh}, same deep-placement/number-carrier shape as {@link
+     * #ENV_SPEC_RATIO}. Appended last per this enum's own lockstep rule.
      */
     SHADOW_QUERY_1,
     /**
@@ -371,19 +363,17 @@ public enum GBufferDebugView {
      * shape as {@link #SHADOW_QUERY_1}.
      */
     SHADOW_QUERY_3,
-    // ^ GLINT_QUERY_1-4 (ordinals 34-37) briefly lived here: a shadow-map-based instrument for
-    // water_composite.fsh's old glintShadowVis kill-switch. It did its job -- the numbers it
-    // surfaced (a real, valid, non-empty shadow-map depth recording the wrong surface) are what
-    // led to dropping the shadow map for the glint entirely in favour of glint_occlusion.fsh's
-    // screen-space raymarch. Removed rather than left dead: the shader branches that
-    // fed them no longer exist, so selecting them would silently do nothing. Safe to remove --
-    // they were the last four ordinals, appended after nothing, so no later ordinal shifts.
+    // ^ GLINT_QUERY_1-4 (ordinals 34-37) held a shadow-map-based instrument for
+    // water_composite.fsh's glintShadowVis kill-switch, superseded by glint_occlusion.fsh's
+    // screen-space raymarch. Removed rather than left dead: the shader branches that fed them no
+    // longer exist, so selecting them would silently do nothing. Safe to remove -- they were the
+    // last four ordinals, appended after nothing, so no later ordinal shifts.
     /**
-     * Reads {@code glint_occlusion.fsh}'s own real output directly -- sun glitter above water is
-     * confirmed correct, but moon glitter above water is confirmed still fully absent even fully
-     * unobstructed, and static tracing of every formula touching {@code lightDir.y} found nothing
-     * wrong. Rather than a further guess, this measures the pass's actual {@code lightDir} at the
-     * crosshair. Unlike every SHADOW_QUERY/former GLINT_QUERY ordinal, this needs NO debug branch
+     * Reads {@code glint_occlusion.fsh}'s own real output directly rather than reasoning about
+     * {@code lightDir.y} from the formulas: sun glitter above water reads correct, but moon glitter
+     * above water reads fully absent even fully unobstructed. This measures the pass's actual
+     * {@code lightDir} at the crosshair. Unlike every SHADOW_QUERY/former GLINT_QUERY ordinal, this
+     * needs NO debug branch
      * in the shader at all: {@code glint_occlusion.fsh}'s output target was widened to {@code
      * rgba16f} (from {@code r8}) so the pass can write {@code lightDir} into the unused {@code .gba}
      * channels UNCONDITIONALLY, every frame, real consumer only ever reading {@code .r}. R = the
@@ -392,17 +382,17 @@ public enum GBufferDebugView {
      * water texel (never actually sampled by the real consumer either); {@code (0, lightDir)} means
      * both celestial bodies are below the horizon -- a genuine zero, still carries the real computed
      * direction. Reads a DIFFERENT target ({@code glintOcclusion}) than every ordinal above it --
-     * see {@link dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback#targetFor}. No longer the
-     * last value: the underwater-glint quad appended after it.
+     * see {@link dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback#targetFor}. Not the last
+     * value: the underwater-glint quad follows it.
      */
     GLINT_OCCLUSION_QUERY,
     /**
-     * Underwater-glint investigation, part 1 of 4 (with {@link #UW_GLINT_2}, {@link #UW_GLINT_3},
-     * {@link #UW_GLINT_4}) -- the moon-direction fix confirmed sun glitter above water correct, but
-     * the underwater sun glint stayed fully absent even at the easiest possible geometry (sun at
-     * zenith, looking straight up), hand-verified by static tracing to have `uwSolarLobe` at its
-     * exact maximum (1.0) there -- so the alignment math itself is not the defect. This reads the
-     * real values of everything downstream of it instead of a further guess. R = {@code
+     * Underwater-glint instrument, part 1 of 4 (with {@link #UW_GLINT_2}, {@link #UW_GLINT_3},
+     * {@link #UW_GLINT_4}). Sun glitter above water reads correct; the underwater sun glint stays
+     * fully absent even at the easiest possible geometry (sun at zenith, looking straight up), where
+     * static tracing shows `uwSolarLobe` at its exact maximum (1.0) -- so the alignment math itself
+     * is not the defect. This reads the real values of everything downstream of it instead of a
+     * further guess. R = {@code
      * uwSunAlignment}, G = {@code uwSolarLobe}, B = {@code uwFresnel}. Written by {@code
      * water_composite.fsh}'s TRANSLUCENT blend pass, so A is always exactly 1.0 by construction --
      * three values per ordinal, not four, same shape as the retired GLINT_QUERY instrument. Reads
@@ -431,18 +421,17 @@ public enum GBufferDebugView {
      */
     UW_GLINT_4,
     /**
-     * Underwater-glint investigation, part 5 of 5 -- the instrument Stage 0 of the celestial rework
-     * decision calls for. The four-ordinal read above traced every failure back to one candidate
-     * cause: {@code dot(uwEyeRay, waveNormal)} going negative at the shaded fragment, which the
+     * Underwater-glint instrument, part 5 of 5 -- the instrument Stage 0 of the celestial rework
+     * decision calls for. Reads three raw inputs behind one candidate cause instead of a further
+     * inference: {@code dot(uwEyeRay, waveNormal)} going negative at the shaded fragment, which the
      * {@code clamp(...,0,1)} on {@code uwCosIncident} floors to 0 -- driving {@code uwFresnel} to
      * exactly 1.0 (measured) regardless of the true geometry, and implying the fragment under the
-     * crosshair is not the water surface overhead at all. This ordinal reads three raw inputs that
-     * argument rests on, instead of a further inference. R = {@code waveNormal.y}, G = {@code NdotV},
-     * B = {@code worldPos.y} -- this order matches {@code water_composite.fsh:308}'s actual write,
-     * {@code vec4(waveNormal.y, NdotV, worldPos.y, 1.0)}, NOT R/G/B channel-name order; the two
-     * differ, and a mismatched formatter here produces confident, plausible, wrong numbers rather
-     * than an error (caught once already -- see {@code EnvSpecularRatioReadback}'s formatter for the
-     * live channel-order pin). Reading negative {@code waveNormal.y} paired with positive {@code
+     * crosshair is not the water surface overhead at all. R = {@code waveNormal.y}, G = {@code
+     * NdotV}, B = {@code worldPos.y} -- this order matches {@code water_composite.fsh:308}'s actual
+     * write, {@code vec4(waveNormal.y, NdotV, worldPos.y, 1.0)}, NOT R/G/B channel-name order; the
+     * two differ, and a mismatched formatter here produces confident, plausible, wrong numbers
+     * rather than an error -- see {@code EnvSpecularRatioReadback}'s formatter for the live
+     * channel-order pin. Reading negative {@code waveNormal.y} paired with positive {@code
      * NdotV} means the normal is view-facing by construction, not evidence of a flipped/misoriented
      * surface; a negative {@code worldPos.y} means the shaded fragment sits at or below the camera,
      * not the surface above it -- the prime suspect for Bug C being the water surface's top face
@@ -481,10 +470,10 @@ public enum GBufferDebugView {
      * dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback}, same contract as {@link
      * #ENV_SPEC_RATIO}; shader id 68 ({@code DBG_CONDUCTOR_F0}, {@code gbuffer_resolve.fsh}).
      * The seven parts walk one pixel's specular chain end to end: decode, energy, mirror content,
-     * wide content, finished environment term, direct sun term, final HDR. They exist because
-     * three composition rounds in a row were verified against modelled scenes and each failed on
-     * the real frame; these read the real frame. Unlike the earlier instrument ordinals these ARE
-     * selectable, so the F9 cycle can reach them without a config edit.
+     * wide content, finished environment term, direct sun term, final HDR. They read the real frame
+     * because composition verified against modelled scenes does not reliably predict its behavior on
+     * the real frame. Unlike the earlier instrument ordinals these ARE selectable, so the F9 cycle
+     * can reach them without a config edit.
      */
     CONDUCTOR_F0,
     /** Part 2: R/G/B = {@code specularAlbedo} (split-sum + multi-scatter energy), A = {@code

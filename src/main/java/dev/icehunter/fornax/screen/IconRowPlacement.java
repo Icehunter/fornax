@@ -10,8 +10,8 @@ import org.jetbrains.annotations.Nullable;
  *
  * <p>Both the title screen and the pause screen carry such a row -- skin, language and accessibility
  * on one, bug report, feedback and the rest on the other -- and both are where a player already
- * looks for a control of this kind. Fornax's button used to sit in the top-right corner of each,
- * which is nowhere anybody checks.
+ * looks for a control of this kind, unlike the top-right corner of each screen, which is nowhere
+ * anybody checks.
  *
  * <p><b>The row is found, not written down.</b> Vanilla builds it with a centred layout whose
  * contents change between versions, so a hardcoded coordinate drifts off the row the moment that

@@ -116,10 +116,10 @@ public final class OptionAnnotation {
     private static Map<String, String> parseEnum(String body) {
         Map<String, String> out = new LinkedHashMap<>();
         if (body == null) return out;
-        // DECL's group captures the braces along with the entries. They must be stripped BEFORE
-        // entry matching: ENUM_ENTRY's lazy (\S+?) key otherwise swallows the opening brace into the
-        // FIRST key -- '{0="Off" ...}' parsed as key "{0", so value 0 lost its display name and
-        // rendered as a raw "0" in the settings UI (live-caught on the Reflections cycle).
+        // DECL's group captures the braces along with the entries. They must be stripped before
+        // entry matching, or ENUM_ENTRY's lazy (\S+?) key swallows the opening brace into the
+        // first key -- '{0="Off" ...}' parses as key "{0", losing value 0's display name and
+        // rendering a raw "0" in the settings UI.
         String entries = body.trim();
         if (entries.startsWith("{")) entries = entries.substring(1);
         if (entries.endsWith("}")) entries = entries.substring(0, entries.length() - 1);

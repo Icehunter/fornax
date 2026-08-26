@@ -30,13 +30,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * replaces clouds vanilla would actually have drawn this frame, never invents a cancellation
  * vanilla wouldn't have painted anyway.
  *
- * <p>2026-07-15 wind-clock-freeze fix: this mixin used to also commit the wind clock
- * (u_SkyState.w) from its own {@code gameTime}/{@code partialTick} parameters -- which meant the
- * clock only ever advanced on frames where THIS injection fired, i.e. never with clouds off (or
- * any frame {@code packOwnsClouds()} is false), freezing wave animation. {@code
- * GlobalUniformsWriteMixin} now computes the wind clock live every frame instead (see its own doc
- * comment), independent of whether this mixin -- or vanilla's clouds pass at all -- runs. This
- * mixin keeps its one remaining job: the did-cancel flag.
+ * <p>The wind clock (u_SkyState.w) is committed by {@code GlobalUniformsWriteMixin} every frame
+ * (see its own doc comment), independent of whether this mixin -- or vanilla's clouds pass at all
+ * -- runs. Committing it only from this injection instead would mean it advances only on frames
+ * where THIS injection fires, i.e. never with clouds off (or any frame {@code packOwnsClouds()} is
+ * false), freezing wave animation. This mixin's one job is the did-cancel flag.
  */
 @Mixin(LevelRenderer.class)
 public abstract class LevelRendererCloudsPassMixin {

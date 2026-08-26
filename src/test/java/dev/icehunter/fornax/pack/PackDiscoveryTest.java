@@ -90,12 +90,11 @@ class PackDiscoveryTest {
 
     @Test
     void discardingAPriorDiscoverySetWithoutClosingLeaksItsZipFileSystem(@TempDir Path gameDir) throws IOException {
-        // Pins the hazard behind ShaderPacksScreen.addOptions(): it used to reassign
-        // `this.discovered` on every re-init (e.g. a window resize rebuilds the same screen's
-        // widgets) without tearing down the previous set first. Losing the only reference to a
-        // DiscoveredPack whose zip FileSystem was never closed leaks that handle -- repeated
-        // enough times (repeated resizes with a zip pack present) this exhausts file handles.
-        // This is why addOptions() must teardownDiscovered(null) before every discover() call.
+        // Pins the hazard a re-init path (e.g. a window resize rebuilding the same screen's widgets)
+        // must guard against: reassigning `this.discovered` without tearing down the previous set
+        // first. Losing the only reference to a DiscoveredPack whose zip FileSystem was never closed
+        // leaks that handle -- repeated enough times (repeated resizes with a zip pack present) this
+        // exhausts file handles.
         Path shaderpacks = gameDir.resolve("shaderpacks");
         Files.createDirectories(shaderpacks);
         writeFolderPack(gameDir.resolve("source"));

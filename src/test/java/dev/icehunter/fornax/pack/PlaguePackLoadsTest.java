@@ -460,8 +460,9 @@ class PlaguePackLoadsTest {
         // the mixin never cancels and vanilla keeps its own precipitation -- which is the outcome the
         // pack now wants: vanilla's weather is per-COLUMN, standing still in the world as the player
         // walks through it and mixing snow and rain across one frame, and a camera-centred pack pass
-        // can do neither. This assertion used to require the declaration; that was written when a
-        // pack replacement existed and became wrong the day it was removed.
+        // can do neither. This assertion must not require the declaration: Plague ships no pack
+        // replacement for vanilla precipitation, so requiring it would fail against the pack's own
+        // legitimate current state.
         //
         // The half worth keeping is the DANGEROUS direction, below: cancelling vanilla's weather
         // without shipping something to draw in its place removes precipitation from the game and
@@ -512,15 +513,13 @@ class PlaguePackLoadsTest {
         assertEquals("1", pack.options().get("PACK_RAIN_IMPACTS").defaultValue());
     }
 
-    // A cross-repo test used to live here, plagueSnowFieldMatchesThePrecipClipmapWindow, pinning
-    // Plague's snow field extent and anchor snap against PrecipClipmapBuffer.GRID/ANCHOR_SNAP. It
-    // went with the snow accumulation compute pass it was describing. Nothing in Plague reads
-    // precipClipmap any more, so there is no second half of that contract left to disagree with.
+    // No cross-repo test pins Plague's snow field extent and anchor snap against
+    // PrecipClipmapBuffer.GRID/ANCHOR_SNAP: nothing in Plague reads precipClipmap, so there is no
+    // second half of that contract to disagree with.
     //
-    // Note the shape it was written in, because it is worth reusing and not worth rediscovering: it
-    // read the pack's constant out of the SHADER SOURCE. An engine constant cannot enforce anything
-    // about a number written in a pack's GLSL, and a test spanning both repos is the only place the
-    // two are visible at once.
+    // A future test needing that shape should read the pack's constant out of the SHADER SOURCE:
+    // an engine constant cannot enforce anything about a number written in a pack's GLSL, and a test
+    // spanning both repos is the only place the two are visible at once.
 
     /**
      * "Fast" reflections must actually be faster than "Fancy", and faster by RESOLUTION.

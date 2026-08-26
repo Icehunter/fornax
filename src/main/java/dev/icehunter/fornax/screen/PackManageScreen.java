@@ -44,10 +44,10 @@ public final class PackManageScreen {
 
         // One native YACL category per `[yacl] pages` entry, all bound into the one shared session.
         //
-        // There used to be a "Manage" category first, holding a single row that opened the legacy
-        // PackSettingsScreen. Both are gone. A pack's settings are its `[yacl] pages` and nothing
-        // else, so there is one place to look rather than two, and a row labelled "Shader Options..."
-        // inside a screen already reached through "Shader Options..." is not a route anyone needs.
+        // A pack's settings are its `[yacl] pages` and nothing else, so there is one place to look
+        // rather than two: no separate "Manage" category routing to a legacy settings screen, since a
+        // row labelled "Shader Options..." inside a screen already reached through "Shader
+        // Options..." is not a route anyone needs.
         List<Supplier<ConfigCategory>> categories = new ArrayList<>();
         for (String pageId : pack.screens().yaclPages()) {
             ScreenSpec page = pack.screens().screens().get(pageId);

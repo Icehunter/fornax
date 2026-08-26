@@ -431,9 +431,8 @@ class GraphRunnerTest {
     // direction (u_SkyCelestial.xyz, populated per globals.glsl as "xyz = TRUE sun direction
     // (moon = -xyz)"), which stays negative once the sun is below the horizon.
     //
-    // That source used to be SkyFrameState, whose sun direction was only populated for packs that
-    // cancel vanilla's sky -- for every other pack this branch wrote a zero vector and the clamp
-    // gated sun bounce off at all hours, turning the fix itself into a permanent off switch.
+    // SkyFrameState's sun direction is populated only for packs that cancel vanilla's sky, so it
+    // cannot be this source for every other pack without gating sun bounce off at all hours.
     // SkyProbe.read() dereferences Minecraft.getInstance(), so applyEmitterSunDirection takes the
     // resolved vector as arguments; these tests drive it through SkyProbe's pure sun-direction
     // functions, the same conversion computeParams uses at runtime, without needing a live client.

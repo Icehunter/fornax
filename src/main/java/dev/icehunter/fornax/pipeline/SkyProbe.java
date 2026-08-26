@@ -11,38 +11,34 @@ import net.minecraft.world.level.MoonPhase;
  * {@link EnvironmentAttributeProbe} every frame, in every dimension, with no dependence on which
  * render passes fired.
  *
- * <p><b>Why this class exists.</b> These values used to reach the shader through
- * {@link SkyFrameState}, committed by {@code LevelRendererSkyPassMixin}'s {@code addSkyPass}
- * injection -- but only down the branch that CANCELS vanilla's sky, which requires
- * {@code GraphRunner.packOwnsSky()} (the pack's {@code SKY_PROCEDURAL} compile option). Every other
- * pack took {@code commitInactive()} instead, which zero-fills the lot. So a pack that did not paint
- * its own sky could not read the sky's colour, the rain level, the sun angle, or the moon phase --
- * the engine was withholding DATA because of a STYLING decision (who draws the sky). Iris/OptiFine
- * hand every pack {@code skyColor}/{@code rainStrength}/{@code sunAngle} regardless of whether the
- * pack draws sky, and Fornax is a data-exposure layer before it is a host for any one pack, so it
- * does the same.
+ * <p><b>Why this class exists.</b> Sky DATA must never gate behind a STYLING decision (who draws the
+ * sky): reading it through a call site that only commits down the branch that CANCELS vanilla's sky
+ * ({@code GraphRunner.packOwnsSky()}, the pack's {@code SKY_PROCEDURAL} compile option) would leave
+ * every other pack unable to read the sky's colour, the rain level, the sun angle, or the moon
+ * phase. Iris/OptiFine hand every pack {@code skyColor}/{@code rainStrength}/{@code sunAngle}
+ * regardless of whether the pack draws sky, and Fornax is a data-exposure layer before it is a host
+ * for any one pack, so it does the same.
  *
- * <p>Three consumers were reading zeroes because of that gate, none of them loudly:
+ * <p>Three consumers depend on this not being gated:
  * <ul>
  *   <li>{@code u_SkyColor}/{@code u_SkyState.x} in {@code u_Globals} -- a pack's ambient light
- *       colour and every rain-driven term. A zero vector is a plausible colour, so this failed as
- *       "the ambient looks wrong" rather than as an error.</li>
+ *       colour and every rain-driven term. A zero vector is a plausible colour, so a gated read
+ *       fails as "the ambient looks wrong" rather than as an error.</li>
  *   <li>{@code GraphRunner.applyEmitterSunDirection} -- {@code light_inject.comp}'s
  *       {@code GI_SUN_BOUNCE} term gates on {@code clamp(sunDir.y, 0, 1)}, so a zero vector
- *       silently disabled indirect sun bounce entirely for those packs.</li>
- *   <li>{@code CelestialSprites.moonPhaseRect} -- pinned to phase 0 (full moon) forever.</li>
+ *       silently disables indirect sun bounce entirely for those packs.</li>
+ *   <li>{@code CelestialSprites.moonPhaseRect} -- would pin to phase 0 (full moon) forever.</li>
  * </ul>
  *
- * <p><b>Why live rather than a frame-state holder.</b> This is the third application of a pattern
- * this codebase has already landed twice, both times as fixes for the identical bug class -- a lane
- * fed by a conditionally-invoked pass mixin going stale or stuck. The wind clock
- * ({@code u_SkyState.w}) froze whenever {@code addCloudsPass} did not run, and the eye-in-water flag
- * ({@code u_WaterState.x}) stuck for a whole Nether visit because {@code addSkyPass} is never called
- * in {@code SkyType.NONE} dimensions. Both moved to a live read inside
- * {@code GlobalUniformsWriteMixin}, which runs exactly once per frame in every dimension. The sky
- * probe data has the same shape and the same cure. {@link SunDirection} already reads
- * {@code EnvironmentAttributes.SUN_ANGLE} off this same probe this same way, which is why
- * {@code u_PassParams.u_SunDirection} kept working for every pack while the sky tail did not.
+ * <p><b>Why live rather than a frame-state holder.</b> A lane fed by a conditionally-invoked pass
+ * mixin goes stale or stuck on exactly the frames that mixin does not run: a wind-clock-shaped lane
+ * committed only from {@code addCloudsPass} freezes whenever that call does not run, and an
+ * eye-in-water-shaped lane committed only from {@code addSkyPass} sticks for an entire visit to any
+ * {@code SkyType.NONE} dimension, since that call never fires there. A live read inside
+ * {@code GlobalUniformsWriteMixin}, which runs exactly once per frame in every dimension, has no such
+ * gap. {@link SunDirection} already reads {@code EnvironmentAttributes.SUN_ANGLE} off this same
+ * probe this same way, which is why {@code u_PassParams.u_SunDirection} works for every pack
+ * regardless of which passes fire.
  *
  * <p><b>What stays gated.</b> {@link SkyFrameState} keeps exactly the two did-cancel flags
  * ({@code u_SkyColor.w}, {@code u_SkyState.z}). Those are not data about the world -- they are the

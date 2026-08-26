@@ -95,13 +95,13 @@ public class ParticleGroupDeferralContractTest {
     /**
      * The two arms live in DIFFERENT tables, and which table each is in IS the contract.
      *
-     * <p>{@code TRANSLUCENT_PARTICLE} used to sit in {@link GeometryPipelineMap} on the argument that
-     * an unmapped pipeline inside a deferred group would bind a one-colour-target pipeline into a
-     * five-attachment pass. That argument was checked before the move and is unreachable:
+     * <p>{@code TRANSLUCENT_PARTICLE} does not sit in {@link GeometryPipelineMap}: an unmapped
+     * pipeline inside a deferred group would otherwise bind a one-colour-target pipeline into a
+     * five-attachment pass. That concern is unreachable in practice:
      * {@code QuadParticleDeferredMixin}'s head gate walks every layer and returns
      * {@code ParticleGroupRoute.VANILLA} the moment {@code slotOf()} is null, so an unmapped layer
-     * rewrites no pass and binds no variant. The mixed-group case is therefore strictly safer after
-     * the move than before it.
+     * rewrites no pass and binds no variant. The mixed-group case is therefore safe regardless of
+     * whether the pipeline is mapped.
      */
     @Test
     void theTwoArmsResolveThroughTheTwoDIFFERENTTables() {

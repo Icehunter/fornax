@@ -73,17 +73,16 @@ public final class ShadowCamera {
      * before 2026-08-19 the radius was a fixed literal and the centre texel silently halved or
      * doubled with the map size instead.
      *
-     * <p>Real domains, since prior rounds have reasoned from a stale one and derived the wrong
-     * bias: Plague ships {@code [16..512]} (default 128) for the distance and
-     * {@code [1024 2048 4096]} for the resolution.
+     * <p>Real domains, since a stale one derives the wrong bias: Plague ships {@code [16..512]}
+     * (default 128) for the distance and {@code [1024 2048 4096]} for the resolution.
      *
      * <p><b>Floored at 0, not left to go negative.</b> Below {@code shadowDistance = R} the raw
      * formula goes negative, and for {@code bias < 0}, {@link #distortFactor} is a DECREASING
      * function of {@code lVertexPos} that crosses exactly zero (and then flips sign) once {@code
      * lVertexPos} exceeds {@code (bias-1)/bias} -- reachable in practice, since {@code
      * ShadowCasterLists} deliberately submits casters far outside the camera-relative ortho XY box
-     * (see {@link #depthHalfExtent}'s own doc on why a tight XZ floor was reverted) and {@code
-     * shadow.vsh}'s divide runs BEFORE clipping. Plague's step-16 slider reaches exactly one such
+     * ({@link #depthHalfExtent} floors generously rather than tightly, for exactly this reason) and
+     * {@code shadow.vsh}'s divide runs BEFORE clipping. Plague's step-16 slider reaches exactly one such
      * value at the 2048 default, D=16 (bias -0.6, zero-crossing at radius 2.667); the observed
      * failure mode there is not a crash but silently mirrored/exploded shadow geometry, which
      * reads as "shadows are broken at short distance" with no error of any kind.
@@ -144,8 +143,8 @@ public final class ShadowCamera {
      *
      * <p>{@code ShadowCameraTest.shadowDistanceOptionRemainsInBlocks} pins the identity, so a
      * conversion reintroduced INSIDE this method is caught. One reintroduced upstream at a read
-     * site is not; the end-to-end check that would catch it (reading {@code blocksPerTexel} back
-     * off the ortho matrix {@link #compute} produces) no longer exists.
+     * site is not; there is no end-to-end check that would catch it (reading {@code blocksPerTexel}
+     * back off the ortho matrix {@link #compute} produces).
      */
     public static float shadowDistanceOptionBlocks(float optionValue) {
         return optionValue;

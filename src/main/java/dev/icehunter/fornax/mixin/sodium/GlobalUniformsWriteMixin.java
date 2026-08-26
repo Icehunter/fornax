@@ -44,21 +44,17 @@ import java.nio.ByteBuffer;
  * weather/camera-motion tails, and finally the four-vec4 generic local-actor ABI) to Sodium's
  * per-frame terrain uniform block.
  *
- * <p>Home history: through Sodium 0.9.0 the official std140 chain lived inline in {@code
- * UniformBufferManager.update(...)} and this append was a {@code @WrapOperation} there (see
- * {@code UniformBufferManagerMixin}, which still carries the 256->608 size widening plus the PBR
- * settings buffer). Sodium 0.9.1 moved the chain verbatim into the {@code GlobalUniforms} record's
- * {@code write(ByteBuffer)} ({@code DynamicUniformStorage.DynamicUniform} contract) -- the append
- * moves with it, wrapping the same terminal {@code Std140Builder.get()} invocation so the extra
+ * <p>Wraps the terminal {@code Std140Builder.get()} invocation inside {@code GlobalUniforms}'s
+ * {@code write(ByteBuffer)} ({@code DynamicUniformStorage.DynamicUniform} contract) so the extra
  * fields land on the same builder instance immediately after the official
  * {@code ...putFloat(fadeInFactor).putInt(useRgbaTextureFiltering)} writes, with zero re-statement
- * of the official fields (no drift risk on upstream changes).
+ * of the official fields (no drift risk on upstream changes). See {@code UniformBufferManagerMixin}
+ * for the paired 256->608 {@code DynamicUniformStorage} size widening and the separate PBR
+ * settings buffer it carries.
  *
- * <p>The old wrapper read the main-camera matrices from {@code update(...)}'s {@code
- * ChunkRenderMatrices} parameter via {@code @Local}; the record carries the same two matrices as
- * its own {@code projection}/{@code modelView} components, shadowed here for the
- * {@code u_InvProjModelView} product. All ordering guarantees documented on the old wrapper hold
- * unchanged: {@code update(...)} constructs+writes this record exactly once per frame (the
+ * <p>The record carries the two main-camera matrices as its own {@code projection}/{@code
+ * modelView} components, shadowed here for the {@code u_InvProjModelView} product.
+ * {@code update(...)} constructs+writes this record exactly once per frame (the
  * {@code hasUpdatedThisFrame} guard), and that single write is the one every terrain draw reads
  * back -- see SodiumWorldRendererOrchestrationMixin's "Matrix delivery" doc for why it always
  * carries the MAIN camera's matrices, never the shadow light's.
@@ -81,9 +77,9 @@ import java.nio.ByteBuffer;
 public class GlobalUniformsWriteMixin {
     // State for the u_WaterState.z filter -- static because Sodium constructs a fresh GlobalUniforms
     // record per frame; the filter must outlive the record. The level identity guards against the
-    // state outliving the WORLD (review catch): log out submerged and back in submerged, or change
-    // dimension submerged, and without it the filter would lerp from the previous world's surface
-    // altitude for a third of a second.
+    // state outliving the WORLD: log out submerged and back in submerged, or change dimension
+    // submerged, and without it the filter would lerp from the previous world's surface altitude
+    // for a third of a second.
     @Unique
     private static final WaterSurfaceTracker fornax$waterSurface = new WaterSurfaceTracker();
     @Unique
@@ -110,7 +106,7 @@ public class GlobalUniformsWriteMixin {
         // Jitter sequence advances unconditionally; only the UPLOADED uniform is gated. When the
         // active AA method doesn't bake jitter into gl_Position (OFF/SSAA), uploading the real
         // nonzero offsets would give terrain.vsh's motion-vector math a phantom frame-oscillating
-        // term on a stationary camera -- upload (0,0) instead. Same gate as the pre-0.9.1 wrapper.
+        // term on a stationary camera -- upload (0,0) instead.
         boolean wantsJitter = FornaxConfig.get().aaMethod.wantsJitter();
         float currentJitterX = wantsJitter ? currentJitter.x() : 0.0f;
         float currentJitterY = wantsJitter ? currentJitter.y() : 0.0f;
@@ -138,12 +134,13 @@ public class GlobalUniformsWriteMixin {
         // Sky tail (bytes 496..560): the sky's DATA, read live from the camera's environment
         // attribute probe right here (SkyProbe) -- the third application of the same live-read
         // pattern the wind clock and eye-in-water flag below already use, and for the same reason.
-        // These lanes used to come from SkyFrameState, committed by LevelRendererSkyPassMixin, but
-        // only down the branch that CANCELS vanilla's sky -- which requires the pack's
-        // SKY_PROCEDURAL option, so every other pack read zeroes for sky colour, rain, sun angle
-        // and moon phase. A zero vec3 is a plausible colour, so that failed as "the ambient looks
-        // wrong" rather than as an error. See SkyProbe for the full rationale, vanilla-parity
-        // notes, and the two engine-side consumers that were starved by the same gate.
+        // GlobalUniforms.write(...) runs exactly once per frame in EVERY dimension regardless of
+        // which passes fire, so a live read here has no pass-gating gap to work around: a holder
+        // committed only down the branch that CANCELS vanilla's sky (which requires the pack's
+        // SKY_PROCEDURAL option) would leave every other pack reading zeroes for sky colour, rain,
+        // sun angle and moon phase, and a zero vec3 is a plausible colour, so that reads as "the
+        // ambient looks wrong" rather than as an error. See SkyProbe for the full rationale and
+        // vanilla-parity notes.
         //
         // The two DID-CANCEL flags still come from SkyFrameState and still should: they record a
         // decision this engine made this frame, not a fact about the world. u_SkyColor.w is
@@ -154,23 +151,22 @@ public class GlobalUniformsWriteMixin {
         builder.putVec4(sky.skyR(), sky.skyG(), sky.skyB(), SkyFrameState.skyboxFlag());
         builder.putVec4(sky.sunriseR(), sky.sunriseG(), sky.sunriseB(), sky.starBrightness());
         builder.putVec4(sky.sunDirX(), sky.sunDirY(), sky.sunDirZ(), sky.moonPhase());
-        // w = wind clock (2026-07-15 wind-clock-freeze fix): computed LIVE here instead of read
-        // from SkyFrameState, for the exact same reason the u_WaterState.x eye-in-water flag below
-        // is computed live rather than read from a frame-state holder committed by a conditionally
-        // -invoked pass mixin. The old shape (SkyFrameState.commitClouds(cancelled, windClock),
-        // called only from LevelRendererCloudsPassMixin's addCloudsPass HEAD injection) meant this
-        // lane only ever advanced on frames where THAT injection fired -- which requires BOTH
-        // GraphRunner.packOwnsClouds() true AND vanilla's own addCloudsPass to run at all (vanilla
-        // skips addCloudsPass entirely whenever CloudStatus.OFF or the cloud color's alpha is 0,
-        // see renderClouds). Disabling clouds therefore hard-froze this lane at the 0
-        // SkyFrameState's own per-frame reset put it at, stalling
-        // terrain.fsh/water_composite.fsh's `waveClock = u_SkyState.w / 20.0` and freezing wave
-        // animation entirely. GlobalUniforms.write(...) runs exactly once per frame in EVERY
-        // dimension regardless of cloud settings (this class's own javadoc), so computing the
-        // clock live right here removes the dependency on addCloudsPass firing at all --
+        // w = wind clock: computed LIVE here instead of read from SkyFrameState, for the exact
+        // same reason the u_WaterState.x eye-in-water flag below is computed live rather than read
+        // from a frame-state holder committed by a conditionally-invoked pass mixin. A holder
+        // committed only from LevelRendererCloudsPassMixin's addCloudsPass HEAD injection
+        // (SkyFrameState.commitClouds(cancelled, windClock)) would only advance on frames where
+        // that injection fires -- which requires BOTH GraphRunner.packOwnsClouds() true AND
+        // vanilla's own addCloudsPass to run at all (vanilla skips addCloudsPass entirely whenever
+        // CloudStatus.OFF or the cloud color's alpha is 0, see renderClouds), so disabling clouds
+        // would freeze the lane at whatever SkyFrameState's own per-frame reset puts it at,
+        // stalling terrain.fsh/water_composite.fsh's `waveClock = u_SkyState.w / 20.0` and
+        // freezing wave animation entirely. GlobalUniforms.write(...) runs exactly once per frame
+        // in EVERY dimension regardless of cloud settings (this class's own javadoc), so computing
+        // the clock live right here has no dependency on addCloudsPass firing at all --
         // LevelRendererCloudsPassMixin still calls SkyFrameState.commitClouds() for the did-cancel
-        // flag alone (u_SkyState.z), and both the pack's clouds march and this uniform now agree
-        // on the same live clock, so cloud wind and wave wind never diverge when both run.
+        // flag alone (u_SkyState.z), and both the pack's clouds march and this uniform read the
+        // same live clock, so cloud wind and wave wind never diverge when both run.
         long windClockTicks = Minecraft.getInstance().level.getGameTime();
         float windClockPartialTick = Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false);
         // Wraps at 2^20 ticks: float precision holds exact integers to 2^24, and the wrap (once
@@ -182,14 +178,14 @@ public class GlobalUniformsWriteMixin {
         builder.putVec4(sky.rainLevel(), sky.sunAngleRadians(),
                 SkyFrameState.cloudsFlag(), windClock);
 
-        // Water tail (bytes 560..576, Water Round C Task 4, fix wave finding 1): x = 1.0 iff the
-        // camera eye is in water THIS frame, computed live right here instead of read from a
-        // frame-state holder committed earlier by a sky-pass mixin -- that earlier shape (see git
-        // history: SkyFrameState.commitEyeInWater, called from LevelRendererSkyPassMixin's
-        // addSkyPass HEAD injection) went stale for the whole Nether visit, since addSkyPass is
-        // never called in SkyType.NONE dimensions: a player who entered the Nether while
-        // submerged kept the flag frozen at whatever it was on the last Overworld frame.
-        // GlobalUniforms.write(...) runs exactly once per frame in EVERY dimension (the
+        // Water tail (bytes 560..576, Water Round C Task 4): x = 1.0 iff the camera eye is in
+        // water THIS frame, computed live right here instead of read from a frame-state holder
+        // committed by a sky-pass mixin -- a holder committed from LevelRendererSkyPassMixin's
+        // addSkyPass HEAD injection (SkyFrameState.commitEyeInWater) would go stale for the whole
+        // Nether visit, since addSkyPass is never called in SkyType.NONE dimensions: a player who
+        // enters the Nether while submerged would keep the flag frozen at whatever it was on the
+        // last Overworld frame. GlobalUniforms.write(...) runs exactly once per frame in EVERY
+        // dimension (the
         // hasUpdatedThisFrame guard this class's javadoc already documents), so reading the live
         // camera state right here has no such gap. Minecraft.getInstance().gameRenderer
         // .mainCamera().getFluidInCamera() is the EXACT same call GameRenderer itself uses to
@@ -222,19 +218,18 @@ public class GlobalUniformsWriteMixin {
         // of quantized to vanilla's integer sky-light levels (the proxy it replaces stepped
         // brightness per block while descending and read any roof as abyssal depth).
         //
-        // TOPMOST water in the bounded column, not the first non-water block. The first version
-        // stopped at the first non-water block, which reads a two-block ledge overhead as "the
-        // surface": swimming out from under any overhang, arch or monument wall then snapped the
-        // whole frame's darkening 5-15x in ONE frame (adversarial review, measured through the
-        // pack's own curve) -- the exact stepping complaint the lane exists to fix. Scanning the
-        // whole bound and keeping the TOPMOST water passes through SUBMERGED overhangs (there is
+        // TOPMOST water in the bounded column, not the first non-water block: the first non-water
+        // block reads a two-block ledge overhead as "the surface", so swimming out from under any
+        // overhang, arch or monument wall would snap the whole frame's darkening 5-15x in ONE
+        // frame -- the exact stepping complaint the lane exists to fix. Scanning the whole bound
+        // and keeping the TOPMOST water passes through SUBMERGED overhangs (there is
         // still water further up the same column, so the raw altitude is still the real surface)
         // and waterlogged blocks; the constant 96-lookup cost while submerged is one chunk column.
         //
         // A column capped by LAND rather than more water is a different case the topmost-water scan
         // cannot distinguish on its own: under a shore, a hill or a monument wall there is no water
-        // above the roof at all, so the raw altitude collapses to the underside of that roof --
-        // reported bug: caustics visibly SLIDE DOWN FROM THE TOP over about a third of a second while
+        // above the roof at all, so the raw altitude collapses to the underside of that roof, and
+        // caustics would visibly SLIDE DOWN FROM THE TOP over about a third of a second while
         // swimming under an overhang, because the filter below eases toward that collapsed altitude
         // exactly like it would ease toward a real surface. WaterSurfaceTracker tells the two apart
         // by whether the sky is reachable directly above the raw altitude, and holds the last
@@ -330,9 +325,10 @@ public class GlobalUniformsWriteMixin {
         //
         // CAMERA-local ON PURPOSE, which is the opposite of the call made for wetness, and the two
         // are not in tension. Wetness is a property of a SURFACE -- has rain soaked THAT block --
-        // so a camera-local gate there dried a savanna beach whenever the player stood on the ocean
-        // beside it, and it was replaced by the per-block flag riding a_Normal.w (see
-        // MaterialIdContext.setPrecipitation). Precipitation you watch FALL is a different question:
+        // so a camera-local gate there would dry a savanna beach whenever the player stood on the
+        // ocean beside it; the per-block flag riding a_Normal.w (see
+        // MaterialIdContext.setPrecipitation) is what wetness uses instead. Precipitation you watch
+        // FALL is a different question:
         // it is weather in the air around the eye, vanilla itself only ever draws it in a radius
         // about the camera, and a pack's full-screen pass has no per-column biome data to consult
         // even if it wanted to. Both lanes exist, they answer different questions, neither replaces
@@ -401,7 +397,7 @@ public class GlobalUniformsWriteMixin {
         int cameraBlockLightRaw = Minecraft.getInstance().level.getBrightness(LightLayer.BLOCK,
                 Minecraft.getInstance().gameRenderer.mainCamera().blockPosition());
         float thunder = Minecraft.getInstance().level.getThunderLevel(1.0f);
-        // The w lane, previously reserved, now carries surface wetness -- the accumulated state that
+        // The w lane carries surface wetness -- the accumulated state that
         // rain level cannot express on its own (see WetnessAccumulator and globals.glsl's lane doc).
         // Stepped here rather than on a tick, because it must advance with real elapsed time for the
         // ramp to be frame-rate independent; the accumulator clamps a stall's oversized delta itself.
@@ -411,10 +407,10 @@ public class GlobalUniformsWriteMixin {
         // gates this ramp on "that block's type is RAIN" and gets the right answer on both sides of
         // a shoreline and of a snowline.
         //
-        // A camera-local gate lived here briefly and is deliberately gone: it dried a savanna beach
-        // whenever the player stood on the ocean beside it, and gating in both places would dry a
-        // border from either side. The type exists because a pack that reached for u_CameraSkyLight.y
-        // to answer "is it SNOWING here" made the identical mistake one layer up.
+        // The gate stays per-block rather than camera-local: a camera-local gate would dry a
+        // savanna beach whenever the player stood on the ocean beside it, and gating in both places
+        // would dry a border from either side. The type exists so a pack does not reach for
+        // u_CameraSkyLight.y to answer "is it SNOWING here" and make the same mistake one layer up.
         builder.putVec4(CameraJitter.frameCounter(), cameraBlockLightRaw / 15.0f, thunder,
                 WetnessState.step(sky.rainLevel()));
 

@@ -62,10 +62,10 @@ public final class TargetRegistry implements AutoCloseable {
      * references the old resource; destroying it before that rewrite has happened -- and been
      * committed via that pass's own next submit -- is a use-after-free from the DRIVER's bookkeeping
      * perspective even though the GPU has stopped executing against it. This is the mechanism behind
-     * a live SIGSEGV in {@code AGXG17XFamilyResidencySet
-     * -[_commitAddedAllocations:count:removedAllocations:count:]} -- 8 identical native crash
-     * stacks, several occurring even after an earlier wait-idle-only fix, proving the idle wait
-     * alone does not close this.
+     * a SIGSEGV in {@code AGXG17XFamilyResidencySet
+     * -[_commitAddedAllocations:count:removedAllocations:count:]}: a wait-idle alone does not
+     * prevent it, since waiting for the GPU to finish executing says nothing about a descriptor
+     * set that has not yet rewritten away from the old handle.
      *
      * <p>Each element is one "generation" -- everything retired between two consecutive {@link
      * #advanceRetirementRing} calls, which runs exactly once per frame (from {@link #ensureSize},
@@ -441,15 +441,13 @@ public final class TargetRegistry implements AutoCloseable {
 
                 if (existing != null) {
                     // Retire the OLD buffer instead of destroying it here -- see #retiring's own doc.
-                    // A plain wait-idle before the destroy (the original fix, commit 50d8eca) only
-                    // proves the GPU finished EXECUTING against it; it says nothing about
-                    // ComputePassRunner's own persistent VkDescriptorSets, allocated once and
-                    // re-pointed at the CURRENT handle via vkUpdateDescriptorSets every run() call
-                    // instead of being recreated -- a set that hasn't run (and committed) since this
-                    // resize still structurally references the old handle in MoltenVK's own residency
-                    // bookkeeping, and three of the eight live SIGSEGVs in
-                    // AGXG17XFamilyResidencySet._commitAddedAllocations:...removedAllocations:...
-                    // happened AFTER that wait-idle-only fix shipped -- proof it doesn't close this.
+                    // A wait-idle before the destroy only proves the GPU finished EXECUTING against
+                    // it; it says nothing about ComputePassRunner's own persistent VkDescriptorSets,
+                    // allocated once and re-pointed at the CURRENT handle via vkUpdateDescriptorSets
+                    // every run() call instead of being recreated -- a set that hasn't run (and
+                    // committed) since this resize still structurally references the old handle in
+                    // MoltenVK's own residency bookkeeping, the same mechanism behind SIGSEGVs in
+                    // AGXG17XFamilyResidencySet._commitAddedAllocations:...removedAllocations:....
                     // Capture the OLD handles by value now: existing.reassign() below overwrites them
                     // in place on the SAME BufferInstance object every registry.getBuffer(name) caller
                     // already holds a reference to, so the retired closure must not read them back off
@@ -522,13 +520,13 @@ public final class TargetRegistry implements AutoCloseable {
             synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
                 try (VulkanComputeBackend backend = VulkanComputeBackend.tryCreate()) {
                     if (backend != null) {
-                        // Defensive drain: every OTHER compute submitter waitIdles before releasing
-                        // SHARED_QUEUE_LOCK, so historically the queue was always idle by the time close()
-                        // ran. VoxelDebugRaymarchPass broke that invariant (it releases the lock with its
-                        // dispatch still reading the occupancy buffer), so close() no longer trusts the
-                        // caller -- it drains the queue itself before freeing any buffer. close() is rare
-                        // (pack unload/reload), so this whole-queue wait costs nothing measurable, and it
-                        // guards against any future submitter that likewise forgets to drain.
+                        // Defensive drain: not every compute submitter guarantees the queue is idle by
+                        // the time close() runs -- VoxelDebugRaymarchPass releases SHARED_QUEUE_LOCK
+                        // with its dispatch still reading the occupancy buffer -- so close() does not
+                        // trust the caller and drains the queue itself before freeing any buffer.
+                        // close() is rare (pack unload/reload), so this whole-queue wait costs nothing
+                        // measurable, and it guards against any future submitter that likewise forgets
+                        // to drain.
                         backend.computeQueue().waitIdle();
                         for (BufferInstance b : buffers.values()) {
                             Vma.vmaDestroyBuffer(backend.device().vma(), b.vkBuffer(), b.vmaAllocation());

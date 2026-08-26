@@ -250,10 +250,10 @@ public final class BrickGridUpload {
     //                  MaterialScalars.emissiveColor(categoryId) (blocks.toml emissive.color), or 0
     //                  when the category authored none. Zero here means "no authored hue":
     //                  light_inject.comp falls back to deriving a tint GPU-side from this entry's six
-    //                  face-color words. The former bit-8 lightTransmissive flag no longer lives in
-    //                  this word (never consumed by any shader, and the 24-bit color needs the full
-    //                  bits 8-31); SectionPalette.Entry.lightTransmissive() is still computed for a
-    //                  future consumer to place wherever it lands.
+    //                  face-color words. Bit 8 is not a lightTransmissive flag here: no shader
+    //                  consumes one, and the 24-bit color needs the full bits 8-31.
+    //                  SectionPalette.Entry.lightTransmissive() is still computed for a future
+    //                  consumer to place wherever it lands.
     //
     // A packed box uses 5 bits per coordinate, not 4: PackedBox coordinates are 1/16-block units
     // spanning 0..16 inclusive (17 distinct values -- a full-cell extent is literally 16), and 4 bits

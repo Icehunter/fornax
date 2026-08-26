@@ -20,12 +20,11 @@ package dev.icehunter.fornax.pack.layout;
  * selected resource pack, so a shader-preprocessing limit presented as "resource failed to load"
  * and cost the user their texture pack on every launch.
  *
- * <p><b>Why the first attempt made it worse.</b> The initial version stripped comments but replaced
- * them with their newlines to preserve line numbers. That is precisely the wrong trade for this
- * regex: a whole comment block was previously consumed by ONE iteration through the comment
- * alternative, whereas {@code \s} matches ONE CHARACTER per iteration. Turning 758 KB of comment
- * into 758 KB of whitespace converted a few hundred iterations into a hundred thousand. Fewer bytes,
- * far deeper recursion. The lesson is that the cost here is iteration count, not source size.
+ * <p><b>Why comments are removed rather than blanked out.</b> The regex's comment alternative
+ * consumes a whole comment block in ONE iteration, while {@code \s} matches ONE CHARACTER per
+ * iteration. Replacing comment bytes with equivalent whitespace would turn a few hundred iterations
+ * into a hundred thousand for a large comment block -- fewer bytes, far deeper recursion. The cost
+ * here is iteration count, not source size.
  *
  * <p><b>What this does instead.</b> Comments are removed AND the blank lines they leave are dropped,
  * so the run of whitespace this regex must walk before any directive is as short as possible. Line

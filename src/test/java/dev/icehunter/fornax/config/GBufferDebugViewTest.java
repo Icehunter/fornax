@@ -41,7 +41,7 @@ class GBufferDebugViewTest {
     @Test
     void rtShadowIsOrdinalTwelve() {
         // RT_SHADOW resumes resolve branching at ordinal 12, skipping VOXEL_RAYMARCH's gap at 11 --
-        // see gbuffer_resolve.fsh's "debugView == 12" branch. No longer the last value: the HDR+bloom
+        // see gbuffer_resolve.fsh's "debugView == 12" branch. Not the last value: the HDR+bloom
         // milestone appended three terminal-pass (tonemap.fsh) views after it.
         assertEquals(12, GBufferDebugView.RT_SHADOW.ordinal());
     }
@@ -62,7 +62,7 @@ class GBufferDebugViewTest {
         // Deferred Water Task 1 spike: WATER_PREPASS is a second engine-owned override (mirroring
         // VOXEL_RAYMARCH's own gap at ordinal 11), presented by WaterPrepassDebugPass instead of
         // either resolve branch chain -- appended after EMITTER_LIGHT so it never shifts EMITTER_LIGHT
-        // (16) or any resolve/tonemap-branched ordinal below it. No longer the last value: the M1
+        // (16) or any resolve/tonemap-branched ordinal below it. Not the last value: the M1
         // DDA sun-shadow prototype appended a third engine-owned override after it.
         assertEquals(17, GBufferDebugView.WATER_PREPASS.ordinal());
     }
@@ -72,7 +72,7 @@ class GBufferDebugViewTest {
         // M1 DDA sun-shadow prototype (voxel-default-lighting design): a third engine-owned override
         // (mirroring VOXEL_RAYMARCH's and WATER_PREPASS's own gaps), presented by
         // CelestialShadowVoxelDebugPass instead of either resolve branch chain -- appended after
-        // WATER_PREPASS so it never shifts any earlier ordinal. No longer the last value: the
+        // WATER_PREPASS so it never shifts any earlier ordinal. Not the last value: the
         // surface-emission instrument appended a resolve-branched view after it.
         assertEquals(18, GBufferDebugView.CELESTIAL_SHADOW_VOXEL.ordinal());
     }
@@ -89,8 +89,8 @@ class GBufferDebugViewTest {
     void analyticDirectIsOrdinalTwenty() {
         // Analytic-direct isolation instrumentation (2026-07-22 "niche back wall not lit" hunt):
         // resolve blacks the scene (gbuffer_resolve.fsh debugView == 20), direct_light_analytic
-        // stays live at 8x instrument gain, tonemap.fsh passes 20 through untonemapped -- no longer
-        // the last value: the LabPBR decode audit appended one resolve-branched view after it.
+        // stays live at 8x instrument gain, tonemap.fsh passes 20 through untonemapped -- not the
+        // last value: the LabPBR decode audit's resolve-branched view follows at ordinal 21.
         assertEquals(20, GBufferDebugView.ANALYTIC_DIRECT.ordinal());
     }
 
@@ -102,7 +102,7 @@ class GBufferDebugViewTest {
         // Resolve-branched (gbuffer_resolve.fsh debugView == 21), deep in the pixel's shading
         // rather than the early G-buffer-read chain, since neither term exists until then.
         // tonemap.fsh passes 21 through untonemapped like every other resolve-branched view.
-        // No longer the last value: the decomposition triple appended after it.
+        // Not the last value: the decomposition triple appended after it.
         assertEquals(21, GBufferDebugView.ENV_SPEC_RATIO.ordinal());
     }
 
@@ -113,8 +113,8 @@ class GBufferDebugViewTest {
         // built from (skyMiss/ambientColour/wideEnclosure/reflWide, reflColor/sharpAvail/reflEnv/
         // specularAlbedo, NdotV/mat.alpha/surfaceF0), split across three ordinals because one vec4
         // cannot hold eleven values. Resolve-branched (gbuffer_resolve.fsh debugView == 22/23/24),
-        // same deep-placement shape as ENV_SPEC_RATIO. No longer the last values: the local-light/
-        // AO follow-up pair appended after them.
+        // same deep-placement shape as ENV_SPEC_RATIO. Not the last values: the local-light/AO
+        // follow-up pair follows at ordinals 25/26.
         assertEquals(22, GBufferDebugView.ENV_DECOMP_SKY.ordinal());
         assertEquals(23, GBufferDebugView.ENV_DECOMP_MIX.ordinal());
         assertEquals(24, GBufferDebugView.ENV_DECOMP_MAT.ordinal());
@@ -128,8 +128,8 @@ class GBufferDebugViewTest {
         // wideHorizon/litDiffuse/litResult.vanillaAO (the diffuse path's ACTUAL applied AO factor,
         // exposed via a new PlagueLitResult field -- no shading maths changed)/the raw `ao` scalar
         // the specular path's envAccess consumes directly. Resolve-branched (gbuffer_resolve.fsh
-        // debugView == 25/26), same deep-placement shape as ENV_SPEC_RATIO. No longer the last
-        // values: the residual instrument appended after them.
+        // debugView == 25/26), same deep-placement shape as ENV_SPEC_RATIO. Not the last values:
+        // the residual instrument follows after them.
         assertEquals(25, GBufferDebugView.ENV_DECOMP_LOCAL.ordinal());
         assertEquals(26, GBufferDebugView.ENV_DECOMP_AO.ordinal());
     }
@@ -143,7 +143,7 @@ class GBufferDebugViewTest {
         // albedoLuma/kDLuma/diffuseWithHeldLuma (the three multiplicands); A = litDiffuseLuma /
         // max(R*G*B, 1e-6), the residual -- 1.0 if luma commutes cleanly, anything else is the gap,
         // measured rather than guessed. Resolve-branched (gbuffer_resolve.fsh debugView == 27),
-        // same deep-placement shape as ENV_SPEC_RATIO. No longer the last value: the Round 10
+        // same deep-placement shape as ENV_SPEC_RATIO. Not the last value: the Round 10
         // albedo-identity pair appended after it.
         assertEquals(27, GBufferDebugView.ENV_DECOMP_RESIDUAL.ordinal());
     }
@@ -169,7 +169,7 @@ class GBufferDebugViewTest {
         // uwClosureNear/uwClosureFar/uwClosureWidth/horizonClosure at the crosshair, gated on
         // fragSubmerged rather than on hitting a water surface -- unlike the ENV_DECOMP_ALBEDO_*
         // pair above, pointing at submerged terrain is the correct framing here, not a caveat.
-        // No longer the last value: the shadow-wedge investigation triple appended after it.
+        // Not the last value: the shadow-wedge investigation triple appended after it.
         assertEquals(30, GBufferDebugView.UW_CLOSURE_DEBUG.ordinal());
     }
 
@@ -205,7 +205,7 @@ class GBufferDebugViewTest {
         // tracing found nothing wrong in every formula touching lightDir.y. Reads
         // glint_occlusion.fsh's own real lightDir/occlusion output at the crosshair instead of a
         // further guess -- no shader-side debug branch needed, the pass's rgba16f output target
-        // carries lightDir in .gba unconditionally every frame. No longer the last value: the
+        // carries lightDir in .gba unconditionally every frame. Not the last value: the
         // underwater-glint quad appended after it.
         assertEquals(34, GBufferDebugView.GLINT_OCCLUSION_QUERY.ordinal());
     }

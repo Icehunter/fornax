@@ -36,8 +36,8 @@ import org.jspecify.annotations.Nullable;
  * (via {@link #releaseCurrent}, called from {@code TextureAtlasReleaseGenerationMixin} at
  * {@code upload} HEAD, and again defensively by {@link #rebuild} itself) before the next
  * generation's array texture is ever requested from the driver, so old and new are never resident
- * together -- old and new WERE briefly double-resident here, live-caught contributing to a native
- * out-of-memory crash during a resource-pack switch. {@link #rebuild} normally runs from
+ * together: double-residency here is a native out-of-memory risk during a resource-pack switch.
+ * {@link #rebuild} normally runs from
  * {@link AtlasGenerationSchedule}'s terminal tick after the same generation's sidecar work, with
  * the upload-RETURN hook retained as the no-pending fallback. When the overflow page count changes
  * between generations, Sodium's terrain program cache is cleared (the same generation-guarded
@@ -136,11 +136,10 @@ public final class BlockAtlasOverflow {
      * completed. An ordinary compositor failure logs, publishes UNPAGED (terrain then renders
      * every ghost at quarter resolution -- correct, just soft), and leaves vanilla state alone. A
      * FATAL failure (the device is lost, or this multi-gigabyte array allocation itself ran the
-     * device out of memory) rethrows instead: this allocation is the one live-caught contributing
-     * to a native out-of-memory crash during a resource-pack switch, and a Vulkan OOM logged as a
-     * soft warning here means rendering continues for several more frames on a device that already
-     * failed, surfacing as an unattributed native crash deeper in, rather than at the line that
-     * actually failed.
+     * device out of memory) rethrows instead: this allocation is a native out-of-memory risk during
+     * a resource-pack switch, and a Vulkan OOM logged as a soft warning here would mean rendering
+     * continues for several more frames on a device that already failed, surfacing as an
+     * unattributed native crash deeper in, rather than at the line that actually failed.
      *
      * <p>Also applies this generation's sprite-bounds grid size ({@link
      * SpriteBoundsTexture#useGridSize}), on {@code layout}'s behalf: {@code
@@ -302,7 +301,7 @@ public final class BlockAtlasOverflow {
 
     /**
      * One sprite, one mip, onto its layer -- as the full PADDED box, reproducing vanilla's page-0
-     * blit CONTINUOUSLY, not by integer offset. Two live-caught failure modes force that:
+     * blit CONTINUOUSLY, not by integer offset. Two failure modes force that:
      *
      * <ul>
      * <li>Content-only writes leave the anisotropy gutters as uninitialized VRAM, and anisotropic

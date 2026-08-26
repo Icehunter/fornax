@@ -7,12 +7,12 @@ import org.lwjgl.glfw.GLFWNativeCocoa;
 
 /**
  * Apple's Metal Performance HUD ({@code CAMetalLayer.developerHUDProperties}, public API since
- * macOS 13) exposed as a live Fornax settings toggle -- replacing the session-only
- * {@code MTL_HUD_ENABLED} environment variable the user previously had to set before launch.
- * Setting a non-empty properties dictionary on the game window's {@code CAMetalLayer} (MoltenVK's
- * own layer, backing the GLFW-owned {@code NSWindow}'s content view -- the same layer every
- * presented Vulkan frame lands on) turns the overlay on; an empty dictionary turns it back off.
- * Both take effect on the next presented frame -- no relaunch required, unlike the env-var path.
+ * macOS 13) exposed as a live Fornax settings toggle in place of the session-only {@code
+ * MTL_HUD_ENABLED} environment variable, which must be set before launch. Setting a non-empty
+ * properties dictionary on the game window's {@code CAMetalLayer} (MoltenVK's own layer, backing
+ * the GLFW-owned {@code NSWindow}'s content view -- the same layer every presented Vulkan frame
+ * lands on) turns the overlay on; an empty dictionary turns it back off. Both take effect on the
+ * next presented frame -- no relaunch required, unlike the env-var path.
  *
  * <p>Called from {@link dev.icehunter.fornax.config.SettingsApplyRouter}'s {@code
  * METAL_HUD_APPLY} action (either direction of the {@code metalHud} setting) and once at {@code
@@ -28,8 +28,8 @@ import org.lwjgl.glfw.GLFWNativeCocoa;
  * of {@code [layer developerHUDProperties]} immediately after the set call. This is deliberate,
  * not chatty: {@link #apply} runs at most a handful of times per session (once at startup, once
  * per settings-screen toggle -- see the call sites above), so there is no hot-path spam risk, and
- * a silent outcome here was previously the reason "the HUD never shows" could not be root-caused
- * from outside this class at all -- see the mc-vulkan-realism architecture-audit follow-up.
+ * a silent outcome here would leave "the HUD never shows" impossible to root-cause from outside
+ * this class.
  */
 public final class MetalHudControl {
     private MetalHudControl() {
@@ -45,11 +45,10 @@ public final class MetalHudControl {
      * {@code finally} after the setter has run. This is load-bearing, not defensive style: {@code
      * dictionaryWithObject:forKey:} (and the {@code NSString} pieces that build it) hand back
      * AUTORELEASED objects, and Java evaluates a method's return expression before its {@code
-     * finally} block runs -- an earlier revision popped a pool scoped to only the dictionary-build
-     * helper, which freed the autoreleased dictionary before {@code setDeveloperHUDProperties:} ever
-     * saw it, a live SIGSEGV on the enable path (reproduced 3/3). The disable path never caught this
-     * because {@code [NSDictionary dictionary]} returns Apple's immortal empty singleton, not a
-     * fresh autoreleased object.
+     * finally} block runs, so popping the pool any earlier would free the autoreleased dictionary
+     * before {@code setDeveloperHUDProperties:} sees it -- a SIGSEGV on the enable path. The
+     * disable path is unaffected because {@code [NSDictionary dictionary]} returns Apple's
+     * immortal empty singleton, not a fresh autoreleased object.
      */
     public static void apply(boolean enabled) {
         if (!Objc.isLoaded()) {

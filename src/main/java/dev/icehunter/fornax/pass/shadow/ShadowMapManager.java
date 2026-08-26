@@ -75,13 +75,13 @@ public final class ShadowMapManager {
      * stored depth, which a {@code sampler2DShadow} comparison sampler can only ever return
      * pass/fail for, never the value itself).
      *
-     * <p>Exists because a pass binding {@link #TARGET} twice under the same name previously got the
-     * comparison sampler on BOTH bindings -- {@code FullscreenPassRunner} keyed the branch on the
-     * input's NAME, so one binding was silently read non-Dref through a hardware comparison sampler.
-     * That was mistaken for an invalid duplicate descriptor and the second binding was deleted
-     * outright, which is the wrong fix: the pack legitimately needs two DIFFERENT views of one
-     * texture, not one view bound twice. Two names make that intent explicit at the graph.toml call
-     * site with no schema change and no risk of the sampler choice silently depending on bind order.
+     * <p>Two distinct pack-visible names exist because {@code FullscreenPassRunner} keys its
+     * comparison-sampler-vs-raw-sampler branch on the input's NAME: binding {@link #TARGET} twice
+     * under the same name would give the comparison sampler to BOTH bindings, silently reading one
+     * of them non-Dref through a hardware comparison sampler. The pack legitimately needs two
+     * DIFFERENT views of one texture, not one view bound twice, and two names make that intent
+     * explicit at the graph.toml call site with no schema change and no risk of the sampler choice
+     * silently depending on bind order.
      */
     public static final String RAW_TARGET = "sunShadowMapRaw";
 

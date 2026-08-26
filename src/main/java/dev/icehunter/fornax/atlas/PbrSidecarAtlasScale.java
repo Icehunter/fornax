@@ -5,12 +5,13 @@ import java.util.OptionalLong;
 /**
  * Sizes a labPBR sidecar atlas from the SIDECARS' own resolution rather than the albedo's.
  *
- * <p><b>The bug this fixes.</b> Both sidecar atlases used to be built at exactly half the block
- * atlas's dimensions, and each sprite's rectangle at half that sprite's ALBEDO size. A pack shipping
- * 512px {@code _n} maps over 64px colour therefore had every one of them resampled down to a 32px
- * rectangle -- a 16x loss, silently, with nothing in the log to say so. The user built such a pack
- * specifically to measure how much of the look is carried by map resolution rather than colour
- * resolution; before this, that experiment could only ever have measured nothing.
+ * <p><b>Sized from the sidecars, not the albedo.</b> Sizing from the block atlas's dimensions
+ * instead would build both sidecar atlases at exactly half the block atlas's dimensions, with each
+ * sprite's rectangle at half that sprite's ALBEDO size -- so a pack shipping 512px {@code _n} maps
+ * over 64px colour would have every one of them resampled down to a 32px rectangle, a 16x loss,
+ * silently, with nothing in the log to say so. Surveying the sidecars' own resolution instead is
+ * what lets a pack whose maps are authored above albedo resolution actually deliver that
+ * resolution.
  *
  * <p>Scale zero is identity. Source data is reduced only when the device dimension limit or the
  * explicit resident-byte budget requires it; there is no unconditional quality divisor.
@@ -18,7 +19,7 @@ import java.util.OptionalLong;
  * <p><b>The layout stays normalised, and that is not negotiable.</b> The sidecar atlas mirrors the
  * block atlas's UV layout exactly -- {@code spriteToAtlas}, {@code SpriteBoundsTexture} and
  * {@code SpriteHeightRanges} all key off normalised UV, and a pixel-space assumption across that
- * boundary has already cost one long diagnosis (every height range filed at half its true position).
+ * boundary silently breaks every height range (filed at half its true position).
  * So a sprite's slot is a fixed FRACTION of the atlas, and the only way to give it more texels is to
  * make the whole atlas bigger. Hence a single global {@link #log2Scale} rather than per-sprite
  * packing.
@@ -69,10 +70,10 @@ public final class PbrSidecarAtlasScale {
      * #isMirroredAtlasOwner}), giving 4 concurrent allocations in the steady state. 1/4 total split
      * 4 ways is 1/16 per allocation.
      *
-     * <p>{@code TextureAtlasReleaseGenerationMixin} now frees the previous generation before the
-     * next one builds, so the old-and-new doubling this fraction used to budget headroom for no
-     * longer happens on the normal path -- 1/16 is accordingly conservative rather than exact, which
-     * is the safer direction to be wrong in.
+     * <p>{@code TextureAtlasReleaseGenerationMixin} frees the previous generation before the next
+     * one builds, so the old-and-new doubling this fraction accounts headroom for does not happen on
+     * the normal path -- 1/16 is accordingly conservative rather than exact, which is the safer
+     * direction to be wrong in.
      */
     private static final double VRAM_SHARE_PER_ATLAS_FRACTION = 1.0 / 16.0;
 
@@ -85,8 +86,7 @@ public final class PbrSidecarAtlasScale {
      * The resident-byte ceiling one sidecar atlas allocation should actually be built against: the
      * tighter of what the user's {@code SidecarMapResolution} tier asked for and what this device's
      * real VRAM can spare (see {@link #VRAM_SHARE_PER_ATLAS_FRACTION}). Falls back to {@link
-     * #MAX_ATLAS_BYTES} when {@code realVramBytes} is empty (VRAM detection unavailable), same as
-     * before this method existed.
+     * #MAX_ATLAS_BYTES} when {@code realVramBytes} is empty (VRAM detection unavailable).
      *
      * <p>This is what closes {@code SidecarMapResolution.FULL}'s own uncapped {@code Long.MAX_VALUE}:
      * FULL means "don't cap below what the pack authored," not "ignore how much VRAM actually
@@ -138,9 +138,9 @@ public final class PbrSidecarAtlasScale {
      * says however the pack is built. The loop below still only ever steps DOWN from there, and
      * {@code maxDimension} and the byte ceiling still bound the result.
      *
-     * <p>Passing 0 reproduces the historical behaviour exactly: the offset vanishes, the surveyed
-     * ratio stands, and the byte budget alone chooses as it always did. That is what the
-     * six-argument form above passes.
+     * <p>Passing 0 makes this identical to the six-argument overload: the offset vanishes, the
+     * surveyed ratio stands, and the byte budget alone chooses. That is what the six-argument form
+     * above passes.
      *
      * @param log2ScaleOffset offset on the scale the pack asked for; 0 keeps it and each step down
      *                        halves the sidecar per axis relative to what was authored
@@ -156,8 +156,8 @@ public final class PbrSidecarAtlasScale {
         // The tier adjusts what the pack asked for, before the budget loop starts stepping down.
         int scale = ceilLog2(Math.max(1, maxSidecarRatio)) + log2ScaleOffset;
         // Step DOWN from what the pack asked for until it fits, never up from what fits: a pack that
-        // ships no high-resolution maps must land on exactly 0 and take the historical path, and
-        // searching upward from below would depend on the budget arithmetic to stop it there.
+        // ships no high-resolution maps must land on exactly 0, and searching upward from below
+        // would depend on the budget arithmetic to stop it there.
         while (scale > MIN_LOG2_SCALE
                 && !fits(blockAtlasWidth, blockAtlasHeight, scale, maxDimension, mipFactor,
                          overflowPages, maxAtlasBytes)) {
@@ -190,13 +190,12 @@ public final class PbrSidecarAtlasScale {
 
     /**
      * Estimates the same shape the listeners actually allocate: a base image plus {@code
-     * overflowPages} full-size array layers, all at this atlas's mip factor. Before this, the
-     * estimate priced only the base image -- 3-4x under the real allocation at the {@code
+     * overflowPages} full-size array layers, all at this atlas's mip factor. Pricing only the base
+     * image would under-price the real allocation by 3-4x at the {@code
      * BlockAtlasGhostLayout.MAX_OVERFLOW_PAGES} ceiling, since neither {@code
      * NormalMapAtlasReloadListener} nor {@code MaterialMapAtlasReloadListener} downsamples an
      * overflow layer relative to page 0 (see {@link BlockAtlasPageBudget}'s doc, which already
-     * accounts for this on the block-atlas side). Live-caught contributing to a native
-     * out-of-memory crash during a resource-pack switch.
+     * accounts for this on the block-atlas side).
      */
     private static boolean fits(int blockAtlasWidth, int blockAtlasHeight, int log2Scale,
                                 int maxDimension, double mipFactor, int overflowPages,

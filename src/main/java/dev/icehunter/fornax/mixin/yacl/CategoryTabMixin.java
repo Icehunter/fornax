@@ -27,7 +27,8 @@ import java.util.function.Supplier;
 /**
  * Injects the Import.../Export.../Defaults... chrome buttons into YACL's own right-side bottom
  * cluster (search field / Reset / Undo / Done) on a {@code PackManageScreen}-built {@code
- * YACLScreen}, replacing the three {@code ButtonOption}s the Manage tab's option list used to carry.
+ * YACLScreen}, keeping these three actions out of the Manage tab's option list as {@code
+ * ButtonOption}s.
  *
  * <p>Ground truth (CFR-decompiled from the real 3.9.5+26.2-fabric jar, {@code
  * dev.isxander.yacl3.gui.YACLScreen$CategoryTab}'s constructor): {@code saveFinishedButton}/{@code

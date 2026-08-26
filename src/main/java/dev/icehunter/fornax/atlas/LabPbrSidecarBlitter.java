@@ -57,9 +57,8 @@ public final class LabPbrSidecarBlitter {
      * <ol>
      * <li><b>The sidecar is already the slot's size.</b> Exact per-pixel copy. This is the path a
      *     pack whose maps match its colour resolution takes for every sprite, and it is a copy
-     *     rather than a 1:1 resample deliberately: the result has to be bit-identical to what this
-     *     produced before per-sprite sizing existed, and a resampler is not obliged to be the
-     *     identity even at scale 1.</li>
+     *     rather than a 1:1 resample deliberately: the result must be bit-identical to a direct pixel
+     *     copy, since a resampler is not obliged to be the identity even at scale 1.</li>
      * <li><b>The owning albedo is animated, and this call was routed here as one.</b> Vanilla's own
      *     animated-texture convention, and NOT a resolution mismatch -- {@code sprite.contents()}
      *     reports one FRAME's size, so a sidecar whose height is a whole number of frame-heights at
@@ -80,10 +79,9 @@ public final class LabPbrSidecarBlitter {
      * <p>No overload of this method defaults {@code filter} to {@link Filter#GENERIC}. GENERIC is a
      * raw 4-channel weighted mean that averages straight across every LabPBR categorical boundary
      * (metal index, the porosity/SSS split, the emission sentinel) -- safe for ordinary colour data,
-     * never safe for an {@code _s}/{@code _n} sidecar. Two convenience overloads used to default to
-     * it silently; both had zero callers anywhere in this repo and have been removed, so a future
-     * {@code _s}/{@code _n} caller must name {@link Filter#NORMAL} or {@link Filter#MATERIAL}
-     * explicitly rather than inheriting a channel-blind average.
+     * never safe for an {@code _s}/{@code _n} sidecar. A future {@code _s}/{@code _n} caller must
+     * name {@link Filter#NORMAL} or {@link Filter#MATERIAL} explicitly rather than inheriting a
+     * channel-blind average.
      *
      * @return {@code true} if a sidecar was placed; {@code false} if the entry has none, or reading
      * it failed, leaving the caller's pre-fill in place.
@@ -149,7 +147,7 @@ public final class LabPbrSidecarBlitter {
                 //
                 // frameHeight, not source.getHeight(): the interface contract is "rows the blit will
                 // actually read: one animation frame, or the whole image". For an animated multi-frame
-                // strip those differ -- passing the whole sheet's height here made a transform (e.g.
+                // strip those differ -- passing the whole sheet's height would make a transform (e.g.
                 // the emission-sentinel scan below) inspect every frame instead of only the one about
                 // to be placed, so a sprite could be reported as carrying authored emission based on a
                 // frame this call never selects.
@@ -521,8 +519,8 @@ public final class LabPbrSidecarBlitter {
      * the image is a vertical strip of them, otherwise the whole image.
      *
      * <p>A frame is the slot's aspect ratio at the sidecar's own width, so this works whatever the
-     * sidecar's resolution is -- which the previous {@code sourceWidth == slotWidth} test did not,
-     * since a 512px sidecar over a 64px albedo never equals its slot's width.
+     * sidecar's resolution is -- a plain {@code sourceWidth == slotWidth} test would not, since a
+     * 512px sidecar over a 64px albedo never equals its slot's width.
      */
     static int firstFrameHeight(int sourceWidth, int sourceHeight, int slotWidth, int slotHeight) {
         if (slotWidth <= 0 || slotHeight <= 0) {

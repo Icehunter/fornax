@@ -219,7 +219,7 @@ public final class GraphValidator {
                 if (size == null) {
                     // Engine-owned: its bytes come from a runtime quantity (voxel window diameter,
                     // render resolution) this load-time report has no access to, so there is nothing
-                    // honest to print. Unchanged from before pack-sized buffers existed.
+                    // honest to print.
                     continue;
                 }
                 // A pack-sized buffer's bytes ARE statically known, so they belong in the estimate
@@ -474,20 +474,18 @@ public final class GraphValidator {
             // declared target, so it is recognized here by name exactly like packOptions above.
             //
             // Legal on the two raw-Vulkan pass types, which bind it as a positional descriptor.
-            // PARTICLES needs the camera matrices to place a billboard at all. COMPUTE was refused
-            // here originally, on the reasoning that "a compute pass has no camera to project
-            // through" -- true, and beside the point: u_Globals is also where every per-frame WORLD
-            // fact lives (the wind clock, the frame counter, rain/thunder/wetness, the weather
-            // anchor, the true sun direction -- see fornax:globals.glsl), and refusing the name left
-            // a pack compute pass with no clock of any kind. Its only other per-frame channel is the
-            // PassParams push constant, whose two free scalars GraphRunner.computeParams fills in BY
-            // PASS NAME, so a pack-authored name the engine does not recognize gets zeros forever.
-            // A simulation cannot advance on that.
+            // PARTICLES needs the camera matrices to place a billboard at all. COMPUTE needs it too:
+            // u_Globals is also where every per-frame WORLD fact lives (the wind clock, the frame
+            // counter, rain/thunder/wetness, the weather anchor, the true sun direction -- see
+            // fornax:globals.glsl); without it a pack compute pass has no clock of any kind. Its
+            // only other per-frame channel is the PassParams push constant, whose two free scalars
+            // GraphRunner.computeParams fills in BY PASS NAME, so a pack-authored name the engine
+            // does not recognize gets zeros forever. A simulation cannot advance on that.
             //
-            // Still refused on every OTHER type, and for the original reason: a FULLSCREEN pass
-            // already has u_Globals in its bind group unconditionally (FullscreenPassRunner.build)
-            // and a GEOMETRY pass gets Sodium's own terrain bind group, so there the name would bind
-            // nothing while silently shifting the pass's other binding indices by one.
+            // Refused on every OTHER type: a FULLSCREEN pass already has u_Globals in its bind
+            // group unconditionally (FullscreenPassRunner.build) and a GEOMETRY pass gets Sodium's
+            // own terrain bind group, so there the name would bind nothing while silently shifting
+            // the pass's other binding indices by one.
             if (pass.type() != PassType.PARTICLES && pass.type() != PassType.COMPUTE) {
                 throw new FornaxPackError(FILE, "pass." + pass.name() + ".inputs",
                         "'" + ParticlePassRunner.GLOBALS_INPUT + "' is only a valid input for a particles"

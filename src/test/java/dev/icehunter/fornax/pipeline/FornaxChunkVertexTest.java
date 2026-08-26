@@ -52,7 +52,7 @@ class FornaxChunkVertexTest {
      * The precipitation TYPE reaches a_Normal.w intact, and without disturbing the material id
      * beside it.
      *
-     * <p>The lane was a 0/1 flag and is now 0 none / 1 rain / 2 snow. That widening is the whole
+     * <p>The lane carries 0 none / 1 rain / 2 snow, not a mere 0/1 flag. That distinction is the whole
      * point of the test: a shader that only knows "precipitates" has to ask the CAMERA whether it is
      * snowing, which puddles a snowfield while the player stands in rain beside it and then dries
      * the entire world the instant they step across. SNOW must therefore arrive as 2 and not
@@ -351,9 +351,8 @@ class FornaxChunkVertexTest {
     /**
      * {@link MaterialIdContext#setAtlasPage}/{@link MaterialIdContext#getAtlasPage} round-trip, and
      * default to page 0 on {@link MaterialIdContext#clear()} -- same neutral-default reasoning as
-     * {@link #clearLeavesBlockClassAtNone}: page 0 is what every block resolved to before this lane
-     * existed (there was only ever one page), so a leftover nonzero page from whatever block was
-     * meshed previously must never survive a clear.
+     * {@link #clearLeavesBlockClassAtNone}: page 0 is the neutral default for an unpaged atlas, so
+     * a leftover nonzero page from whatever block was meshed before it must never survive a clear.
      */
     @Test
     void atlasPageRoundTripsAndDefaultsToZeroOnClear() {

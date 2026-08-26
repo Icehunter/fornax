@@ -10,7 +10,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
 
 /**
- * DIAGNOSTIC, not a fix -- celestial rework decision, Bug A investigation (2026-08-11). Forces the
+ * DIAGNOSTIC, not a fix -- celestial rework decision, Bug A investigation. Forces the
  * shadow pipeline's {@code RenderPipeline.Builder.withCull(boolean)} argument to {@code false},
  * disabling GPU-level rasterizer backface culling for {@link FornaxRenderPasses#SHADOW}/{@link
  * FornaxRenderPasses#SHADOW_CUTOUT} only, to test one specific hypothesis for why a caster known (by
@@ -20,9 +20,9 @@ import org.spongepowered.asm.mixin.injection.ModifyArg;
  * (color targets, depth-stencil compare op), {@link ShaderChunkRendererShaderLocationMixin} (shader
  * source), and {@link ShaderChunkRendererConstantsMixin} (preprocessor defines) each wrap a DIFFERENT
  * call in the same method, but none of the three touches this one -- an uninspected inheritance, the
- * same shape the already-fixed {@link DefaultChunkRendererFaceCullingMixin} bug had, but at the GPU
+ * same shape as the bug {@link DefaultChunkRendererFaceCullingMixin} fixes, but at the GPU
  * rasterizer level rather than Sodium's CPU-side {@code getVisibleFaces} face-group heuristic that
- * fix already patches. That fix is real and necessary but is a DIFFERENT mechanism (whole
+ * fix patches. That fix is real and necessary but is a DIFFERENT mechanism (whole
  * axis-aligned face-groups, culled by section-to-CAMERA orientation before draw-command generation)
  * from this one (individual triangles, culled by screen-space winding AFTER projection, by the GPU
  * itself) -- disabling one does not disable the other, and both apply independently to whatever

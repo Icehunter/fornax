@@ -40,7 +40,7 @@ import java.util.Optional;
  * <p>Two render passes per frame, splitting accumulation from presentation so the sharpen NEVER
  * re-enters the temporal feedback loop (a sharpened output that becomes next frame's history gets
  * edge enhancement re-applied to its own output every frame at the blend's ~0.9 recycle rate --
- * divergent iteration, live-caught as red/rainbow speckle webs on distant foliage):
+ * divergent iteration, producing red/rainbow speckle webs on distant foliage):
  * <ol>
  *   <li>{@code post/reconstruct} renders the UNSHARPENED accumulation (rgb) + accumulation age (a)
  *       directly into {@link SceneHistory#writeSlotView} -- the same post-swap history slot, same

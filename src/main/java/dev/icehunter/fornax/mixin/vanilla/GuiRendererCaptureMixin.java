@@ -71,10 +71,10 @@ public class GuiRendererCaptureMixin {
         // accessor or Minecraft-level indirection needed.
         //
         // uiTarget is sized from realTarget's OWN width/height, not any window/SsaaManager-derived
-        // value: a window-based size read (SsaaManager.nativeWidth/Height) was tried first and
-        // resolved to logical points rather than physical pixels on a Retina display, stretching the
-        // composited HUD to a corner quadrant (live-caught). realTarget is exactly the target
-        // vanilla's HUD draw would otherwise have used, so it is definitionally the correct size.
+        // value: a window-based size read (SsaaManager.nativeWidth/Height) resolves to logical points
+        // rather than physical pixels on a Retina display, which would stretch the composited HUD to
+        // a corner quadrant. realTarget is exactly the target vanilla's HUD draw would otherwise have
+        // used, so it is definitionally the correct size.
         RenderTarget realTarget = this.mainRenderTarget;
         this.mainRenderTarget = UiLayerCapture.uiTarget(realTarget.width, realTarget.height);
         DeferredGeometryPipelines.setGuiPhase(true);
@@ -88,10 +88,10 @@ public class GuiRendererCaptureMixin {
         // Frame-gen staging preparation: MUST run BEFORE the UiLayerCapture.compositeOnto(realTarget)
         // call below, which is about to bake the captured HUD onto realTarget for the REAL frame.
         // realTarget right here is exactly the scene-only (HUD-free) native color FrameGenSkyFillPass
-        // needs -- the present seam used to sample mainRenderTarget() at present time instead, by
-        // which point THIS composite call had already run, feeding the sky fill a HUD-contaminated
-        // source and double-alpha-ing translucent HUD edges over sky (see FrameGenPresenter's own
-        // class header). GBufferManager.getInstance() is guaranteed non-null here by the same
+        // needs -- sampling mainRenderTarget() at present time instead would return this composite
+        // call's HUD-contaminated result, double-alpha-ing translucent HUD edges over sky (see
+        // FrameGenPresenter's own class header). GBufferManager.getInstance() is guaranteed non-null
+        // here by the same
         // invariant GameRendererMixin#fornax$reconstruct already relies on (generatedFrameReady()
         // true implies a successful MetalFxUpscalePass ran this frame, which requires a live
         // GBuffer) -- null-checked anyway since a violation here must never throw out of this wrap

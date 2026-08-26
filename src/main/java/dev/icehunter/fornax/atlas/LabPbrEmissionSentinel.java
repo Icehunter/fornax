@@ -28,8 +28,8 @@ public final class LabPbrEmissionSentinel {
     }
 
     /**
-     * Compatibility helper retained for existing callers. Source and reduced values are no longer
-     * rewritten merely because their alpha is {@code 255}; that code remains categorical absence.
+     * Compatibility helper retained for existing callers; returns the input unchanged. An alpha of
+     * {@code 255} is categorical absence regardless of value, so this method must not rewrite it.
      */
     public static int capBelowSentinel(int argb) {
         return argb;

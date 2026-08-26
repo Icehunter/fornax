@@ -29,11 +29,9 @@ import java.util.Set;
  * deriving it from a VRAM budget -- so this class never needs to know why a caller picked the
  * number it did.
  *
- * <p>Public since Phase 2 (package-private through Phase 1): {@code
- * dev.icehunter.fornax.mixin.vanilla.SpriteLoaderPagedStitchMixin} is the first live caller,
- * running this allocator for real against every vanilla block-atlas stitch. Nothing about the class
- * changed to earn that -- it was always meant to be driven from outside {@code atlas} once a live
- * phase existed to call it.
+ * <p>Public because {@code dev.icehunter.fornax.mixin.vanilla.SpriteLoaderPagedStitchMixin}, the
+ * live caller that runs this allocator for real against every vanilla block-atlas stitch, is
+ * driven from outside {@code atlas}.
  */
 public final class BlockAtlasPaging {
     private BlockAtlasPaging() {
@@ -105,7 +103,7 @@ public final class BlockAtlasPaging {
      * ONE rect per cell, so any placement pitch that does not divide the cell size leaves every
      * sprite-boundary cell shared between two sprites -- last writer wins, the loser's edge strip
      * fails the shader's rect-contains-uv gate, and POM shuts off in a band along every sprite
-     * edge (live-caught as displaced-looking double-border seams at block boundaries). Aligning
+     * edge, visible as displaced-looking double-border seams at block boundaries. Aligning
      * page-0 placements to whole cells -- and overflow placements to 4x that, so their
      * quarter-scale GHOST rects land on cell boundaries too -- makes the collision impossible by
      * construction. A larger alignment is strictly compatible with the real mip level's own

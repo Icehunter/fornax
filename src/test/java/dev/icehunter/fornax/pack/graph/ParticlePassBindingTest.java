@@ -100,8 +100,8 @@ class ParticlePassBindingTest {
     void computeStorageImageFeedingCopyWaitsAtTransferStage() {
         // FRAGMENT is the wrong stage for a copy: CopyRunner moves the target with
         // copyTextureToTexture, which lowers to vkCmdCopyImage/blit at TRANSFER, not fragment shader
-        // invocation. This pass type used to fall through both branches and contribute 0, leaving no
-        // semaphore signalled and no wait recorded -- an unsynchronized cross-queue read.
+        // invocation. A COPY reader with no branch here contributes 0, leaving no semaphore signalled
+        // and no wait recorded -- an unsynchronized cross-queue read.
         PassSpec compute = computePass("water_step", List.of("waveState"), null);
         PassSpec copy = new PassSpec("water_copy", PassType.COPY, null, null, null,
                 List.of("waveState"), List.of("waveStateStable"), null, null, List.of(), null, null, null);

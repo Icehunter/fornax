@@ -9,11 +9,11 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Pins the release-before-allocate ordering the resource-pack-switch device-loss fix depends on:
- * the previous GPU generation is freed, and freed AFTER a GPU-idle wait, before the next generation
- * is ever requested from the driver. Old and new WERE briefly double-resident by design (see {@code
- * LabPbrAtlasPair}'s and {@code BlockAtlasOverflow}'s own class docs), live-caught contributing to a
- * native out-of-memory crash across three back-to-back resource-pack switches.
+ * Pins the release-before-allocate ordering a resource-pack switch's GPU generation handoff depends
+ * on: the previous GPU generation is freed, and freed AFTER a GPU-idle wait, before the next
+ * generation is ever requested from the driver. Double-residency of old and new generations across
+ * repeated pack switches can exhaust device VRAM (see {@code LabPbrAtlasPair}'s and {@code
+ * BlockAtlasOverflow}'s own class docs).
  *
  * <p>Deliberately source-level: {@code TextureAtlasReleaseGenerationMixin} is a mixin injected into
  * vanilla's {@code TextureAtlas} and cannot be instantiated without a live client, matching this
@@ -70,9 +70,8 @@ class AtlasGenerationReleaseOrderContractTest {
                 + " second line of defense independent of the release-before-allocate mixin");
         assertTrue(buildIndex > releaseIndex,
                 "the previous allocation must be released BEFORE the next one is built -- old and"
-                        + " new were briefly double-resident here before this ordering, live-caught"
-                        + " contributing to a native out-of-memory crash during a resource-pack"
-                        + " switch");
+                        + " new double-resident at once can exhaust device VRAM during a"
+                        + " resource-pack switch");
     }
 
     @Test

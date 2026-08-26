@@ -28,12 +28,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * ChunkRenderContextHolder} (populated earlier this same frame/pass by {@code
  * SodiumWorldRendererRenderLayerMixin}) already carries the same value.
  *
- * <p>Sodium 0.9.1: {@code u_Globals} is now bound via the {@code setUniform(String,
+ * <p>Sodium 0.9.1 binds {@code u_Globals} via the {@code setUniform(String,
  * GpuBufferSlice)} overload (the uniform manager sub-allocates from a ring buffer), so the plain
  * {@code setUniform(String, GpuBuffer)} overload this anchors on appears exactly ONCE in {@code
- * render(...)} -- the {@code u_SectionTimeInfo} bind (ordinal 0, was ordinal 1 pre-0.9.1 when
- * {@code u_Globals} used the same overload). Injecting immediately after it lands right after
- * {@code u_SectionTimeInfo} and before the texture binds, same spot as before.
+ * render(...)} -- the {@code u_SectionTimeInfo} bind (ordinal 0). Injecting immediately after it
+ * lands right after {@code u_SectionTimeInfo} and before the texture binds.
  */
 @Mixin(DefaultChunkRenderer.class)
 public class DefaultChunkRendererRenderMixin {

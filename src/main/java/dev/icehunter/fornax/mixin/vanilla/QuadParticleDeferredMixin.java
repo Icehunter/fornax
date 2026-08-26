@@ -50,16 +50,16 @@ import java.util.function.Supplier;
  * {@code drawIndexed} directly, so {@code PreparedRenderType.drawFromBuffer} is never involved --
  * bytecode-verified, and corroborated by the engine's own pipeline census, which never listed
  * {@code opaque_particle}. This is the same class of bypass {@code graph.toml} already records for
- * weather, where three engine-side fixes were spent on the wrong axis before anyone read the bytecode.
+ * weather.
  *
- * <p><b>The bug this closes.</b> Solid-arm particles drew into {@code mainRenderTarget}'s colour
- * during {@code executeSolid}; {@code GraphRunner.finishDeferred()} then runs at that method's return
- * and the pack's tonemap writes {@code builtin.output} full-screen, painting over them. Around thirty
- * particle families were therefore INVISIBLE with any pack that claims a non-terrain slot: crit
- * sparks, block- and item-break puffs, explosions, redstone dust, bubbles, drips, notes, hearts,
- * portal, lava, falling dust and leaves, and the rest of {@code Layer.OPAQUE}. Smoke and flame escaped
- * only by accident of timing -- they were moved to the translucent arm four days before the graph
- * deferral landed. It is the same mechanism {@code GeometryPipelineMap} records for {@code item_cutout}.
+ * <p><b>The bug this closes.</b> Solid-arm particles draw into {@code mainRenderTarget}'s colour
+ * during {@code executeSolid} when this mixin does not run; {@code GraphRunner.finishDeferred()} then
+ * runs at that method's return and the pack's tonemap writes {@code builtin.output} full-screen,
+ * painting over them. That makes roughly thirty particle families invisible with any pack that claims
+ * a non-terrain slot: crit sparks, block- and item-break puffs, explosions, redstone dust, bubbles,
+ * drips, notes, hearts, portal, lava, falling dust and leaves, and the rest of {@code Layer.OPAQUE}.
+ * Smoke and flame are on the translucent arm already, unrelated to this deferral. It is the same
+ * mechanism {@code GeometryPipelineMap} records for {@code item_cutout}.
  *
  * <p><b>The two arms take OPPOSITE routes, and that asymmetry is load-bearing.</b> See
  * {@link DeferredGeometryPipelines#wantsDeferredParticleGroup} and
@@ -75,8 +75,7 @@ import java.util.function.Supplier;
  * resolved once at the head of {@code executeGroup} and read by both wrappers below. Adding a second
  * {@code @WrapOperation} to the {@code setPipeline} instruction to carry the forward case was the
  * obvious alternative and is rejected: chained MixinExtras wrappers on one instruction make "which
- * branch fired" unattributable from a log, which is the exact failure mode that cost the weather pass
- * three engine-side fixes on the wrong axis.
+ * branch fired" unattributable from a log.
  *
  * <p><b>Both halves must agree, and only the deferred half can disagree fatally.</b> A rewritten pass
  * binds five attachments and the pipeline must declare five matching colour targets; binding five to
@@ -193,9 +192,9 @@ public abstract class QuadParticleDeferredMixin {
         fornax$lastReport[arm] = key;
 
         // Every input of the rule that was tested, ALWAYS, plus the first condition that refused.
-        // Logging the decision without its inputs is what made `route=VANILLA` unattributable in the
-        // field and cost a launch; logging the inputs without naming the blocking one leaves the
-        // reader to re-derive a seven-term conjunction from a log line.
+        // Logging the decision without its inputs makes `route=VANILLA` unattributable in the field;
+        // logging the inputs without naming the blocking one leaves the reader to re-derive a
+        // seven-term conjunction from a log line.
         dev.icehunter.fornax.FornaxMod.LOGGER.info(String.format(
                 "[Fornax][diag] particle group reached the hook: arm=%s route=%s"
                         + " (groupTranslucent=%s anyLayerTranslucent=%s allLayersTranslucent=%s"

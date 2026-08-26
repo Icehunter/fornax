@@ -110,8 +110,8 @@ public final class RuntimeShaderPack implements PackResources {
      * fires client entrypoints from inside {@code Minecraft}'s own constructor, after the singleton
      * instance is assigned but before its final fields (e.g. {@code gui}) exist -- so at bring-up
      * {@code getInstance()} is already non-null while {@code reloadResourcePacks()} would still NPE
-     * on the half-constructed client (observed live: "this.gui is null" during {@code
-     * Minecraft.<init>}). Only a real "the client finished starting" signal is safe to gate on.
+     * on the half-constructed client. Only a real "the client finished starting" signal is safe
+     * to gate on.
      */
     private static volatile boolean clientStarted;
 
@@ -143,7 +143,7 @@ public final class RuntimeShaderPack implements PackResources {
      * triggers a terrain pipeline recompile ({@code RendererReload.request()}) after installing a
      * pack MUST chain it on this future -- requesting it immediately compiles {@code
      * fornax_runtime:blocks/terrain} against the stale snapshot and hard-crashes the next chunk
-     * draw with "Couldn't find source" (live-caught on the None-to-pack live apply).
+     * draw with "Couldn't find source".
      *
      * <p>One-arg overload for existing callers that never install a vanilla-shader override --
      * delegates with an empty override map, so {@link #getNamespaces} keeps advertising only
@@ -177,11 +177,11 @@ public final class RuntimeShaderPack implements PackResources {
             Map<String, byte[]> vanillaBinaryOverrides) {
         this.sources = Map.copyOf(newSources);
         this.servedSources = stripAll(this.sources);
-        // STRIPPED TOO, and missing this the first time is why the fix did not land. These are
-        // vanilla core shaders rewritten FROM THIS PACK, so they carry the pack's comment density
-        // wholesale, and they are served straight to vanilla's ShaderManager under the minecraft
-        // namespace -- the same preprocessor, the same regex, the same overflow. Stripping only the
-        // fornax_runtime map left this one as an untouched second path to the identical crash.
+        // These are vanilla core shaders rewritten FROM THIS PACK, so they carry the pack's comment
+        // density wholesale, and they are served straight to vanilla's ShaderManager under the
+        // minecraft namespace -- the same preprocessor, the same regex, the same overflow risk as
+        // fornax_runtime's own sources. Must be stripped here too, or this map is an untouched
+        // second path to that crash.
         this.vanillaOverrides = stripAll(vanillaOverrides);
         this.vanillaBinaryOverrides = Map.copyOf(vanillaBinaryOverrides);
         // ecv2 instrumentation: ground-truth fingerprint of the terrain fragment source actually
@@ -309,10 +309,9 @@ public final class RuntimeShaderPack implements PackResources {
         if (!NAMESPACE.equals(namespace)) {
             return;
         }
-        // servedSources, NOT sources -- and this is the line that actually mattered. Vanilla's
-        // ShaderManager.prepare ENUMERATES shaders through listResources and compiles what it finds
-        // here; it does not go through getResource. Stripping only getResource fixed the path
-        // nothing was using and left the reload crash exactly as it was.
+        // servedSources, NOT sources -- vanilla's ShaderManager.prepare ENUMERATES shaders through
+        // listResources and compiles what it finds here; it does not go through getResource. This is
+        // the map that must carry the comment-stripped text for the preprocessor to see.
         String prefix = pathStart.endsWith("/") ? pathStart : pathStart + "/";
         for (Map.Entry<String, String> e : servedSources.entrySet()) {
             String path = e.getKey();

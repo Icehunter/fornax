@@ -7,22 +7,19 @@ import org.jspecify.annotations.Nullable;
  * motion and depth attachments, and the engine {@code sceneHistory} target -- carry data that
  * THIS frame's geometry actually wrote.
  *
- * <p><b>Why this exists as its own predicate.</b> {@code GameRendererMixin} used to ask only
- * "are the targets non-null?", i.e. whether they happened to be ALLOCATED. That is not the same
- * question. {@code GBufferManager} has no teardown path at all -- {@code ensureSize} only ever
- * REPLACES its instance, and {@code GraphRunner.closeCurrent()} never touches it -- and flipping
- * the master shaders-enabled toggle off with a pack still selected runs {@code
- * ShadersEnabledFlip.apply(false)}, which deliberately does NOT unload the pack, so {@code
- * GraphRunner.registry} (and with it {@code sceneHistoryTarget()}) stays alive too. Both handles
- * therefore survive the toggle while {@code GraphRunner.prepare()} early-returns on the latched
- * {@code isActive()} and nothing writes a single motion vector. The old null-only guard saw two
- * live handles, skipped nothing, and handed the reconstruct a FROZEN G-buffer: {@code
- * reconstruct.fsh} reprojected with the last deferred frame's motion, the disocclusion guard
- * compared two stale depths and found them identical, and at {@code taaBlendFactor} 0.9 nine
- * tenths of every pixel came from history -- vanilla rendering under a heavy ghost of the moment
- * the user turned shaders off. Live-caught: {@code latest.log} 2026-08-04 shows "Render state
- * latched: pack graph inactive" at 16:43:08 with no reconstruct-skip warning anywhere after it,
- * and exactly one {@code [GBuffer] (Re)built} line, five minutes earlier.
+ * <p><b>Why this exists as its own predicate.</b> A null-only check -- "are the targets
+ * ALLOCATED?" -- is not the same question as whether they carry data THIS frame wrote. {@code
+ * GBufferManager} has no teardown path at all -- {@code ensureSize} only ever REPLACES its
+ * instance, and {@code GraphRunner.closeCurrent()} never touches it -- and flipping the master
+ * shaders-enabled toggle off with a pack still selected runs {@code ShadersEnabledFlip.apply(false)},
+ * which deliberately does NOT unload the pack, so {@code GraphRunner.registry} (and with it {@code
+ * sceneHistoryTarget()}) stays alive too. Both handles therefore survive the toggle while {@code
+ * GraphRunner.prepare()} early-returns on the latched {@code isActive()} and nothing writes a
+ * single motion vector. A null-only guard sees two live handles, skips nothing, and hands the
+ * reconstruct a FROZEN G-buffer: {@code reconstruct.fsh} reprojects with the last deferred frame's
+ * motion, the disocclusion guard compares two stale depths and finds them identical, and at {@code
+ * taaBlendFactor} 0.9 nine tenths of every pixel comes from history -- vanilla rendering under a
+ * heavy ghost of the moment the user turned shaders off.
  *
  * <p><b>The contract, stated rather than inferred.</b> Motion and depth are trustworthy exactly
  * when the pack graph is driving rendering, because that is the same latch ({@link
