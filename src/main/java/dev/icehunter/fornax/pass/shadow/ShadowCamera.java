@@ -1,6 +1,8 @@
 package dev.icehunter.fornax.pass.shadow;
 
+import org.joml.Matrix4d;
 import org.joml.Matrix4f;
+import org.joml.Vector3d;
 import org.joml.Vector3f;
 
 /**
@@ -217,9 +219,10 @@ public final class ShadowCamera {
         // snap instead of applying it. The window has to move by -remainder so that camLight's
         // quantized (floor) position -- not its raw position -- sits at the window center.
         float texelSize = (2.0f * shadowDistance) / shadowResolution;
-        Vector3f camLight = lightView.transformPosition(new Vector3f((float) camX, (float) camY, (float) camZ), new Vector3f());
-        // NOTE double->float: at extreme world coordinates float precision exceeds a texel; snapping
-        // in double first keeps the remainder exact where it matters.
+        // camX/Y/Z are absolute (not camera-relative), so this transform runs in double: a float
+        // cast here loses sub-texel precision at large world coordinates. eye/up promote losslessly.
+        Matrix4d lightViewD = new Matrix4d().setLookAt(eye.x, eye.y, eye.z, 0.0, 0.0, 0.0, up.x, up.y, up.z);
+        Vector3d camLight = lightViewD.transformPosition(camX, camY, camZ, new Vector3d());
         double lx = camLight.x, ly = camLight.y;
         float snapX = (float) (lx - Math.floor(lx / texelSize) * texelSize);
         float snapY = (float) (ly - Math.floor(ly / texelSize) * texelSize);

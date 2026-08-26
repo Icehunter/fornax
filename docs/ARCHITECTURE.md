@@ -1946,6 +1946,11 @@ else entirely.
   signals the union of `computeGraphicsWaitStages` across every producer in its chain rather than a
   hardcoded `FRAGMENT_SHADER_BIT`, so a pack pointing a `COPY` or `PARTICLES` pass at a lighting
   buffer still gets the correct stage instead of a silently under-synchronized fragment-only wait.
+- **A transform on absolute world coordinates runs in double, never float.** `ShadowCamera.compute`'s
+  texel-snap needs the true sub-texel remainder of the player's absolute position. Float32 cannot
+  represent that remainder past a few million blocks: every sub-texel offset rounds to the same
+  float. Only this one transform needs it; every other use of the light view is already
+  camera-relative and stays float.
 - **Every async resource-reload chain that ends in `RendererReload.request()` carries an
   `.exceptionally` handler.** `PackSwitch.apply`, `PackEditSession.apply` and `PackReload.reload`
   all chain the same `Minecraft.reloadResourcePacks()`-derived future; a listener throwing partway

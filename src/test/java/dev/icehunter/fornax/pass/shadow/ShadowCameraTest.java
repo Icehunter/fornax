@@ -62,6 +62,22 @@ class ShadowCameraTest {
     }
 
     @Test
+    void texelSnapTracksSubTexelCameraMovementAtExtremeWorldCoordinates() {
+        // float32 can't represent a sub-texel offset at 20,000,000 blocks: every value up to 1.5
+        // texels past that rounds to the same nearest float. Two cameras a true half-texel apart
+        // must still produce different windows.
+        double base = 20_000_000.0;
+        float texelWorld = (2.0f * DISTANCE) / RESOLUTION;
+        Matrix4f a = ShadowCamera.compute(NOON_SUN, base, 64.0, 100.0, DISTANCE, RESOLUTION).viewProj();
+        Matrix4f b = ShadowCamera.compute(NOON_SUN, base + texelWorld * 0.5, 64.0, 100.0, DISTANCE, RESOLUTION).viewProj();
+        // A small camera-relative point (real terrain vertices are this shape), not the camera's own
+        // origin: the origin lands within a texel of center by construction either way.
+        Vector4f pa = a.transform(new Vector4f(1.0f, 0.0f, 0.0f, 1.0f));
+        Vector4f pb = b.transform(new Vector4f(1.0f, 0.0f, 0.0f, 1.0f));
+        assertTrue(Math.abs(pa.x() - pb.x()) > 1e-4f, "half-texel move must shift the window");
+    }
+
+    @Test
     void lowSunAngleStillProducesValidOrtho() {
         // Near-sunset direction (mostly horizontal): matrix must stay finite/invertible and keep the
         // camera-origin near clip center.
