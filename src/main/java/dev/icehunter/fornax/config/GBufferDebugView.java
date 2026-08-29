@@ -369,55 +369,49 @@ public enum GBufferDebugView {
     // longer exist, so selecting them would silently do nothing. Safe to remove -- they were the
     // last four ordinals, appended after nothing, so no later ordinal shifts.
     /**
-     * Reads {@code glint_occlusion.fsh}'s own real output directly rather than reasoning about
-     * {@code lightDir.y} from the formulas: sun glitter above water reads correct, but moon glitter
-     * above water reads fully absent even fully unobstructed. This measures the pass's actual
-     * {@code lightDir} at the crosshair. Unlike every SHADOW_QUERY/former GLINT_QUERY ordinal, this
-     * needs NO debug branch
-     * in the shader at all: {@code glint_occlusion.fsh}'s output target was widened to {@code
-     * rgba16f} (from {@code r8}) so the pass can write {@code lightDir} into the unused {@code .gba}
-     * channels UNCONDITIONALLY, every frame, real consumer only ever reading {@code .r}. R = the
-     * real occlusion result (1.0 unoccluded / 0.0 occluded-or-no-light), GBA = {@code lightDir}.
-     * Two real (non-sentinel-confusable) cases: {@code (-1,0,0,0)} means the crosshair isn't on a
-     * water texel (never actually sampled by the real consumer either); {@code (0, lightDir)} means
-     * both celestial bodies are below the horizon -- a genuine zero, still carries the real computed
-     * direction. Reads a DIFFERENT target ({@code glintOcclusion}) than every ordinal above it --
-     * see {@link dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback#targetFor}. Not the last
-     * value: the underwater-glint quad follows it.
+     * Reads {@code glint_occlusion.fsh}'s own real output directly instead of deriving
+     * {@code lightDir.y} from the formulas, since the two diverge for moon glitter above water.
+     * Measures the pass's actual {@code activeVisibility}/{@code trueSunVisibility}/
+     * {@code moonVisibility} at the crosshair: independent shadow-march results for the light
+     * currently driving glitter, the true sun, and the moon, since {@code glint_occlusion.fsh}
+     * traces all three every frame regardless of which body is above the horizon. {@code (-1,0,0)}
+     * means the crosshair isn't on a water texel (never actually sampled by the real consumer
+     * either); a genuine {@code (0,0,0)} means every traced direction is occluded or below the
+     * horizon. Reads a DIFFERENT target ({@code glintOcclusion}) than every ordinal above it. See
+     * {@link dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback#targetFor}. Not the last value:
+     * the underwater-glint quad follows it.
      */
     GLINT_OCCLUSION_QUERY,
     /**
      * Underwater-glint instrument, part 1 of 4 (with {@link #UW_GLINT_2}, {@link #UW_GLINT_3},
-     * {@link #UW_GLINT_4}). Sun glitter above water reads correct; the underwater sun glint stays
-     * fully absent even at the easiest possible geometry (sun at zenith, looking straight up), where
-     * static tracing shows `uwSolarLobe` at its exact maximum (1.0) -- so the alignment math itself
-     * is not the defect. This reads the real values of everything downstream of it instead of a
-     * further guess. R = {@code
-     * uwSunAlignment}, G = {@code uwSolarLobe}, B = {@code uwFresnel}. Written by {@code
-     * water_composite.fsh}'s TRANSLUCENT blend pass, so A is always exactly 1.0 by construction --
-     * three values per ordinal, not four, same shape as the retired GLINT_QUERY instrument. Reads
-     * {@code sceneHdrComposited}, not {@code sceneHdr} -- see {@link
+     * {@link #UW_GLINT_4}). R = {@code uwSunAlignment}, G = {@code uwMoonAlignment}, B =
+     * {@code uwFresnel}: {@code water_composite.fsh} tracks the sun and moon as independent
+     * alignment terms, each feeding its own lobe and glint downstream. Written by
+     * {@code water_composite.fsh}'s TRANSLUCENT blend pass, so A is always exactly 1.0 by
+     * construction, three values per ordinal not four, same shape as the retired GLINT_QUERY
+     * instrument. Reads {@code sceneHdrComposited}, not {@code sceneHdr}. See {@link
      * dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback#targetFor}.
      */
     UW_GLINT_1,
     /**
-     * Underwater-glint investigation, part 2 of 4. RGB = {@code uwEyeFilter.rgb} -- the exponential
-     * depth-absorption filter (a real candidate: it decays fast with camera depth, though it should
-     * be near 1.0 at the shallow, near-surface noon test). Same shape as {@link #UW_GLINT_1}.
+     * Underwater-glint instrument, part 2 of 4. RGB = {@code uwEyeFilter.rgb}: the exponential
+     * depth-absorption filter applied to both the sun- and moon-filtered glint colour. Same shape as
+     * {@link #UW_GLINT_1}.
      */
     UW_GLINT_2,
     /**
-     * Underwater-glint investigation, part 3 of 4. R = {@code skyVis} (a real candidate: multiplies
-     * the whole additive glint term toward zero if the water pre-pass's sky-light flag reads low
-     * here), G = {@code uwGlint} itself, B = {@code u_UnderwaterSunGlitterStrength} -- the runtime
-     * slider (0.0-2.0, default 1.0), read here for a direct cross-check against whatever the user
-     * finds in pack settings. Same shape as {@link #UW_GLINT_1}.
+     * Underwater-glint instrument, part 3 of 4. R = {@code uwSunGlint}, G = {@code uwMoonGlint}:
+     * each celestial body's own lobe-times-horizon-fade-times-microcoverage-times-shadow term,
+     * before either is filtered by eye colour or scaled by strength/skyVis. B =
+     * {@code u_UnderwaterSunGlitterStrength}, the runtime slider (0.0-2.0, default 1.0), read here
+     * for a direct cross-check against whatever the user finds in pack settings. Same shape as
+     * {@link #UW_GLINT_1}.
      */
     UW_GLINT_3,
     /**
-     * Underwater-glint investigation, part 4 of 4. RGB = {@code uwGlintContribution.rgb} -- the
-     * actual term added into {@code surface}, i.e. the final answer to "is anything real being
-     * added to the pixel at all."
+     * Underwater-glint instrument, part 4 of 4. RGB = {@code uwGlintContribution.rgb}: the actual
+     * term added into {@code surface}, i.e. the final answer to "is anything real being added to
+     * the pixel at all."
      */
     UW_GLINT_4,
     /**
@@ -570,7 +564,7 @@ public enum GBufferDebugView {
             case GLINT_OCCLUSION_QUERY -> "Glint Occlusion Query";
             case UW_GLINT_1 -> "UW Glint: Alignment/Fresnel";
             case UW_GLINT_2 -> "UW Glint: Eye Filter";
-            case UW_GLINT_3 -> "UW Glint: SkyVis/Strength";
+            case UW_GLINT_3 -> "UW Glint: Sun+Moon/Strength";
             case UW_GLINT_4 -> "UW Glint: Contribution";
             case UW_GLINT_5 -> "UW Glint: Incidence/Position";
             case SHADOW_MAP_VIEW -> "Shadow Map (raw)";

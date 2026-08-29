@@ -87,7 +87,8 @@ public final class GraphValidator {
             BrickGridUpload.PALETTE_TARGET, BrickGridUpload.LIGHT_VOLUME_TARGET,
             BrickGridUpload.BRICK_SUMMARY_TARGET,
             VoxelWaterReflBuffer.TARGET, AnalyticLightListBuffer.TARGET,
-            PrecipClipmapBuffer.TARGET, SurfaceFluidClipmapBuffer.TARGET,
+            PrecipClipmapBuffer.TARGET, PrecipCoarseClipmapBuffer.TARGET,
+            SurfaceFluidClipmapBuffer.TARGET,
             WaterActorBuffer.TARGET);
 
     /** Legal {@code pass.blend} values -- see {@code PassSpec.blend()}'s own doc. */
@@ -321,6 +322,18 @@ public final class GraphValidator {
         TargetSpec t = graph.targets().get(base);
         if (t == null || t.kind() != TargetKind.BUFFER) {
             return; // a builtin, a reserved engine name, a pack texture asset, or a texture target
+        }
+        // The coarse field is uploaded on the compute queue with a transfer-to-compute barrier.
+        // It is deliberately a raw input to a pack's compute preprocessing step, not a graphics
+        // resource: accepting a fragment/particle reader here would promise queue handoff and
+        // visibility this engine does not establish. The preprocessing output is the portable
+        // texture that graphics passes may sample instead.
+        if (!writePosition && base.equals(PrecipCoarseClipmapBuffer.TARGET)
+                && p.type() != PassType.COMPUTE) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + ".inputs",
+                    "'" + ref + "' is the raw coarse precipitation field and may be read only by a"
+                            + " compute preprocessing pass; graphics passes must sample that pass's"
+                            + " output instead");
         }
         boolean legal = writePosition
                 ? p.type() == PassType.COMPUTE

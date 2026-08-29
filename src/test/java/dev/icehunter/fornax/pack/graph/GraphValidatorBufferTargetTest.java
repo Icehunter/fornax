@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * fail quietly: who is allowed to size it, and who is allowed to bind it.
  *
  * <p>Both guard the same failure shape. A buffer that nothing sizes, or a buffer named by a pass
- * with no code path to bind it, throws out of runner build -- which
+ * with no code path to bind it, throws out of runner build, which
  * {@code GraphRunner.ensureRunnersBuilt()} catches into a retry loop, discarding EVERY runner built
  * in that attempt and trying again next frame, forever. The visible symptom is not an error but a
  * pack whose entire post chain silently never runs.
@@ -61,9 +61,9 @@ class GraphValidatorBufferTargetTest {
 
     @Test
     void aPackBufferWithNoDeclaredSizeIsRejected() {
-        // The gap this whole syntax closes. Before it, this graph loaded cleanly and nothing --
-        // TargetPlan, TargetRegistry, any engine call site -- ever allocated snowField, so the
-        // compute pass below threw once per frame inside a swallowed retry loop.
+        // The gap this syntax closes: with no declared size, nothing (TargetPlan, TargetRegistry,
+        // any engine call site) ever allocates snowField, so the compute pass below throws once
+        // per frame inside a swallowed retry loop.
         FornaxPackError error = assertThrows(FornaxPackError.class, () -> GraphValidator.validate(
                 graph(targets(TargetSpec.buffer("snowField", null), texture("out")),
                         pass("sim", PassType.COMPUTE, List.of(), List.of("snowField"))),
@@ -74,7 +74,7 @@ class GraphValidatorBufferTargetTest {
     @Test
     void anEngineOwnedBufferWithNoDeclaredSizeIsAccepted() {
         // Every shipped pack declares its voxel*/analyticLightList buffers exactly this way, purely
-        // so the name is referenceable -- the rule above must not break them.
+        // so the name is referenceable. The rule above must not break them.
         assertDoesNotThrow(() -> GraphValidator.validate(
                 graph(targets(TargetSpec.buffer(BrickGridUpload.OCCUPANCY_TARGET, null), texture("out")),
                         pass("rt", PassType.COMPUTE, List.of(BrickGridUpload.OCCUPANCY_TARGET), List.of("out"))),
@@ -105,7 +105,8 @@ class GraphValidatorBufferTargetTest {
                         BrickGridUpload.PALETTE_TARGET, BrickGridUpload.LIGHT_VOLUME_TARGET,
                         BrickGridUpload.BRICK_SUMMARY_TARGET,
                         VoxelWaterReflBuffer.TARGET, AnalyticLightListBuffer.TARGET,
-                        PrecipClipmapBuffer.TARGET, SurfaceFluidClipmapBuffer.TARGET,
+                        PrecipClipmapBuffer.TARGET, PrecipCoarseClipmapBuffer.TARGET,
+                        SurfaceFluidClipmapBuffer.TARGET,
                         WaterActorBuffer.TARGET),
                 GraphValidator.ENGINE_BUFFERS);
     }
@@ -118,6 +119,28 @@ class GraphValidatorBufferTargetTest {
                 graph(targets(TargetSpec.buffer("snowField", null, new BufferSize(4, 16)),
                                 TargetSpec.buffer("snowPrev", null, new BufferSize(4, 16))),
                         pass("sim", PassType.COMPUTE, List.of("snowPrev"), List.of("snowField"))),
+                Map.of(), 1920, 1080));
+    }
+
+    @Test
+    void rawCoarsePrecipitationIsComputeInputOnly() {
+        TargetSpec coarse = TargetSpec.buffer(PrecipCoarseClipmapBuffer.TARGET, null);
+
+        assertDoesNotThrow(() -> GraphValidator.validate(
+                graph(targets(coarse, texture("out")),
+                        pass("preprocess", PassType.COMPUTE,
+                                List.of(PrecipCoarseClipmapBuffer.TARGET), List.of("out"))),
+                Map.of(), 1920, 1080));
+
+        assertThrows(FornaxPackError.class, () -> GraphValidator.validate(
+                graph(targets(coarse, texture("out")),
+                        pass("badFullscreen", PassType.FULLSCREEN,
+                                List.of(PrecipCoarseClipmapBuffer.TARGET), List.of("out"))),
+                Map.of(), 1920, 1080));
+        assertThrows(FornaxPackError.class, () -> GraphValidator.validate(
+                graph(targets(coarse, texture("out")),
+                        pass("badParticles", PassType.PARTICLES,
+                                List.of(PrecipCoarseClipmapBuffer.TARGET), List.of("out"))),
                 Map.of(), 1920, 1080));
     }
 
@@ -136,7 +159,7 @@ class GraphValidatorBufferTargetTest {
     void aFullscreenPassMayNotWriteAPackBuffer() {
         // Blaze3D's fragment pipeline has no storage-buffer uniform type at all, so there is no code
         // path that could ever satisfy this. Left to runner build it becomes requireTarget().format()
-        // on a target with no TargetInstance -- a throw that aborts every OTHER runner too.
+        // on a target with no TargetInstance: a throw that aborts every OTHER runner too.
         assertThrows(FornaxPackError.class, () -> GraphValidator.validate(
                 graph(targets(TargetSpec.buffer("snowField", null, new BufferSize(4, 16))),
                         pass("bad", PassType.FULLSCREEN, List.of(), List.of("snowField"))),
@@ -160,7 +183,7 @@ class GraphValidatorBufferTargetTest {
         //
         // The graph deliberately includes a compute pass that WRITES snowField. Without it,
         // checkGeometryInputFinality rejects the graph first ("never written this frame") and this
-        // test passes no matter what the buffer-bindability rule says -- mutation-verified: with the
+        // test passes no matter what the buffer-bindability rule says. Mutation-verified: with the
         // rule disabled entirely, the writer-less version of this test still passed.
         PassSpec geom = new PassSpec("terrain", PassType.GEOMETRY, null, "shaders/blocks/terrain", null,
                 List.of("snowField"), List.of(), null, null, List.of(), null, null, null);
@@ -172,8 +195,8 @@ class GraphValidatorBufferTargetTest {
 
     @Test
     void aCopyPassMayNotReadAPackBuffer() {
-        // The remaining read-side type. A copy pass has no descriptor set at all -- CopyRunner
-        // resolves both ends as textures -- so a buffer here resolves to nothing.
+        // The remaining read-side type. A copy pass has no descriptor set at all: CopyRunner
+        // resolves both ends as textures, so a buffer here resolves to nothing.
         assertThrows(FornaxPackError.class, () -> GraphValidator.validate(
                 graph(targets(TargetSpec.buffer("snowField", null, new BufferSize(4, 16)), texture("out")),
                         pass("sim", PassType.COMPUTE, List.of(), List.of("snowField")),
@@ -186,7 +209,7 @@ class GraphValidatorBufferTargetTest {
     @Test
     void aPackBufferIsAccountedForInTheVramReport() {
         // Real, permanently-held VRAM the pack asked for. Omitting it understates every pack that
-        // owns a buffer, with nothing in the log to say so -- the same reason the engine-injected
+        // owns a buffer, with nothing in the log to say so, the same reason the engine-injected
         // sceneHistory pair is accounted for explicitly.
         GraphSpec bare = graph(targets(texture("out")),
                 pass("p", PassType.FULLSCREEN, List.of(), List.of("out")));

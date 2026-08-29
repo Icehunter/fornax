@@ -4,6 +4,7 @@ import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.compat.SkyModCompat;
 import dev.icehunter.fornax.config.FornaxConfig;
@@ -43,6 +44,7 @@ import dev.icehunter.fornax.pass.voxel.VoxelDebugRaymarchPass;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
 import dev.icehunter.fornax.voxel.BrickGridUpload;
 import dev.icehunter.fornax.voxel.PrecipClipmapUpload;
+import dev.icehunter.fornax.voxel.PrecipCoarseClipmapUpload;
 import dev.icehunter.fornax.voxel.SurfaceFluidClipmapUpload;
 import dev.icehunter.fornax.voxel.VoxelWindow;
 import dev.icehunter.fornax.pipeline.CelestialSprites;
@@ -112,6 +114,10 @@ public final class GraphRunner {
     private static PackModel currentPack;
     @Nullable
     private static TargetRegistry registry;
+    // Set at prepare's resource boundary. A required coarse-weather reset may fail to upload; no
+    // graph pass is allowed to bind that field until its complete current window reached the GPU.
+    private static boolean coarsePrecipitationRequired;
+    private static boolean coarsePrecipitationReady = true;
     // Pack-shipped static texture assets ([textures.*] in graph.toml, e.g. waterWaveNormal) --
     // bookkeeping-only at rebuild() (mirrors `registry` above: rebuild() can run before any GPU
     // device exists), actual decode+upload deferred to ensureLoaded() in prepare(), torn down
@@ -159,6 +165,9 @@ public final class GraphRunner {
     private static final Set<String> missingRunnerLogged = new HashSet<>();
     // Same log-once/reset-on-rebuild shape as missingRunnerLogged, for logPassRunFailureOnce().
     private static final Set<String> passRunFailureLogged = new HashSet<>();
+    // Pipeline construction can fail for one backend-specific compute function while every other
+    // runner remains valid. Name it once per pack session without flooding every frame/rebuild.
+    private static final Set<String> runnerBuildFailureLogged = new HashSet<>();
     private static boolean packDeclaresDepthCopyback;
 
     // Pure-JVM rolling stats; the FrameProfiler OBJECT lives for the mod's whole session, independent
@@ -214,6 +223,14 @@ public final class GraphRunner {
     @Nullable
     public static PackTextureRegistry packTextureRegistry() {
         return packTextureRegistry;
+    }
+
+    /** Test-only seam: lets a pure-JVM test drive {@link ComputePassRunner#descriptorTypeFor}'s
+     * pack-texture branch without a real pack load. Mirrors {@code SsaaManager.setScaleFactorForTesting}'s
+     * shape. This is global static state shared across the whole test run, so callers must restore
+     * {@code null} (or the prior value) themselves. */
+    static void setPackTextureRegistryForTest(@Nullable PackTextureRegistry registry) {
+        packTextureRegistry = registry;
     }
 
     /** The active pack's live {@link TargetRegistry}, or {@code null} if no pack is loaded -- lets
@@ -964,6 +981,9 @@ public final class GraphRunner {
         // ShadowMapManager's own per-call ensureSize/clear pattern -- see that method's own doc.
 
         TargetRegistry r = registry;
+        coarsePrecipitationRequired = currentPack != null
+                && anyEnabledComputePassReadsPrecipCoarseClipmap(currentPack.graph(), compileValues);
+        coarsePrecipitationReady = !coarsePrecipitationRequired;
         if (r != null) {
             r.ensureSize(width, height, outputWidth, outputHeight);
             // Voxel water reflection SSBO: re-checked EVERY frame against this frame's live render
@@ -1033,6 +1053,17 @@ public final class GraphRunner {
                 PrecipClipmapBuffer.free(r);
             }
 
+            // Coarse nearby precipitation feeds one compute preprocessing pass. The raw upload has
+            // compute-queue visibility only, so graph admission intentionally excludes graphics
+            // readers; packs sample the preprocessing result instead. A failed full reset leaves
+            // this false, preventing all graph execution until the complete current window arrives.
+            if (coarsePrecipitationRequired) {
+                PrecipCoarseClipmapBuffer.ensureAllocated(r);
+                coarsePrecipitationReady = PrecipCoarseClipmapUpload.onFrame(r);
+            } else if (r.getBuffer(PrecipCoarseClipmapBuffer.TARGET) != null) {
+                PrecipCoarseClipmapBuffer.free(r);
+            }
+
             // Generic surface-fluid data for pack-owned simulations. The CPU harvest is bounded by
             // SURFACE_FLUID_DETAIL, while the transfer itself is recorded into the first consuming
             // compute pass's existing frames-in-flight command buffer (no per-frame host wait).
@@ -1057,6 +1088,10 @@ public final class GraphRunner {
             } else if (r.getBuffer(WaterActorBuffer.TARGET) != null) {
                 WaterActorBuffer.free(r);
             }
+        }
+        if (!canExecuteGraphForCoarsePrecipitation(coarsePrecipitationRequired, coarsePrecipitationReady)) {
+            clearGeometryInputViews();
+            return;
         }
         ensureRunnersBuilt();
         // AFTER ensureRunnersBuilt, which is what lazily creates optionsBuffer, and BEFORE any pass
@@ -1138,6 +1173,9 @@ public final class GraphRunner {
         if (!isActive()) {
             return;
         }
+        if (!canExecuteGraphForCoarsePrecipitation(coarsePrecipitationRequired, coarsePrecipitationReady)) {
+            return;
+        }
         TargetRegistry r = registry;
         PackModel pack = currentPack;
         PackOptionsBuffer options = optionsBuffer;
@@ -1186,6 +1224,10 @@ public final class GraphRunner {
         // exactly once -- at the first slot, or after the loop if the graph declares none.
         boolean geometryDwellClosed = false;
 
+        // Publish this frame's NDC-to-previous-NDC map before the graph's first temporal consumer.
+        // The unjittered projection keeps sky motion in the same jitter-free basis as gMotion.
+        SkyReprojection.commit(CameraJitter.currentUnjitteredProjection(), matrices.modelView());
+
         for (PassSpec p : pack.graph().passes()) {
             if (p.type() == PassType.GEOMETRY) {
                 if (timer != null && !geometryDwellClosed) {
@@ -1202,11 +1244,10 @@ public final class GraphRunner {
             if (!enabledAtCompile(p)) {
                 continue;
             }
-            // COMPUTE passes are bracketed with a CPU wall-clock measurement below instead of
-            // PassTimer's GPU-timestamp bracket -- see the COMPUTE case's own comment for why a GPU
-            // timestamp pair straddling this call cannot observe a raw-Vulkan compute submission's
-            // real cost -- e.g. a pass's profiler row reading a permanent 0.00ms even while its
-            // synchronous fence-wait demonstrably blocks the render thread.
+            // COMPUTE passes own raw-Vulkan timestamp rings in ComputePassRunner, because a
+            // PassTimer bracket on the graphics encoder cannot observe another queue's dispatch.
+            // Any legacy synchronous dependency wait is published separately as a latest-value
+            // "compute wait <pass>" row rather than contaminating the pass's GPU avg/p95 samples.
             boolean gpuTimestampBracket = timer != null && p.type() != PassType.COMPUTE;
             if (gpuTimestampBracket) {
                 timer.bracketBegin(p.name());
@@ -1254,13 +1295,13 @@ public final class GraphRunner {
                             // The only compute pass left in this graph position with a current-frame
                             // graphics dependency is voxel_water_refl, which keeps its legacy host wait.
                             boolean synchronousWait = isVoxelWaterReflPass(p);
-                            long cpuStart = synchronousWait ? System.nanoTime() : 0L;
-                            runner.run(r, computeParams(p, width, height), options, globals,
+                            long dependencyWaitNanos = runner.run(r, computeParams(p, width, height), options, globals,
                                     computeExtraPushConstants(p, matrices, x, y, z),
                                     computeDispatchOverride(p), synchronousWait,
                                     graphicsWaitStagesFor(p, pack.graph()));
-                            if (synchronousWait) {
-                                frameProfiler.record(p.name(), (System.nanoTime() - cpuStart) / 1_000_000.0);
+                            if (dependencyWaitNanos >= 0L) {
+                                frameProfiler.recordValue("compute wait " + p.name(),
+                                        dependencyWaitNanos / 1_000_000.0);
                             }
                         }
                     } else {
@@ -1324,16 +1365,6 @@ public final class GraphRunner {
         // dispatch + present happens later, at GameRendererMixin's renderLevel RETURN, once
         // mainRenderTarget is the final native target.
         VoxelDebugRaymarchPass.onFrame(r, matrices, x, y, z, anyEnabledComputePassReadsVoxelGrid(pack.graph(), compileValues));
-
-        // Sky reprojection: this frame's NDC->previous-NDC map for infinitely distant content -- the
-        // motion vector the temporal reconstruct uses wherever the G-buffer wrote none, because
-        // gMotion is a G-buffer attachment and a sky pixel carries its cleared zero (see
-        // SkyReprojection). Committed here because this is the one site that runs exactly once per
-        // frame with this frame's model-view in hand and still ahead of the reconstruct pass at
-        // renderLevel RETURN. The UN-JITTERED projection, not matrices.projection(): gMotion is
-        // expressed in a jitter-free basis (terrain.vsh subtracts each frame's own jitter before
-        // differencing) and the sky motion has to agree with it.
-        SkyReprojection.commit(CameraJitter.currentUnjitteredProjection(), matrices.modelView());
 
         // LAST, with the same arguments FramePipeline.finishOpaque itself receives -- see its own
         // javadoc for why this must commit after this frame's opaque draws/uniform upload, not before.
@@ -1456,9 +1487,16 @@ public final class GraphRunner {
                     }
                     case COMPUTE -> {
                         if (computeBackend != null) {
-                            compute.put(p.name(), ComputePassRunner.build(p, computeBackend, registry,
-                                    extraPushConstantBytesFor(p),
-                                    computeStorageWriteNeedsGraphicsDrain(p, currentPack.graph(), compileValues)));
+                            try {
+                                compute.put(p.name(), ComputePassRunner.build(p, computeBackend, registry,
+                                        extraPushConstantBytesFor(p),
+                                        computeStorageWriteNeedsGraphicsCompletion(
+                                                p, currentPack.graph(), compileValues),
+                                        frameProfiler));
+                            } catch (RuntimeException e) {
+                                GpuFatalErrors.rethrowIfFatal(e);
+                                logRunnerBuildFailureOnce(p.name(), e);
+                            }
                         }
                     }
                     case PARTICLES -> {
@@ -1660,6 +1698,27 @@ public final class GraphRunner {
         return false;
     }
 
+    /** True if an enabled compute pass reads the coarse nearby-precipitation field. */
+    static boolean anyEnabledComputePassReadsPrecipCoarseClipmap(
+            GraphSpec graph, Map<String, Integer> compileValues) {
+        for (PassSpec p : graph.passes()) {
+            if (p.type() != PassType.COMPUTE || !isEnabledAtCompile(p, compileValues)) {
+                continue;
+            }
+            for (String in : p.inputs()) {
+                if (in.equals(PrecipCoarseClipmapBuffer.TARGET)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Pure gate for tests and both frame halves: only a required unavailable field blocks a graph. */
+    static boolean canExecuteGraphForCoarsePrecipitation(boolean required, boolean ready) {
+        return !required || ready;
+    }
+
     /**
      * Whether an enabled shader pass binds the engine-owned surface-fluid field.
      *
@@ -1729,7 +1788,7 @@ public final class GraphRunner {
      * copy at all.
      *
      * <p>Matches readers by base target name, collapsing a {@code .history} suffix, the same way
-     * {@link #computeStorageWriteNeedsGraphicsDrain} already does for the reverse direction: after the
+     * {@link #computeStorageWriteNeedsGraphicsCompletion} already does for the reverse direction: after the
      * end-of-frame swap, next frame's current image is the physical image a reader sampled as history
      * the prior frame, so a {@code .history} reader of this pass's output needs the same handoff a
      * plain reader would.
@@ -1774,8 +1833,8 @@ public final class GraphRunner {
      * after the end-of-frame swap, next frame's current image is the physical image graphics sampled
      * as history in the prior frame.
      */
-    static boolean computeStorageWriteNeedsGraphicsDrain(PassSpec writer, GraphSpec graph,
-                                                          Map<String, Integer> compileValues) {
+    static boolean computeStorageWriteNeedsGraphicsCompletion(PassSpec writer, GraphSpec graph,
+                                                               Map<String, Integer> compileValues) {
         if (writer.type() != PassType.COMPUTE) {
             return false;
         }
@@ -1803,6 +1862,29 @@ public final class GraphRunner {
             }
         }
         return false;
+    }
+
+    /**
+     * Appends graphics-completion timeline signals for storage images that a compute pass may reuse
+     * next frame. Called from the single renderLevel RETURN boundary after scene-history and debug
+     * presentation have recorded their final reads. This method only records signal operations into
+     * Blaze3D's persistent encoder; it neither submits nor host-waits a queue.
+     */
+    public static void recordGraphicsStorageReadsComplete() {
+        VulkanCommandEncoder graphics = null;
+        for (ComputePassRunner runner : computeRunners.values()) {
+            if (!runner.hasPendingGraphicsStorageReads()) {
+                continue;
+            }
+            if (graphics == null) {
+                if (computeBackend == null) {
+                    throw new IllegalStateException(
+                            "Fornax graph: hazardous compute runner exists without a compute backend");
+                }
+                graphics = computeBackend.device().createCommandEncoder();
+            }
+            runner.recordGraphicsStorageReadsComplete(graphics);
+        }
     }
 
     private static String targetBaseName(String ref) {
@@ -2489,6 +2571,18 @@ public final class GraphRunner {
         }
     }
 
+    /** A raw compute pipeline can be rejected by a specific Vulkan backend even when the pack and
+     * SPIR-V passed load-time validation. Quarantine only that runner: graph targets are explicitly
+     * zero-cleared at allocation, so later passes receive a defined empty result instead of losing
+     * the entire deferred graph. */
+    private static void logRunnerBuildFailureOnce(String passName, RuntimeException e) {
+        if (runnerBuildFailureLogged.add(passName)) {
+            FornaxMod.LOGGER.error("[Fornax] GraphRunner: compute pass '{}' pipeline build failed "
+                    + "({}); continuing without this pass until the next rebuild",
+                    passName, e.toString(), e);
+        }
+    }
+
     private static void closeCurrent() {
         // Detach the voxel window from this soon-to-be-closed registry BEFORE freeing its buffers, so a
         // late Sodium-worker onSectionHarvested can't pick up a registry whose buffers are being torn
@@ -2583,6 +2677,7 @@ public final class GraphRunner {
         sourcesReady = false;
         missingRunnerLogged.clear();
         passRunFailureLogged.clear();
+        runnerBuildFailureLogged.clear();
 
         if (registry != null) {
             registry.close();
@@ -2599,6 +2694,8 @@ public final class GraphRunner {
         pendingOptionsLayout = null;
         pendingRuntimeDefaults = Map.of();
         currentPack = null;
+        coarsePrecipitationRequired = false;
+        coarsePrecipitationReady = true;
         // Same reasoning as rebuild()'s invalidate: on teardown the variants reference a pack that no
         // longer exists, and must not survive into whatever loads next.
         dev.icehunter.fornax.pipeline.DeferredGeometryPipelines.invalidate();

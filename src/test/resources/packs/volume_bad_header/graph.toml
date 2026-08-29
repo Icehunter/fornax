@@ -1,0 +1,6 @@
+[textures.badVolume]
+file = "textures/bad_volume.bin"
+depth = 2
+width = 2
+height = 2
+format = "r8"

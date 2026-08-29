@@ -51,17 +51,17 @@ class CrossRepoChannelContractTest {
 
     private static final List<Row> ROWS = List.of(
             new Row("UW_GLINT_1", "shaders/post/water_composite.fsh",
-                    "fragColor = vec4(uwSunAlignment, uwSolarLobe, uwFresnel, 1.0);"),
+                    "fragColor = vec4(uwSunAlignment, uwMoonAlignment, uwFresnel, 1.0);"),
             new Row("UW_GLINT_2", "shaders/post/water_composite.fsh",
                     "fragColor = vec4(uwEyeFilter, 1.0);"),
             new Row("UW_GLINT_3", "shaders/post/water_composite.fsh",
-                    "fragColor = vec4(skyVis, uwGlint, u_UnderwaterSunGlitterStrength, 1.0);"),
+                    "fragColor = vec4(uwSunGlint, uwMoonGlint, u_UnderwaterSunGlitterStrength, 1.0);"),
             new Row("UW_GLINT_4", "shaders/post/water_composite.fsh",
                     "fragColor = vec4(uwGlintContribution, 1.0);"),
             new Row("UW_GLINT_5", "shaders/post/water_composite.fsh",
                     "fragColor = vec4(waveNormal.y, NdotV, worldPos.y, 1.0);"),
             new Row("GLINT_OCCLUSION_QUERY", "shaders/post/glint_occlusion.fsh",
-                    "fragColor = vec4(occluded ? 0.0 : 1.0, lightDir);"),
+                    "fragColor = vec4(activeVisibility, trueSunVisibility, moonVisibility, 1.0);"),
             // sunDir splats into xyz, ndotl into w -- a vec3-plus-scalar shape, not four independent
             // scalars, but still an exact substring once whitespace-normalized.
             new Row("SHADOW_QUERY_1", "shaders/post/gbuffer_resolve.fsh",

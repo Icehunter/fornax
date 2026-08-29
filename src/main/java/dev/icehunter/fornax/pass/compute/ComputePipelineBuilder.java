@@ -29,6 +29,19 @@ public final class ComputePipelineBuilder {
     private ComputePipelineBuilder() {
     }
 
+    @FunctionalInterface
+    interface PipelineCreateCall {
+        int create(long pipelineCache);
+    }
+
+    static int createWithCacheFallback(long pipelineCache, PipelineCreateCall create) {
+        int result = create.create(pipelineCache);
+        if (result != VK13.VK_SUCCESS && pipelineCache != VK13.VK_NULL_HANDLE) {
+            return create.create(VK13.VK_NULL_HANDLE);
+        }
+        return result;
+    }
+
     public record CompiledComputePipeline(long pipeline, long pipelineLayout, long descriptorSetLayout,
                                            long shaderModule) {
     }
@@ -124,9 +137,10 @@ public final class ComputePipelineBuilder {
                     .stage(stageInfo)
                     .layout(pipelineLayout);
             LongBuffer pipelineOut = stack.mallocLong(1);
-            checkVk(VK13.vkCreateComputePipelines(device.vkDevice(), PersistentPipelineCache.handle(),
-                    VkComputePipelineCreateInfo.create(pipelineInfo.address(), 1), null, pipelineOut),
-                    "vkCreateComputePipelines");
+            int pipelineResult = createWithCacheFallback(PersistentPipelineCache.handle(), cache ->
+                    VK13.vkCreateComputePipelines(device.vkDevice(), cache,
+                            VkComputePipelineCreateInfo.create(pipelineInfo.address(), 1), null, pipelineOut));
+            checkVk(pipelineResult, "vkCreateComputePipelines");
 
             return new CompiledComputePipeline(pipelineOut.get(0), pipelineLayout, descriptorSetLayout, shaderModule);
         } catch (RuntimeException e) {

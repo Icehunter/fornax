@@ -335,20 +335,29 @@ public final class EnvSpecularRatioReadback {
                     "[Fornax] rawDepth(compared)=%s\nstoredDepth=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, b, x, y, w, h);
+            // Pack write: fragColor = vec4(activeVisibility, trueSunVisibility, moonVisibility, 1.0).
+            // glint_occlusion.fsh traces independent sun and moon visibility every frame regardless
+            // of which body is above the horizon. (-1,0,0) is the "not a water texel" sentinel,
+            // distinct from a genuine (0,0,0) both-occluded/no-light reading.
             case GLINT_OCCLUSION_QUERY -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
-                    "[Fornax] unoccluded=%s\nlightDir=(%s, %s, %s)"
+                    "[Fornax] activeVisibility=%s\ntrueSunVisibility=%s\nmoonVisibility=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
-                    r, g, b, a, x, y, w, h);
+                    r, g, b, x, y, w, h);
+            // Pack write: fragColor = vec4(uwSunAlignment, uwMoonAlignment, uwFresnel, 1.0).
+            // water_composite.fsh tracks the sun and moon as independent alignment and lobe terms.
             case UW_GLINT_1 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
-                    "[Fornax] uwSunAlignment=%s\nuwSolarLobe=%s\nuwFresnel=%s"
+                    "[Fornax] uwSunAlignment=%s\nuwMoonAlignment=%s\nuwFresnel=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, x, y, w, h);
             case UW_GLINT_2 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] uwEyeFilter=(%s, %s, %s)"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, x, y, w, h);
+            // Pack write: fragColor = vec4(uwSunGlint, uwMoonGlint, u_UnderwaterSunGlitterStrength,
+            // 1.0). Each celestial body has its own glint term; skyVis gates uwGlintContribution
+            // upstream but is not read through this instrument.
             case UW_GLINT_3 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
-                    "[Fornax] skyVis=%s\nuwGlint=%s\nunderwaterSunGlitterStrength=%s"
+                    "[Fornax] uwSunGlint=%s\nuwMoonGlint=%s\nunderwaterSunGlitterStrength=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, x, y, w, h);
             case UW_GLINT_4 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,

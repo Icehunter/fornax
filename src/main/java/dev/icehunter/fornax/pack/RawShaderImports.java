@@ -1,5 +1,7 @@
 package dev.icehunter.fornax.pack;
 
+import dev.icehunter.fornax.pack.layout.GlslCommentStripper;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +25,16 @@ public final class RawShaderImports {
 
     private static String expand(String source, Map<String, String> packSources, String debugName,
                                  Set<String> active) {
+        // Stripped before scanning for directives: the IMPORT regex has no notion of a comment, so
+        // a `//`-documented usage example inside a source file (e.g. a doc comment that shows
+        // "#moj_import <fornax_runtime:x.glsl>" as prose) reads as a real, second import and can
+        // fire a false self-referential "cycle" while that file is still being expanded. Fullscreen
+        // and geometry passes never hit this: their source is served pre-stripped via
+        // RuntimeShaderPack.servedSources, while this raw-shaderc path deliberately keeps sources
+        // unstripped for compute compilation. Uses GlslCommentStripper, the same stripper
+        // RuntimeShaderPack uses for the served-source path, rather than a second implementation of
+        // "what counts as a GLSL comment".
+        source = GlslCommentStripper.strip(source);
         Matcher matcher = IMPORT.matcher(source);
         StringBuilder expanded = new StringBuilder(source.length());
         while (matcher.find()) {

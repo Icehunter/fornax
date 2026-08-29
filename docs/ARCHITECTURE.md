@@ -55,7 +55,7 @@ With no pack active, or with shaders disabled in the config, every one of these 
 | `.pack.material` | blocks.toml -> dense material IDs, block/tag resolution, the generated material GLSL include |
 | `.pack.option` | Annotated-`#define` option grammar parsing and cross-file merging |
 | `.pass.ssaa` / `.pass.taa` / `.pass.reconstruct` | The general render-scale target lifecycle: SSAA (render bigger, then shrink down for smoother edges) box downsample, TAA/TAAU temporal reconstruct (spreading anti-aliasing work across several frames using motion history) plus presentation sharpen, and the camera jitter sequence |
-| `.profile` | GPU per-pass timing (`PassTimer`, ring-buffered across frames-in-flight) feeding a pure-JVM rolling-stats aggregator (`FrameProfiler`); `ProfilerOverlay` (top-left HUD) and `ProfilerLogDump` (full-table log dump) read it, both graded against the 11.1 ms / 90 FPS budget |
+| `.profile` | GPU per-pass timing (`PassTimer` for graphics-encoder work and `ComputePassTimer` for raw compute-queue dispatches, both ring-buffered across frames-in-flight) feeding a pure-JVM rolling-stats aggregator (`FrameProfiler`); `ProfilerOverlay` (top-left HUD) and `ProfilerLogDump` (full-table log dump) read it, both graded against the 11.1 ms / 90 FPS budget |
 | `.pipeline` | Shared per-frame state: `GBuffer`/`GBufferManager` (the G-buffer is the set of full-screen images, such as surface colour, normal direction, and depth, that the deferred step stores before lighting runs), `FornaxChunkVertex`, the render-state latch, push-constant layout, previous-frame camera transform, per-thread material ID, the engine-guaranteed `SceneHistory` target |
 | `.screen` | Pack settings UI: `PackManageScreen` (the pack-agnostic YACL "Manage" entry point, a Shader Options bridge; Import/Export/Defaults live as `mixin.yacl.CategoryTabMixin`-injected chrome, scoped via `PackChromeActions`) and its session-free `PackValuesActions` helper, the legacy bespoke option pages (`PackSettingsScreen`), the YACL-hosted engine-settings factory (`FornaxSettingsScreen`) opened from the pause/title menu, Sodium's video settings, and the open-settings keybind, and its custom Shader Packs tab (`FornaxPacksTab` + the pure `PackListState`) |
 | `.util` | VRAM estimation, renderer-reload request plumbing, sun-direction math |
@@ -74,6 +74,13 @@ SodiumWorldRenderer.drawChunkLayer(OPAQUE, ...)
              insert one final compute -> graphics semaphore wait
   [Sodium's own SOLID/CUTOUT terrain draws run here, into the shared G-buffer]
   RETURN -> GraphRunner.finish(matrices, x, y, z)
+
+GameRenderer.renderLevel(...)
+  RETURN -> restore native target
+            copy scene history
+            present graph/debug consumers
+            record graphics -> next-compute timeline signals
+            advance camera jitter
 ```
 
 Nothing runs for the translucent layer group.
@@ -90,6 +97,17 @@ compute-to-graphics semaphore (a GPU-side signal one queue raises and another wa
 is inserted before opaque terrain begins. Queue order makes that one signal cover the complete
 producer chain while avoiding a wait inside an active Apple tile render encoder.
 
+Cross-queue storage-image reuse has a second, reverse edge. Each compute runner whose storage
+output can also be touched by an enabled graphics pass owns one timeline semaphore. Its compute
+submission waits at `COMPUTE_SHADER` for the value recorded after the preceding frame's final
+graphics reader; at `GameRenderer.renderLevel` RETURN, after scene-history copies and both debug
+presenters, `GraphRunner.recordGraphicsStorageReadsComplete()` appends the next signal value to
+Blaze3D's persistent graphics encoder. The method records only—it neither submits nor waits on the
+host—so the former per-dispatch graphics-queue idle is gone. Storage images still use concurrent
+queue-family sharing where needed, but that only removes ownership transfers; it does not establish
+the execution dependency that prevents next-frame compute writes from racing prior graphics reads.
+The existing binary semaphore remains the opposite, same-frame compute-write to graphics-read edge.
+
 **`GraphRunner.finish(matrices, x, y, z)`** iterates the pack's declared passes in file order. A
 `geometry`-typed pass is a pure placeholder, since Sodium's own draw already ran into the shared
 G-buffer by the time this runs, and the independent lighting producers are placeholders here too,
@@ -100,7 +118,10 @@ contract violation: `ensureRunnersBuilt()` builds every enabled pass's runner or
 skipped but logged at ERROR once per pass per pack session, never silently. A silent skip here would
 be the exact signature of the worst failure this engine can produce: the deferred chain runs and
 produces nothing, with zero log evidence, because terrain lands in the G-buffer but the resolve pass
-never composites it to screen. After the pass loop, a pack that declares no depth copy-back pass
+never composites it to screen. Immediately before the loop, `SkyReprojection.commit(...)`
+publishes this frame's unjittered sky transform, so a temporal pass in that same loop consumes the
+current frame's factual transform rather than the preceding frame's publication. After the pass
+loop, a pack that declares no depth copy-back pass
 gets a hardcoded fallback copy of G-buffer depth into the main render target's depth texture, so
 translucent draws afterward always see correct depth.
 
@@ -126,6 +147,27 @@ the HUD is the normal observable path. Mispaired brackets poison and drop that f
 (logged once) rather than ever pairing timestamps across labels. A backend reporting no usable
 timestamp period degrades `PassTimer` to a one-time-logged no-op; the pass loop's own behaviour and
 ordering are unaffected either way.
+
+Raw `ComputePassRunner` submissions cannot be enclosed by `PassTimer`, because they are recorded
+into their own command buffers and submitted directly to the compute queue. Each compute runner
+therefore owns one raw Vulkan timestamp pool with two queries per `FramePacing.FRAMES_IN_FLIGHT`
+slot. The slot command buffer resets its own pair, writes a start timestamp immediately before
+`vkCmdDispatch`, and writes the end immediately after it, before the release barrier. A pair is
+published to `ComputePassTimer` only after `vkQueueSubmit` succeeds; when that same slot's fence
+later succeeds, its pair is read before the command pool is reset. The runner queries the selected
+compute queue family's `timestampValidBits` from the physical device before creating the pool:
+zero bits disables timing, while a partial-width counter masks both samples and computes elapsed
+ticks modulo that width (including wrap; 64 bits uses subtraction's native modulo behavior).
+Unsupported timestamp periods, query-allocation failures, and unexpectedly unavailable results all
+degrade to untimed compute without changing dispatch or synchronization. Resolved GPU duration uses
+the pass name. A legacy
+host-side dependency fence wait is separately published as latest-value telemetry under
+`compute wait <pass>`, so it cannot be mistaken for rolling GPU avg/p95 execution time.
+
+The graphics `"frame"` bracket is not a sum of every row in the profiler. Raw compute work runs on
+a potentially separate queue and may overlap the graphics bracket; its rows are independent GPU
+intervals useful for finding expensive dispatches, not children that can be arithmetically added to
+the graphics frame duration.
 
 Then, in order, at the very end of `finish`:
 
@@ -384,11 +426,12 @@ exactly two possible owners, and which one applies is decided by name, against
 
 * **Engine-owned**: `voxelBrickIndex`/`voxelOccupancy`/`voxelPayload`/`voxelFaceSeal`/
   `voxelPalette`/`voxelLightVolume`/`voxelBrickSummary` (`BrickGridUpload`), `voxelWaterRefl`
-  (`VoxelWaterReflBuffer`), `analyticLightList` (`AnalyticLightListBuffer`). Their byte counts come
-  from runtime quantities the graph cannot express (voxel window diameter, render resolution), so
-  their own engine call site drives `TargetRegistry.ensureBufferSize`. A pack declares the target
-  purely so the name is referenceable, and must not give it a size; the engine would overwrite it
-  anyway.
+  (`VoxelWaterReflBuffer`), `analyticLightList` (`AnalyticLightListBuffer`), `precipClipmap`, and
+  `precipCoarseClipmap` (`PrecipClipmapBuffer`/`PrecipCoarseClipmapBuffer`). Their byte counts come
+  from runtime quantities the graph cannot express (voxel window diameter, render resolution, or a
+  fixed engine data grid), so their own engine call site drives `TargetRegistry.ensureBufferSize`.
+  A pack declares the target purely so the name is referenceable, and must not give it a size; the
+  engine would overwrite it anyway.
 * **Pack-owned**: anything else. It must declare `stride_bytes` (bytes per element, a multiple of
   4) and `count` (elements); `TargetPlan.compute` emits a `BufferEntry` for it and
   `TargetRegistry.ensureSize` allocates, resizes and frees it exactly like a texture target,
@@ -415,6 +458,32 @@ Only the pass types with a code path for a buffer may name one
 `STORAGE_BUFFER`) and by `fullscreen` (as `UNIFORM_TEXEL_BUFFER`, R32_UINT); writable only by
 `compute`. A buffer as a fullscreen/mipchain output, or as a copy/geometry input, is refused at
 load rather than at runner build, where it becomes the same whole-graph abort described above.
+
+`precipCoarseClipmap` is the deliberate narrow exception to the general read rule. Its uploader
+records transfer visibility only to the compute queue, so `GraphValidator` accepts it solely as an
+input to an enabled `compute` preprocessing pass. That pass must produce the texture sampled by
+later graphics passes; no fullscreen, particle, geometry, copy, or mipchain pass may bind the raw
+field. It is a 128 x 128 toroidal grid of four-block cells, covering a 512 x 512-block window whose
+origin follows the player body in sixteen-block snaps. Each 32-bit word stores the representative
+column's `NONE`/`RAIN`/`SNOW` value in the low byte, a sampled-valid bit at bit 8, and bounded
+eight-bit X/Z tile tags in the high sixteen bits. A zero word is therefore explicitly unknown,
+including where a valid dry cell's tag would otherwise also be zero. Tags reject ordinary stale
+toroidal slots but repeat every 131,072 blocks on either axis, so they are a local validity check,
+not an unbounded world identity.
+
+The engine samples only loaded chunks, at the centre-side column of each four-by-four cell and the
+`MOTION_BLOCKING` surface height. Unloaded cells remain unknown; the engine never guesses that they
+are dry. The uploader does not publish a first window, level change, or discontinuous recenter until
+its complete 64 KiB reset upload both submits and has a successful fence wait. This reset is the
+required defence against the bounded tag period. Until it completes, `GraphRunner` withholds the
+graph's passes for that frame rather than expose old slots under a new window. Normal frames update
+eight rows (4 KiB), complete a sweep in sixteen frames, and retain an already-valid same-cell word
+when its chunk is temporarily unavailable. A failed normal update leaves the prior, self-tagging
+window usable while retrying the same rows next frame.
+
+This is a raw world-data ABI, not a cloud policy. The engine does not smooth biome boundaries,
+extend the field, classify storm shapes, or darken the sky. The required compute preprocessor owns
+those decisions and writes a pack texture for later cloud, sky, shadow, and reflection consumers.
 
 ### Builtin resource names (`builtin.*`)
 
@@ -490,6 +559,48 @@ texture, `WaterNormalTexture`, a from-scratch baked-normal generator, once a pac
 real water-normal asset instead; that class, its `GraphValidator`/`GraphInputResolver`/
 `FullscreenPassRunner` cases, and its test are gone. `builtin.noise` itself is untouched; clouds and
 foam still read it.)
+
+A `[textures.NAME]` declaration also has a volume shape, for a pack that needs a genuine
+`sampler3D` (a baked light-propagation grid, a 3D LUT) rather than a flat image. Adding `depth` to
+the table switches the whole declaration: `width`, `height` and `format` become required alongside
+it, and `file` now names a raw binary asset instead of a PNG, since nothing decodes 3D dimensions
+out of an image header the way `NativeImage` does for 2D (`PackTextureSpec`, `depth == null` for the
+2D case, non-null for volume; `PackTomlLoader` rejects `width`/`height`/`format` on a 2D declaration
+and rejects a volume declaration missing any of them, plus a non-positive `depth`). `format` is one
+of `RawVolumeAsset.Format`'s two tokens, `r8` or `rgba8`, case-insensitive.
+
+The raw asset itself (`RawVolumeAsset`) is a fixed 16-byte little-endian header, four `u32`s in
+order (`width`, `height`, `depth`, a format tag: `0` for R8, `1` for RGBA8), followed by
+`width * height * depth * bytesPerTexel` texel bytes with no further structure: x fastest, then y,
+then z, tightly packed. `PackDiscovery.loadFrom` reads that header at pack-load time and cross-checks
+it against the TOML declaration byte-for-byte (dimensions and format both), the same fail-loud rule
+the 2D probe follows, so a mismatched or truncated volume file is a `FornaxPackError` naming the
+declaration rather than a corrupt upload discovered mid-frame. `PackTextureRegistry.load` dispatches
+on `PackTextureSpec.isVolume()` before either path touches the GPU; the volume branch re-reads the
+same file into a fresh `RawVolumeAsset` and hands it to `Volume3DTexture`.
+
+That volume upload needed a texture class of its own, `Volume3DTexture`, rather than another branch
+through the existing 2D path, because Blaze3D has no `VK_IMAGE_TYPE_3D` anywhere underneath it:
+`GpuDevice.createTexture` throws outright for `depthOrLayers > 1`, and `VulkanGpuTexture`'s own
+constructor hardcodes a 2D image type and folds any depth argument into array layers instead of a
+real Z extent. `Volume3DTexture` hand-builds both the image (a direct `vmaCreateImage` with
+`imageType = VK_IMAGE_TYPE_3D`) and a `VK_IMAGE_VIEW_TYPE_3D` view over it, keeping Blaze3D's
+required superclass construction around only as an inert 1x1x1 placeholder that owns the handles
+`destroy()` still expects to free; uploading texels also has to bypass `CommandEncoder`'s
+`writeToTexture`/`copyBufferToTexture`, since both hardcode a copy depth of one, in favor of a
+hand-recorded `vkCmdCopyBufferToImage` whose region addresses the real depth directly.
+
+Compute descriptors bind pack-declared textures with linear filtering and repeat addressing on
+every axis, including a volume's Z axis; mip sampling remains enabled for 2D assets, while volumes
+have only their uploaded base level. Graph targets and engine builtins retain nearest filtering and
+clamp-to-edge. World-space volume coordinates intentionally leave the normalized unit cube, so
+clamping a volume would stretch its boundary texels across the cloud field instead of tiling the
+density data.
+
+`ComputeShaderCompiler` applies shaderc's performance optimization when producing SPIR-V for raw
+Vulkan pass runners. Pack sources arrive with their complete import graph flattened; optimizing at
+this boundary removes dead helpers and folds the native module before a backend translates it into
+a compute function, without moving any visual policy out of the pack.
 
 ### Geometry-pass inputs (`u_GeomInput0..3`) and `builtin.depth_opaque`
 
@@ -1778,6 +1889,11 @@ dedicated debug-view uniform; it is one value of a mechanism built for something
 - **Reversed-Z depth.** The depth buffer clears to 0.0 ("far") and compares as greater-or-equal.
   Any code touching depth (clears, discards, reconstruction) must respect this convention, not the
   forward-Z one.
+- **A per-frame factual transform is published before its first consumer.** A transform committed
+  after a graph pass reads it is silently one frame stale even though both producer and consumer
+  run once per frame. `GraphRunner.finish()` therefore commits `SkyReprojection` immediately before
+  graph iteration; the separate previous-camera snapshot remains after history swap for next-frame
+  geometry motion.
 - **Colour-target-state count must equal render-pass attachment count.** A compiled pipeline's
   declared colour-target-state count and the render pass it is bound against must agree exactly, or
   the render pass rejects the pipeline at draw time. This is currently guaranteed by construction
@@ -1812,6 +1928,11 @@ dedicated debug-view uniform; it is one value of a mechanism built for something
   requires it, aborting every runner in that attempt and retrying forever.
   `anyEnabledComputePassReadsVoxelGrid`, `anyEnabledPassReadsPrecipClipmap` and
   `anyEnabledComputePassReads` all follow this rule.
+- **A raw data buffer with compute-only synchronization has a compute-only graph gate.**
+  `precipCoarseClipmap` is not a general buffer-reader exception: validation rejects graphics
+  readers and `anyEnabledComputePassReadsPrecipCoarseClipmap` therefore deliberately asks only for
+  enabled compute inputs. Its failed full-reset readiness gate suppresses graph execution until a
+  complete current window is visible to that compute queue.
 - **An unresolvable shader include fails silently downstream, so this engine validates eagerly.**
   The underlying shader-composition mechanism splices an error string into the composed source for
   a missing include rather than failing the load, which would otherwise surface only as a broken
@@ -1932,6 +2053,15 @@ dedicated debug-view uniform; it is one value of a mechanism built for something
   a view, with real throwing operations between each; the outer catch closes
   `texture`/`pages`/any in-flight mip that is non-null before rethrowing, matching the precedents
   this section documents elsewhere.
+- **A raw compute pipeline retries once without the persistent cache when cached creation fails.**
+  `ComputePipelineBuilder.createWithCacheFallback` first uses the shared cache and repeats the same
+  creation against `VK_NULL_HANDLE` only after a non-success result. The uncached result is final;
+  an already-uncached attempt is never duplicated.
+- **One rejected compute function does not discard every otherwise-valid graph runner.**
+  `GraphRunner.ensureRunnersBuilt` catches a non-fatal `ComputePassRunner.build` failure inside that
+  pass's own switch arm, logs the exact pass once per pack session, and continues publishing later
+  runners. The failed pass's explicitly zero-cleared outputs remain defined empty inputs; fatal GPU
+  failures are rethrown before this degradation path.
 - **A GPU-owned texture closes only from the render thread, regardless of where the decision to
   resize it is made.** `BlockAtlasPagedStitch.takeover` runs on the reload's background stitch
   executor and only decides the grid size, carried on `BlockAtlasPagedLayout.gridSize`;
@@ -1968,9 +2098,16 @@ dedicated debug-view uniform; it is one value of a mechanism built for something
 - **A cross-queue wait-stage lookup matches readers by base target name, not exact string.**
   `GraphRunner.computeGraphicsWaitStages` collapses a `.history` suffix via `targetBaseName` before
   comparing a reader's input against a compute pass's outputs, mirroring
-  `computeStorageWriteNeedsGraphicsDrain`'s own reverse-direction match: after the end-of-frame
+  `computeStorageWriteNeedsGraphicsCompletion`'s own reverse-direction match: after the end-of-frame
   swap, next frame's current image is the physical image a reader sampled as history the prior
   frame, so a `.history` reader needs the same handoff a plain reader of the same target would.
+- **Concurrent queue-family sharing does not order graphics reads before a later compute write.**
+  A hazardous `ComputePassRunner` owns a timeline semaphore and waits its last published graphics
+  completion value at `COMPUTE_SHADER`; `GameRendererMixin` records the next value only after scene
+  history and graph/debug presentation at `renderLevel` RETURN. `CrossQueueImageReuseSequence`
+  refuses a second unpublished write and restores a cancelled submit ticket, keeping skipped/failed
+  submissions from advancing a value no queue will ever signal. The release method records no
+  submit and performs no host wait; teardown drains the compute ring before destroying the timeline.
 - **A hand-picked wait stage for a fixed set of consumers must be re-derived, not hardcoded, once a
   shared function already computes it.** `GraphRunner.runPreOpaqueLightingCompute`'s final producer
   signals the union of `computeGraphicsWaitStages` across every producer in its chain rather than a

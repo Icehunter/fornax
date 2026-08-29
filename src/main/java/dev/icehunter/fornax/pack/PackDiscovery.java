@@ -156,12 +156,16 @@ public final class PackDiscovery {
 
     /**
      * Eagerly proves every {@code [textures.*]} declaration in {@code graph.toml} names a real,
-     * decodable image file, at pack-load time -- the same "fail loud, never a silent black" law
+     * usable asset file, at pack-load time. This is the same "fail loud, never a silent black" law
      * {@code blocks.toml}'s {@code categories.*.glsl} snippet check and the {@code #moj_import}
-     * validation above already follow. This is a pure decode-and-discard probe (no GPU device
-     * needed, unlike the real upload): {@code PackTextureRegistry} re-reads and re-decodes the same
-     * file at GPU-upload time (mirroring {@code readShaderSources}' own "re-read from disk on every
-     * rebuild" shape), so a corrupt file surfaces here as a clear {@link FornaxPackError} naming the
+     * validation above follow. What "usable" means splits on {@link PackTextureSpec#isVolume()}:
+     * the 2D case ({@code depth == null}) is a pure PNG decode-and-discard probe (no GPU device
+     * needed, unlike the real upload); the volume case ({@code depth != null}) is delegated to
+     * {@link #validateVolumeTextureAsset}, which reads the raw binary via {@link RawVolumeAsset} and
+     * cross-checks its own header against the declared dimensions/format instead of decoding an
+     * image. Either way {@code PackTextureRegistry} re-reads the same file at GPU-upload time
+     * (mirroring {@code readShaderSources}' own "re-read from disk on every rebuild" shape), so a
+     * corrupt or mismatched file surfaces here as a clear {@link FornaxPackError} naming the
      * declaration, never as a deferred failure discovered mid-frame.
      */
     private static void validateTextureAssets(Path root, GraphSpec graph) {
@@ -171,13 +175,49 @@ public final class PackDiscovery {
                 throw new FornaxPackError("graph.toml", "textures." + tex.name() + ".file",
                         "declared texture file not found: " + tex.file());
             }
-            try (InputStream in = Files.newInputStream(file);
-                 NativeImage probe = NativeImage.read(NativeImage.Format.RGBA, in)) {
-                // Decoded successfully -- discarded; PackTextureRegistry re-decodes at GPU-upload time.
-            } catch (IOException e) {
-                throw new FornaxPackError("graph.toml", "textures." + tex.name() + ".file",
-                        "failed to decode texture '" + tex.file() + "': " + e.getMessage());
+            if (tex.isVolume()) {
+                validateVolumeTextureAsset(tex, file);
+            } else {
+                try (InputStream in = Files.newInputStream(file);
+                     NativeImage probe = NativeImage.read(NativeImage.Format.RGBA, in)) {
+                    // Decoded successfully, then discarded; PackTextureRegistry re-decodes at GPU-upload time.
+                } catch (IOException e) {
+                    throw new FornaxPackError("graph.toml", "textures." + tex.name() + ".file",
+                            "failed to decode texture '" + tex.file() + "': " + e.getMessage());
+                }
             }
+        }
+    }
+
+    /**
+     * Eagerly proves a declared volume texture's file matches its own declared dimensions and a
+     * recognized format tag, at pack-load time. Same law {@code validateTextureAssets} follows for
+     * 2D. {@code PackTextureRegistry} re-reads the file at GPU-upload time.
+     */
+    private static void validateVolumeTextureAsset(PackTextureSpec tex, Path file) {
+        RawVolumeAsset.Format declaredFormat;
+        try {
+            declaredFormat = RawVolumeAsset.parseFormat(tex.format());
+        } catch (IllegalArgumentException e) {
+            throw new FornaxPackError("graph.toml", "textures." + tex.name() + ".format", e.getMessage());
+        }
+        RawVolumeAsset asset;
+        try {
+            asset = RawVolumeAsset.read(file);
+        } catch (IOException e) {
+            throw new FornaxPackError("graph.toml", "textures." + tex.name() + ".file",
+                    "failed to read volume texture '" + tex.file() + "': " + e.getMessage());
+        }
+        if (asset.width() != tex.width() || asset.height() != tex.height() || asset.depth() != tex.depth()) {
+            throw new FornaxPackError("graph.toml", "textures." + tex.name(),
+                    "declared " + tex.width() + "x" + tex.height() + "x" + tex.depth()
+                            + " does not match the asset file's own header ("
+                            + asset.width() + "x" + asset.height() + "x" + asset.depth() + ")");
+        }
+        if (asset.format() != declaredFormat) {
+            throw new FornaxPackError("graph.toml", "textures." + tex.name() + ".format",
+                    "declared format '" + tex.format() + "' does not match the asset file's own header format ("
+                            + asset.format() + ")");
         }
     }
 

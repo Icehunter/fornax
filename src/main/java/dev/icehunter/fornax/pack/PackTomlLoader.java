@@ -130,8 +130,35 @@ public final class PackTomlLoader {
                 if (!(raw instanceof Config spec)) {
                     throw new FornaxPackError(file, "textures." + name, "texture must be a table");
                 }
-                TomlSupport.rejectUnknownKeys(spec, Set.of("file"), file);
-                textures.put(name, new PackTextureSpec(name, TomlSupport.requireString(spec, "file", file)));
+                TomlSupport.rejectUnknownKeys(spec, Set.of("file", "depth", "width", "height", "format"), file);
+                String texFile = TomlSupport.requireString(spec, "file", file);
+                Integer depth = spec.contains("depth") ? TomlSupport.requireInt(spec, "depth", file) : null;
+                if (depth == null) {
+                    if (spec.contains("width") || spec.contains("height") || spec.contains("format")) {
+                        throw new FornaxPackError(file, "textures." + name,
+                                "width/height/format are only valid alongside depth (a volume texture); "
+                                        + "a 2D [textures." + name + "] takes its dimensions from the "
+                                        + "decoded image file");
+                    }
+                    textures.put(name, PackTextureSpec.texture2D(name, texFile));
+                } else {
+                    if (depth <= 0) {
+                        throw new FornaxPackError(file, "textures." + name + ".depth",
+                                "volume texture depth must be positive, got " + depth);
+                    }
+                    if (!spec.contains("width") || !spec.contains("height")) {
+                        throw new FornaxPackError(file, "textures." + name,
+                                "a volume texture (depth declared) must also declare width and height");
+                    }
+                    int width = TomlSupport.requireInt(spec, "width", file);
+                    int height = TomlSupport.requireInt(spec, "height", file);
+                    if (width <= 0 || height <= 0) {
+                        throw new FornaxPackError(file, "textures." + name,
+                                "volume texture width and height must be positive");
+                    }
+                    String format = TomlSupport.requireString(spec, "format", file);
+                    textures.put(name, new PackTextureSpec(name, texFile, depth, width, height, format));
+                }
             }
         }
 

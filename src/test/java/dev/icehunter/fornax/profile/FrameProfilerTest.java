@@ -114,4 +114,19 @@ class FrameProfilerTest {
         p.reset();
         assertEquals(0, p.valueSnapshot().size());
     }
+
+    @Test
+    void computeGpuTimeAndCpuDependencyWaitUseDistinctTimingRows() {
+        FrameProfiler p = new FrameProfiler();
+        p.record("clouds", 2.5);
+        p.recordValue("compute wait clouds", 7.0);
+
+        List<FrameProfiler.Stat> snap = p.snapshot();
+        assertEquals(1, snap.size());
+        assertEquals("clouds", snap.get(0).label());
+        assertEquals(2.5, snap.get(0).avgMs(), 1e-9);
+        assertEquals(1, p.valueSnapshot().size());
+        assertEquals("compute wait clouds", p.valueSnapshot().getFirst().label());
+        assertEquals(7.0, p.valueSnapshot().getFirst().value(), 1e-9);
+    }
 }

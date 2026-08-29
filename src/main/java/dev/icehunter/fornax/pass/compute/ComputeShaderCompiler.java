@@ -16,14 +16,13 @@ public final class ComputeShaderCompiler {
 
     // Lazily created, process-lifetime, reused across every call: shaderc's own C API is designed
     // for one compiler (and one options object, when the options are the same every time, as they
-    // are here -- nothing below ever calls a shaderc_compile_options_set* ) to compile many
-    // shaders. The previous shape created and tore down both per shader, which is pure per-call
-    // init/teardown overhead with no correctness benefit -- ensureRunnersBuilt() calls this in a
-    // tight loop (GraphRunner.java:1411) once per pack activation, so that overhead was paid once
-    // per compute/particle shader on every single reload. Render-thread only, like every other
-    // static Vulkan/shaderc-touching class in this mod (see GraphRunner's own doc on the same
-    // convention) -- ComputePassRunner/ParticlePassRunner/VoxelDebugRaymarchPass all call this only
-    // from ensureRunnersBuilt() or a one-shot render-thread setup, never from a worker thread.
+    // are here) to compile many shaders, not to be created and torn down per shader.
+    // ensureRunnersBuilt() calls this in a tight loop (GraphRunner.java:1411) once per pack
+    // activation, so per-call init/teardown overhead would be paid once per compute/particle shader
+    // on every single reload. Render-thread only, like every other static Vulkan/shaderc-touching
+    // class in this mod (see GraphRunner's own doc on the same convention): ComputePassRunner,
+    // ParticlePassRunner, and VoxelDebugRaymarchPass all call this only from ensureRunnersBuilt() or
+    // a one-shot render-thread setup, never from a worker thread.
     private static long compiler = 0L;
     private static long options = 0L;
 
@@ -34,6 +33,18 @@ public final class ComputeShaderCompiler {
                 throw new ComputeShaderCompileException("shaderc_compiler_initialize failed");
             }
             options = Shaderc.shaderc_compile_options_initialize();
+            if (options == 0L) {
+                Shaderc.shaderc_compiler_release(compiler);
+                compiler = 0L;
+                throw new ComputeShaderCompileException("shaderc_compile_options_initialize failed");
+            }
+            // Pack compute shaders flatten their include graph before reaching shaderc. Performance
+            // optimization removes dead helpers and folds the resulting module before a backend has
+            // to translate and compile it into a native compute function. This is compiler policy,
+            // not visual policy: shader semantics remain pack-authored while the shipped module stays
+            // within the practical size accepted by real Vulkan backends.
+            Shaderc.shaderc_compile_options_set_optimization_level(options,
+                    Shaderc.shaderc_optimization_level_performance);
         }
         return compiler;
     }
@@ -82,22 +93,46 @@ public final class ComputeShaderCompiler {
      */
     public static ByteBuffer compileToSpirv(String glslSource, String debugName, int kind) {
         long compilerHandle = compilerHandle();
-        long result = Shaderc.shaderc_compile_into_spv(compilerHandle, glslSource, kind,
-                debugName, "main", options);
+        // Heap-allocated (MemoryUtil.memUTF8), not the CharSequence overload: that one auto-encodes
+        // its arguments through the calling thread's IMPLICIT MemoryStack frame, which LWJGL sizes
+        // small (64 KiB default) for short-lived per-call native arguments. A fully-flattened
+        // compute shader that imports a large include chain (e.g. the whole cloud-rendering
+        // dependency tree) routinely runs well past that, throwing "OutOfMemoryError: Out of stack
+        // space" inside MemoryStack.nUTF8. Source size has no reasonable upper bound this class
+        // should assume; the raw-buffer overload below allocates off-heap instead of on a
+        // fixed-size stack frame, matching how this method already handles the OUTPUT bytes a few
+        // lines down.
+        // source_text's length is taken from ByteBuffer.remaining(): LWJGL's generated binding
+        // (org.lwjgl.util.shaderc.Shaderc.shaderc_compile_into_spv(ByteBuffer,...)) calls
+        // memAddress(source_text) alongside source_text.remaining() and passes it as an explicit
+        // size_t, not a NUL scan, so this one is NOT null-terminated. input_file_name/entry_point_name
+        // ARE, matching that same overload's own checkNT1(...) assertions: they cross as bare char*
+        // with no length argument at all.
+        ByteBuffer sourceUtf8 = MemoryUtil.memUTF8(glslSource, false);
+        ByteBuffer debugNameUtf8 = MemoryUtil.memUTF8(debugName, true);
+        ByteBuffer entryPointUtf8 = MemoryUtil.memUTF8("main", true);
         try {
-            int status = Shaderc.shaderc_result_get_compilation_status(result);
-            if (status != Shaderc.shaderc_compilation_status_success) {
-                String errorMessage = Shaderc.shaderc_result_get_error_message(result);
-                throw new ComputeShaderCompileException(
-                        "compute shader compile failed for " + debugName + ": " + errorMessage);
+            long result = Shaderc.shaderc_compile_into_spv(compilerHandle, sourceUtf8, kind,
+                    debugNameUtf8, entryPointUtf8, options);
+            try {
+                int status = Shaderc.shaderc_result_get_compilation_status(result);
+                if (status != Shaderc.shaderc_compilation_status_success) {
+                    String errorMessage = Shaderc.shaderc_result_get_error_message(result);
+                    throw new ComputeShaderCompileException(
+                            "compute shader compile failed for " + debugName + ": " + errorMessage);
+                }
+                long length = Shaderc.shaderc_result_get_length(result);
+                ByteBuffer bytes = Shaderc.shaderc_result_get_bytes(result, length);
+                ByteBuffer copy = MemoryUtil.memAlloc((int) length);
+                copy.put(bytes).flip();
+                return copy;
+            } finally {
+                Shaderc.shaderc_result_release(result);
             }
-            long length = Shaderc.shaderc_result_get_length(result);
-            ByteBuffer bytes = Shaderc.shaderc_result_get_bytes(result, length);
-            ByteBuffer copy = MemoryUtil.memAlloc((int) length);
-            copy.put(bytes).flip();
-            return copy;
         } finally {
-            Shaderc.shaderc_result_release(result);
+            MemoryUtil.memFree(entryPointUtf8);
+            MemoryUtil.memFree(debugNameUtf8);
+            MemoryUtil.memFree(sourceUtf8);
         }
     }
 }

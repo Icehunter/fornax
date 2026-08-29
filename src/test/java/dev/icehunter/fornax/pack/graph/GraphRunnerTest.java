@@ -24,7 +24,7 @@ class GraphRunnerTest {
     }
 
     @Test
-    void storageWriteWithNoGraphicsUserDoesNotDrainGraphicsQueue() {
+    void storageWriteWithNoGraphicsUserNeedsNoGraphicsCompletion() {
         PassSpec stepA = new PassSpec("water_step_a", PassType.COMPUTE, null, null,
                 "shaders/compute/water_step_a.comp", List.of("waterWaveB.history"),
                 List.of("waterWaveA"), null, null, List.of(16, 16, 1), null, null, null);
@@ -32,11 +32,11 @@ class GraphRunnerTest {
                 "waterWaveA", storageTexture("waterWaveA", false),
                 "waterWaveB", storageTexture("waterWaveB", true)), List.of(stepA));
 
-        assertFalse(GraphRunner.computeStorageWriteNeedsGraphicsDrain(stepA, graph, Map.of()));
+        assertFalse(GraphRunner.computeStorageWriteNeedsGraphicsCompletion(stepA, graph, Map.of()));
     }
 
     @Test
-    void historyPingPongWriteDrainsWhenPriorGraphicsCanStillReadPhysicalImage() {
+    void historyPingPongWriteWaitsWhenPriorGraphicsCanStillReadPhysicalImage() {
         PassSpec stepB = new PassSpec("water_step_b", PassType.COMPUTE, null, null,
                 "shaders/compute/water_step_b.comp", List.of("waterWaveA"),
                 List.of("waterWaveB"), null, null, List.of(16, 16, 1), null, null, null);
@@ -47,11 +47,11 @@ class GraphRunnerTest {
                 "waterWaveA", storageTexture("waterWaveA", false),
                 "waterWaveB", storageTexture("waterWaveB", true)), List.of(stepB, terrain));
 
-        assertTrue(GraphRunner.computeStorageWriteNeedsGraphicsDrain(stepB, graph, Map.of()));
+        assertTrue(GraphRunner.computeStorageWriteNeedsGraphicsCompletion(stepB, graph, Map.of()));
     }
 
     @Test
-    void disabledGraphicsReaderDoesNotForceStorageDrain() {
+    void disabledGraphicsReaderDoesNotRequireGraphicsCompletion() {
         PassSpec writer = new PassSpec("writer", PassType.COMPUTE, null, null,
                 "shaders/compute/writer.comp", List.of(), List.of("field"), null, null,
                 List.of(1, 1, 1), null, null, null);
@@ -61,9 +61,9 @@ class GraphRunnerTest {
         GraphSpec graph = new GraphSpec(Map.of("field", storageTexture("field", false)),
                 List.of(writer, reader));
 
-        assertFalse(GraphRunner.computeStorageWriteNeedsGraphicsDrain(
+        assertFalse(GraphRunner.computeStorageWriteNeedsGraphicsCompletion(
                 writer, graph, Map.of("ADVANCED_EFFECTS", 0)));
-        assertTrue(GraphRunner.computeStorageWriteNeedsGraphicsDrain(
+        assertTrue(GraphRunner.computeStorageWriteNeedsGraphicsCompletion(
                 writer, graph, Map.of("ADVANCED_EFFECTS", 1)));
     }
 
@@ -160,7 +160,7 @@ class GraphRunnerTest {
     @Test
     void falseWhenOnlyANonComputeNonFullscreenPassReadsVoxelOccupancy() {
         // COPY/MIPCHAIN/GEOMETRY pass types are excluded even if one declared voxelOccupancy as an
-        // input (see anyEnabledComputePassReadsVoxelGrid's doc) -- no real pack pass of those types
+        // input (see anyEnabledComputePassReadsVoxelGrid's doc). No real pack pass of those types
         // does, and admitting them would broaden this gate's meaning.
         GraphSpec g = new GraphSpec(Map.of(), List.of(
                 new PassSpec("weird_copy", PassType.COPY, null, null, null,
@@ -222,8 +222,8 @@ class GraphRunnerTest {
     @Test
     void trueWhenAFullscreenPassReadsThePrecipClipmap() {
         // A fullscreen pass binds a buffer input as a real texel-buffer descriptor, so it needs the
-        // target allocated for exactly the same reason a compute pass does. A future consumer -- dry
-        // ground in a desert, say -- must not have to be a compute pass to switch the fill on.
+        // target allocated for exactly the same reason a compute pass does. A future consumer
+        // (dry ground in a desert, say) must not have to be a compute pass to switch the fill on.
         GraphSpec g = new GraphSpec(Map.of(), List.of(
                 new PassSpec("gbuffer_resolve", PassType.FULLSCREEN, null, null,
                         "shaders/post/gbuffer_resolve.fsh",
@@ -253,6 +253,68 @@ class GraphRunnerTest {
                         null, null, List.of(16, 16, 1), null, null, null)));
         assertTrue(GraphRunner.anyEnabledPassReadsPrecipClipmap(g, Map.of()));
         assertFalse(GraphRunner.anyEnabledComputePassReadsVoxelGrid(g, Map.of()));
+    }
+
+    // --- anyEnabledPassReadsPrecipCoarseClipmap -----------------------------------------------
+
+    @Test
+    void coarsePrecipitationGateAdmitsOnlyEnabledComputeReaders() {
+        GraphSpec compute = new GraphSpec(Map.of(), List.of(
+                new PassSpec("coarse_weather_reader", PassType.COMPUTE, null, null, "shaders/read",
+                        List.of(PrecipCoarseClipmapBuffer.TARGET), List.of("builtin.output"),
+                        null, null, List.of(1, 1, 1), null, null, null)));
+        assertTrue(GraphRunner.anyEnabledComputePassReadsPrecipCoarseClipmap(compute, Map.of()));
+
+        for (PassType type : List.of(PassType.FULLSCREEN, PassType.PARTICLES)) {
+            GraphSpec graphics = new GraphSpec(Map.of(), List.of(
+                    new PassSpec("coarse_weather_reader", type, null, null, "shaders/read",
+                            List.of(PrecipCoarseClipmapBuffer.TARGET), List.of("builtin.output"),
+                            null, null, List.of(1, 1, 1), null, null, null)));
+            assertFalse(GraphRunner.anyEnabledComputePassReadsPrecipCoarseClipmap(graphics, Map.of()), type.name());
+        }
+    }
+
+    @Test
+    void coarsePrecipitationGateRejectsAbsentCompileDisabledAndNonBindableReaders() {
+        GraphSpec absent = new GraphSpec(Map.of(), List.of(
+                new PassSpec("reader", PassType.COMPUTE, null, null, "shaders/read", List.of(),
+                        List.of("builtin.output"), null, null, List.of(1, 1, 1), null, null, null)));
+        GraphSpec disabled = new GraphSpec(Map.of(), List.of(
+                new PassSpec("reader", PassType.FULLSCREEN, null, null, "shaders/read",
+                        List.of(PrecipCoarseClipmapBuffer.TARGET), List.of("builtin.output"), null,
+                        "CLOUD_WEATHER", List.of(), null, null, null)));
+        GraphSpec copy = new GraphSpec(Map.of(), List.of(
+                new PassSpec("reader", PassType.COPY, null, null, null,
+                        List.of(PrecipCoarseClipmapBuffer.TARGET), List.of("builtin.output"), null,
+                        null, List.of(), null, null, null)));
+
+        assertFalse(GraphRunner.anyEnabledComputePassReadsPrecipCoarseClipmap(absent, Map.of()));
+        assertFalse(GraphRunner.anyEnabledComputePassReadsPrecipCoarseClipmap(disabled, Map.of("CLOUD_WEATHER", 0)));
+        assertFalse(GraphRunner.anyEnabledComputePassReadsPrecipCoarseClipmap(copy, Map.of()));
+    }
+
+    @Test
+    void coarsePrecipitationGateIsExactAndIndependentFromFinePrecipitation() {
+        GraphSpec fineOnly = new GraphSpec(Map.of(), List.of(
+                new PassSpec("fine", PassType.COMPUTE, null, null, "shaders/read",
+                        List.of(PrecipClipmapBuffer.TARGET), List.of("builtin.output"), null, null,
+                        List.of(1, 1, 1), null, null, null)));
+        GraphSpec coarseOnly = new GraphSpec(Map.of(), List.of(
+                new PassSpec("coarse", PassType.COMPUTE, null, null, "shaders/read",
+                        List.of(PrecipCoarseClipmapBuffer.TARGET), List.of("builtin.output"), null, null,
+                        List.of(1, 1, 1), null, null, null)));
+
+        assertTrue(GraphRunner.anyEnabledPassReadsPrecipClipmap(fineOnly, Map.of()));
+        assertFalse(GraphRunner.anyEnabledComputePassReadsPrecipCoarseClipmap(fineOnly, Map.of()));
+        assertFalse(GraphRunner.anyEnabledPassReadsPrecipClipmap(coarseOnly, Map.of()));
+        assertTrue(GraphRunner.anyEnabledComputePassReadsPrecipCoarseClipmap(coarseOnly, Map.of()));
+    }
+
+    @Test
+    void aRequiredCoarseResetBlocksGraphExecutionUntilTheUploadIsReady() {
+        assertTrue(GraphRunner.canExecuteGraphForCoarsePrecipitation(false, false));
+        assertTrue(GraphRunner.canExecuteGraphForCoarsePrecipitation(true, true));
+        assertFalse(GraphRunner.canExecuteGraphForCoarsePrecipitation(true, false));
     }
 
     // --- anyEnabledPassReadsSurfaceFluidClipmap ------------------------------------------------
@@ -306,14 +368,14 @@ class GraphRunnerTest {
         assertFalse(GraphRunner.anyEnabledPassReadsSurfaceFluidClipmap(graph, Map.of()));
     }
 
-    // --- Demotion-crash fix: shouldMarkSourcesReady's generation guard ---------------------------
+    // --- Demotion crash: shouldMarkSourcesReady's generation guard -------------------------------
     //
-    // Reproduces the ORDERING bug itself, not just the symptom: a rebuild()'s RuntimeShaderPack.reload
-    // future must never be allowed to flip sourcesReady once a NEWER rebuild() has already superseded
-    // it (its own closeCurrent() bumped the generation counter again before the stale future landed).
-    // Getting this comparison backwards (or dropping it entirely, as the pre-fix code did by having no
-    // gate at all) is exactly what let ensureRunnersBuilt() build a pass pipeline against a stale
-    // shader-text snapshot -- see GraphRunner.rebuild's own doc comment for the resulting crash.
+    // Pins the ORDERING invariant, not just a symptom: a rebuild()'s RuntimeShaderPack.reload future
+    // must never be allowed to flip sourcesReady once a NEWER rebuild() has already superseded it
+    // (its own closeCurrent() bumped the generation counter again before the stale future landed).
+    // Getting this comparison backwards, or dropping it, lets ensureRunnersBuilt() build a pass
+    // pipeline against a stale shader-text snapshot; see GraphRunner.rebuild's own doc comment for
+    // the resulting crash.
 
     @Test
     void currentGenerationCompletionMarksSourcesReady() {
@@ -392,7 +454,7 @@ class GraphRunnerTest {
 
     @Test
     void analyticScanRadiusIsUnclampedWhenTheWindowIsLargerThanTheDefaultScan() {
-        // diameter 25 (radius 12 sections/192 blocks -- comfortably below RADIUS_CEILING's own 16
+        // diameter 25 (radius 12 sections/192 blocks, comfortably below RADIUS_CEILING's own 16
         // sections, so a real window this size is achievable) is bigger than the 64-block default
         // scan radius, so it passes through untouched. Any diameter giving a window radius > 64
         // blocks would do; this value doesn't need to track RADIUS_CEILING's own live max.
@@ -401,15 +463,15 @@ class GraphRunnerTest {
 
     @Test
     void analyticScanRadiusClampsToASmallWindow() {
-        // u_LightReach set to 1 chunk (diameter 3, radius 1 section/16 blocks) -- audit fix: the
-        // 64-block default would have scanned past the streamed window into wrapped/unrelated
-        // toroidal data. Clamped to the window's own real radius, 16 blocks.
+        // u_LightReach set to 1 chunk (diameter 3, radius 1 section/16 blocks): the 64-block default
+        // would scan past the streamed window into wrapped/unrelated toroidal data. Clamped to the
+        // window's own real radius, 16 blocks.
         assertEquals(16.0f, GraphRunner.clampedAnalyticScanRadiusBlocks(3), 1e-6f);
     }
 
     @Test
     void analyticScanRadiusIsUnclampedWhenTheWindowNeverActivated() {
-        // diameter <= 1 (sentinel/never-activated window) -- isLightListBuildPass's own dispatch
+        // diameter <= 1 (sentinel/never-activated window): isLightListBuildPass's own dispatch
         // degrades to a harmless small scan via analyticLightListGroups, not a wrap hazard; see this
         // method's own doc for why leaving it unclamped here is safe.
         assertEquals(64.0f, GraphRunner.clampedAnalyticScanRadiusBlocks(1), 1e-6f);
@@ -425,7 +487,7 @@ class GraphRunnerTest {
     // --- isEmitterLightPass's sun-direction write -----------------------------------------------
     //
     // light_inject.comp's GI_SUN_BOUNCE daylight gate (clamp(sunDir.y, 0, 1)) must not be fed
-    // SunDirection.computeSunDirection() -- that shadow-caster helper falls back to the MOON
+    // SunDirection.computeSunDirection(): that shadow-caster helper falls back to the MOON
     // direction once the sun sets, so at night it puts a positive y through the daylight gate and
     // injects full sunlight into every sky-exposed block. The gate instead reads the TRUE sun
     // direction (u_SkyCelestial.xyz, populated per globals.glsl as "xyz = TRUE sun direction

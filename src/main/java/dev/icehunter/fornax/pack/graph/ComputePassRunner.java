@@ -10,6 +10,8 @@ import dev.icehunter.fornax.pass.compute.ComputeShaderCompiler;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pipeline.FramePacing;
+import dev.icehunter.fornax.profile.ComputePassTimer;
+import dev.icehunter.fornax.profile.FrameProfiler;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.FilterMode;
@@ -32,15 +34,21 @@ import org.lwjgl.vulkan.VkDescriptorPoolSize;
 import org.lwjgl.vulkan.VkDescriptorSetAllocateInfo;
 import org.lwjgl.vulkan.VkFenceCreateInfo;
 import org.lwjgl.vulkan.VkMemoryBarrier;
+import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
+import org.lwjgl.vulkan.VkQueueFamilyProperties;
 import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
 import org.lwjgl.vulkan.VkSubmitInfo;
+import org.lwjgl.vulkan.VkSemaphoreTypeCreateInfo;
+import org.lwjgl.vulkan.VkTimelineSemaphoreSubmitInfo;
 import org.lwjgl.vulkan.VkWriteDescriptorSet;
 
 import java.nio.ByteBuffer;
+import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 
 /**
  * The compute-pass analog of {@link FullscreenPassRunner}: one built pipeline per declared
@@ -70,11 +78,52 @@ public final class ComputePassRunner implements AutoCloseable {
     private static final int FRAMES_IN_FLIGHT = FramePacing.FRAMES_IN_FLIGHT;
     private static final long FENCE_WAIT_TIMEOUT = 0xFFFF_FFFF_FFFF_FFFFL; // UINT64_MAX
 
+    enum InputSamplerKind {
+        PACK_TEXTURE_REPEAT(FilterMode.LINEAR, true, false),
+        PACK_TEXTURE_REPEAT_MIPPED(FilterMode.LINEAR, true, true),
+        NEAREST_CLAMP(FilterMode.NEAREST, false, false);
+
+        private final FilterMode filter;
+        private final boolean repeat;
+        private final boolean mipmapped;
+
+        InputSamplerKind(FilterMode filter, boolean repeat, boolean mipmapped) {
+            this.filter = filter;
+            this.repeat = repeat;
+            this.mipmapped = mipmapped;
+        }
+
+        FilterMode filter() { return filter; }
+
+        boolean repeat() { return repeat; }
+
+        boolean mipmapped() { return mipmapped; }
+    }
+
     /** Reserved engine-recognized input name: a compute pass declaring this input in its {@code graph.toml}
      * binds the live {@code u_PackOptions} uniform block ({@link PackOptionsBuffer#currentBuffer()}) at that
      * binding slot, rather than a real {@code TargetRegistry} target -- the compute analog of the
      * unconditional {@code u_PackOptions} bind every FULLSCREEN pass gets. */
     static final String PACK_OPTIONS_INPUT = "packOptions";
+
+    /** Pack-shipped textures are tileable sampled data, while graph targets and engine builtins
+     * have real image edges. Keep this split pure so the descriptor path's otherwise silent sampler
+     * contract can be pinned without constructing a Vulkan device. */
+    static InputSamplerKind samplerKindFor(String ref, boolean packTexture, boolean volumeTexture) {
+        // GraphInputResolver resolves engine-owned names before consulting PackTextureRegistry. A
+        // malformed pack can currently declare a texture with the same name, so the sampler choice
+        // must preserve that precedence instead of applying the pack-texture sampler to the builtin
+        // view the resolver actually returned.
+        if (GraphValidator.BUILTINS.contains(ref) || ShadowMapManager.isShadowMapRef(ref)) {
+            return InputSamplerKind.NEAREST_CLAMP;
+        }
+        if (!packTexture) {
+            return InputSamplerKind.NEAREST_CLAMP;
+        }
+        return volumeTexture
+                ? InputSamplerKind.PACK_TEXTURE_REPEAT
+                : InputSamplerKind.PACK_TEXTURE_REPEAT_MIPPED;
+    }
 
     private final PassSpec spec;
     private final VulkanComputeBackend backend;
@@ -91,7 +140,13 @@ public final class ComputePassRunner implements AutoCloseable {
      * caller-supplied {@code extra} bytes after the base 32, matching what {@link #build} reserved in
      * the pipeline layout. */
     private final int extraPushConstantBytes;
-    private final boolean graphicsDrainBeforeStorageWrite;
+    @Nullable
+    private final CrossQueueImageReuseSequence imageReuseSequence;
+    private long imageReuseTimelineSemaphore;
+    private CrossQueueImageReuseSequence.@Nullable Ticket pendingGraphicsRelease;
+    @Nullable
+    private final RawTimestampQueries timestampQueries;
+    private final ComputePassTimer computeTimer;
     private final RingSlot[] ring = new RingSlot[FRAMES_IN_FLIGHT];
     private long descriptorPool;
     private final long[] descriptorSets = new long[FRAMES_IN_FLIGHT];
@@ -107,14 +162,23 @@ public final class ComputePassRunner implements AutoCloseable {
     private ComputePassRunner(PassSpec spec, VulkanComputeBackend backend,
                                ComputePipelineBuilder.CompiledComputePipeline pipeline,
                                List<String> bindingOrder, List<Integer> descriptorTypes,
-                               int extraPushConstantBytes, boolean graphicsDrainBeforeStorageWrite) {
+                               int extraPushConstantBytes, boolean graphicsCompletionBeforeStorageWrite,
+                               FrameProfiler profiler) {
         this.spec = spec;
         this.backend = backend;
         this.pipeline = pipeline;
         this.bindingOrder = bindingOrder;
         this.descriptorTypes = descriptorTypes;
         this.extraPushConstantBytes = extraPushConstantBytes;
-        this.graphicsDrainBeforeStorageWrite = graphicsDrainBeforeStorageWrite;
+        this.imageReuseSequence = graphicsCompletionBeforeStorageWrite
+                ? new CrossQueueImageReuseSequence() : null;
+        this.imageReuseTimelineSemaphore = graphicsCompletionBeforeStorageWrite
+                ? createTimelineSemaphore(backend) : 0;
+        this.timestampQueries = RawTimestampQueries.tryCreate(backend, spec.name());
+        float timestampPeriodNs = backend.device().getDeviceInfo().timestampPeriod();
+        int timestampValidBits = timestampQueries != null ? timestampQueries.validBits() : 0;
+        this.computeTimer = new ComputePassTimer(profiler, spec.name(), timestampQueries,
+                timestampPeriodNs, timestampValidBits);
         try {
             for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
                 ring[i] = new RingSlot();
@@ -124,6 +188,8 @@ public final class ComputePassRunner implements AutoCloseable {
             }
         } catch (RuntimeException e) {
             destroyRingResources();
+            destroyImageReuseTimeline();
+            computeTimer.close();
             throw e;
         }
     }
@@ -152,6 +218,24 @@ public final class ComputePassRunner implements AutoCloseable {
         }
     }
 
+    private static long createTimelineSemaphore(VulkanComputeBackend backend) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkSemaphoreTypeCreateInfo typeInfo = VkSemaphoreTypeCreateInfo.calloc(stack)
+                    .sType$Default()
+                    .semaphoreType(VK13.VK_SEMAPHORE_TYPE_TIMELINE)
+                    .initialValue(0);
+            VkSemaphoreCreateInfo semaphoreInfo = VkSemaphoreCreateInfo.calloc(stack)
+                    .sType$Default()
+                    .pNext(typeInfo.address());
+            LongBuffer out = stack.mallocLong(1);
+            int result = VK13.vkCreateSemaphore(backend.device().vkDevice(), semaphoreInfo, null, out);
+            if (result != VK13.VK_SUCCESS) {
+                throw new IllegalStateException("vkCreateSemaphore(timeline) failed with VkResult " + result);
+            }
+            return out.get(0);
+        }
+    }
+
     /** The positional binding order a compute pass's descriptor set is built from: every declared
      * input, in order, then every declared output, in order. Binding N = the Nth entry -- pure
      * function of the pass spec, no GPU/registry access, so this is directly unit-testable. */
@@ -164,7 +248,8 @@ public final class ComputePassRunner implements AutoCloseable {
 
     public static ComputePassRunner build(PassSpec spec, VulkanComputeBackend backend, TargetRegistry registry,
                                           int extraPushConstantBytes,
-                                          boolean graphicsDrainBeforeStorageWrite) {
+                                          boolean graphicsCompletionBeforeStorageWrite,
+                                          FrameProfiler profiler) {
         String source = RuntimeShaderPack.getInstance().sourceOrNull(spec.shader());
         if (source == null) {
             throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
@@ -185,7 +270,7 @@ public final class ComputePassRunner implements AutoCloseable {
             ComputePassRunner runner = null;
             try {
                 runner = new ComputePassRunner(spec, backend, compiled, bindingOrder, descriptorTypes,
-                        extraPushConstantBytes, graphicsDrainBeforeStorageWrite);
+                        extraPushConstantBytes, graphicsCompletionBeforeStorageWrite, profiler);
                 runner.allocateDescriptorSets();
             } catch (RuntimeException e) {
                 if (runner != null) {
@@ -278,6 +363,21 @@ public final class ComputePassRunner implements AutoCloseable {
         if (registry.get(name) != null || registry.isTextureTarget(name)) {
             return VK13.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         }
+        // Pack-declared texture ([textures.*], e.g. a 2D PNG or a 3D raw volume) rather than a graph
+        // target. resolveView (called from updateAndBindDescriptorSet) already resolves these
+        // generically via PackTextureRegistry.isDeclared, the same way FullscreenPassRunner's sampler
+        // special-case does; this branch only has to decide descriptor TYPE up front, same reasoning
+        // as the shadow-map/builtin branches above. Sampled, not storage: a pack texture is read-only
+        // input data here, same as everywhere else it is bound. Deliberately dimension-agnostic: a
+        // VkWriteDescriptorSet built from a raw VkImageView handle (see updateAndBindDescriptorSet)
+        // does not care whether that view is 2D or 3D, unlike com.mojang.blaze3d.vulkan.glsl.GlslCompiler's
+        // graphics-pipeline reflection path, which rejects any non-2D/Cube sampler outright. That is
+        // precisely why a pack-shipped sampler3D volume must be consumed from a compute pass, never a
+        // fullscreen/geometry one.
+        PackTextureRegistry textures = GraphRunner.packTextureRegistry();
+        if (textures != null && textures.isDeclared(name)) {
+            return VK13.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        }
         throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
                 + "' references target '" + name + "' which is neither an allocated buffer nor texture target");
     }
@@ -352,6 +452,12 @@ public final class ComputePassRunner implements AutoCloseable {
      * submission AT THOSE STAGES, providing a device-side compute-write to graphics-read dependency
      * without blocking the CPU.
      *
+     * <p>A runner whose storage output can also be read on the graphics queue carries the reverse
+     * edge independently: its raw submit waits on a per-runner timeline value at
+     * {@code COMPUTE_SHADER}, and renderLevel RETURN records the next value only after every graphics
+     * reader. Concurrent image sharing removes ownership transfers but cannot provide this execution
+     * dependency, so it is not a substitute for the timeline.
+     *
      * <p>The wait stage is a caller decision rather than a constant because the consuming stage
      * differs by consumer: a fullscreen pass reading a lighting buffer needs {@code FRAGMENT_SHADER},
      * while a particles pass reading a flake buffer needs {@code VERTEX_SHADER} -- earlier in the
@@ -367,21 +473,12 @@ public final class ComputePassRunner implements AutoCloseable {
      * is safe for a simulation pass in a way that binding stale data is not: one missed tick of a
      * field that accumulates is invisible, one tick against another frame's clock is not.
      */
-    public void run(TargetRegistry registry, PassParams params, @Nullable PackOptionsBuffer options,
+    public long run(TargetRegistry registry, PassParams params, @Nullable PackOptionsBuffer options,
                     @Nullable GpuBufferSlice globals, @Nullable ExtraPushConstants extra,
                     @Nullable int[] dispatchOverride,
                     boolean synchronousWait, long graphicsWaitStageMask) {
         if (globals == null && bindingOrder.contains(ParticlePassRunner.GLOBALS_INPUT)) {
-            return;
-        }
-        if (graphicsDrainBeforeStorageWrite) {
-            // Storage images are shared CONCURRENTLY when queue families differ, but sharing mode
-            // removes only ownership transfers, not the prior graphics-read -> next compute-write
-            // execution dependency. Only writers whose physical image is also used by an enabled
-            // graphics pass take this conservative drain; compute-only intermediates and read-only
-            // storage bindings do not serialize the graphics queue. The compute -> later graphics
-            // direction remains device-side via the semaphore stage mask computed by GraphRunner.
-            backend.device().graphicsQueue().waitIdle();
+            return -1L;
         }
         int extraBytesThisCall = extra != null ? extra.byteSize() : 0;
         if (extraBytesThisCall != extraPushConstantBytes) {
@@ -403,8 +500,9 @@ public final class ComputePassRunner implements AutoCloseable {
                 // The fence never signalled, so this slot's prior buffer may still be in flight.
                 // Resetting the pool now would be a use-after-free of a live command buffer; skip
                 // this frame's dispatch entirely rather than recycle an undrained slot.
-                return;
+                return -1L;
             }
+            computeTimer.drainCompleted(slotIndex);
             VK13.vkResetFences(backend.device().vkDevice(), slot.fence);
             slot.submitted = false;
         }
@@ -416,7 +514,7 @@ public final class ComputePassRunner implements AutoCloseable {
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
             VkCommandBuffer cmd = pool != null ? pool.allocateBuffer() : null;
             if (cmd == null) {
-                return;
+                return -1L;
             }
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack).sType$Default();
@@ -481,21 +579,65 @@ public final class ComputePassRunner implements AutoCloseable {
                         groupsY = (out.height() + localSize.get(1) - 1) / localSize.get(1);
                     }
                 }
+                if (timestampQueries != null) {
+                    int firstQuery = slotIndex * 2;
+                    VK13.vkCmdResetQueryPool(cmd, timestampQueries.pool(), firstQuery, 2);
+                    VK13.vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            timestampQueries.pool(), firstQuery);
+                }
                 VK13.vkCmdDispatch(cmd, groupsX, groupsY, groupsZ);
+                if (timestampQueries != null) {
+                    VK13.vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            timestampQueries.pool(), slotIndex * 2 + 1);
+                }
                 recordComputeWriteReleaseBarrier(cmd, stack);
                 VK13.vkEndCommandBuffer(cmd);
 
                 // Blaze3D's Submission.close() hardcodes a null fence -- bypass it, exactly like
                 // VoxelDebugRaymarchPass.submitDispatch already does, so a real completion fence can
                 // be attached.
-                VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack).sType$Default().pCommandBuffers(stack.pointers(cmd));
+                VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack).sType$Default()
+                        .pCommandBuffers(stack.pointers(cmd));
+                CrossQueueImageReuseSequence.Ticket reuseTicket = imageReuseSequence != null
+                        ? imageReuseSequence.beginWrite() : null;
+                if (reuseTicket != null && reuseTicket.waitValue() != 0) {
+                    // CONCURRENT sharing removes queue-family ownership transfers, not the
+                    // graphics-read -> next compute-write execution dependency. The timeline value
+                    // is signalled at renderLevel RETURN after every possible graphics reader and
+                    // waited here before this dispatch can enter COMPUTE_SHADER.
+                    VkTimelineSemaphoreSubmitInfo timelineInfo = VkTimelineSemaphoreSubmitInfo.calloc(stack)
+                            .sType$Default()
+                            .pWaitSemaphoreValues(stack.longs(reuseTicket.waitValue()));
+                    if (graphicsWaitStageMask != 0) {
+                        // VkTimelineSemaphoreSubmitInfo's value counts must match VkSubmitInfo's
+                        // semaphore counts even when this entry is the existing BINARY
+                        // compute-to-graphics signal; binary semaphores carry the required value 0.
+                        timelineInfo.pSignalSemaphoreValues(stack.longs(0L));
+                    }
+                    submitInfo.pNext(timelineInfo.address())
+                            .pWaitSemaphores(stack.longs(imageReuseTimelineSemaphore))
+                            .pWaitDstStageMask(stack.ints(VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+                }
                 if (graphicsWaitStageMask != 0) {
                     submitInfo.pSignalSemaphores(stack.longs(slot.graphicsSemaphore));
                 }
-                int result = VK13.vkQueueSubmit(backend.computeQueue().vkQueue(), submitInfo, slot.fence);
+                int result;
+                try {
+                    result = VK13.vkQueueSubmit(backend.computeQueue().vkQueue(), submitInfo, slot.fence);
+                } catch (RuntimeException | Error e) {
+                    if (reuseTicket != null) {
+                        imageReuseSequence.cancel(reuseTicket);
+                    }
+                    throw e;
+                }
                 if (result != VK13.VK_SUCCESS) {
+                    if (reuseTicket != null) {
+                        imageReuseSequence.cancel(reuseTicket);
+                    }
                     throw new IllegalStateException("vkQueueSubmit failed with VkResult " + result);
                 }
+                pendingGraphicsRelease = reuseTicket;
+                computeTimer.markSubmitted(slotIndex);
                 slot.submitted = true;
                 if (graphicsWaitStageMask != 0) {
                     // VulkanDevice returns its persistent encoder. Lighting producers request this
@@ -509,17 +651,42 @@ public final class ComputePassRunner implements AutoCloseable {
                 if (synchronousWait) {
                     // Legacy host wait for passes with a current-frame graphics -> compute input
                     // dependency that has not yet been converted to a bidirectional semaphore chain.
+                    long waitStart = System.nanoTime();
                     int waitResult = VK13.vkWaitForFences(backend.device().vkDevice(), slot.fence, true, FENCE_WAIT_TIMEOUT);
+                    long dependencyWaitNanos = System.nanoTime() - waitStart;
                     if (fenceWaitSucceeded(waitResult, "synchronous wait in '" + spec.name() + "'")) {
+                        computeTimer.drainCompleted(slotIndex);
                         VK13.vkResetFences(backend.device().vkDevice(), slot.fence);
                         slot.submitted = false;
                     }
                     // On failure, leave slot.submitted = true: the dispatch this call just made has
                     // not been confirmed complete, so the caller's assumption that the compute result
                     // already landed does not hold. Next frame's ring-slot recycle wait retries it.
+                    return dependencyWaitNanos;
                 }
             }
         }
+        return -1L;
+    }
+
+    boolean hasPendingGraphicsStorageReads() {
+        return pendingGraphicsRelease != null;
+    }
+
+    /**
+     * Records this runner's graphics-read completion value into Blaze3D's persistent graphics
+     * encoder. The caller invokes this after every possible graph-target reader at renderLevel
+     * RETURN. Recording only: this method neither submits nor host-waits the graphics queue.
+     */
+    void recordGraphicsStorageReadsComplete(VulkanCommandEncoder graphics) {
+        CrossQueueImageReuseSequence.Ticket ticket = pendingGraphicsRelease;
+        if (ticket == null || imageReuseSequence == null) {
+            return;
+        }
+        graphics.signalSemaphore(imageReuseTimelineSemaphore, ticket.releaseValue(),
+                VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+        imageReuseSequence.publishGraphicsCompletion(ticket);
+        pendingGraphicsRelease = null;
     }
 
     /**
@@ -590,8 +757,14 @@ public final class ComputePassRunner implements AutoCloseable {
                                 .imageLayout(VK13.VK_IMAGE_LAYOUT_GENERAL);
                         write.descriptorType(VK13.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(imageInfo);
                     } else {
-                        VulkanGpuSampler sampler = (VulkanGpuSampler)
-                                RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST);
+                        PackTextureRegistry packTextures = GraphRunner.packTextureRegistry();
+                        boolean packTexture = packTextures != null && packTextures.isDeclared(name);
+                        boolean volumeTexture = packTexture && packTextures.isVolume(name);
+                        InputSamplerKind samplerKind = samplerKindFor(name, packTexture, volumeTexture);
+                        VulkanGpuSampler sampler = (VulkanGpuSampler) (samplerKind.repeat()
+                                ? RenderSystem.getSamplerCache().getRepeat(
+                                        samplerKind.filter(), samplerKind.mipmapped())
+                                : RenderSystem.getSamplerCache().getClampToEdge(samplerKind.filter()));
                         VkDescriptorImageInfo.Buffer imageInfo = VkDescriptorImageInfo.calloc(1, stack)
                                 .sampler(sampler.vkSampler()).imageView(imageView)
                                 // Mojang keeps sampled and attachment textures in GENERAL on its
@@ -645,11 +818,17 @@ public final class ComputePassRunner implements AutoCloseable {
      * implicitly frees the sets allocated from it), plus every ring slot's command pool and fence
      * (draining any still-in-flight dispatch first, so a pack (re)build never destroys a buffer the
      * GPU is still reading -- same invariant {@code VoxelDebugRaymarchPass.disable()} already
-     * established for its own ring). Called from {@code GraphRunner.closeCurrent()}. */
+     * established for its own ring). A hazardous runner's image-reuse timeline is destroyed after
+     * that drain. Called from {@code GraphRunner.closeCurrent()}. */
     @Override
     public void close() {
         var device = backend.device().vkDevice();
         destroyRingResources();
+        if (imageReuseTimelineSemaphore != 0) {
+            VK13.vkDestroySemaphore(device, imageReuseTimelineSemaphore, null);
+            imageReuseTimelineSemaphore = 0;
+        }
+        computeTimer.close();
         if (descriptorPool != 0) {
             VK13.vkDestroyDescriptorPool(device, descriptorPool, null);
             descriptorPool = 0;
@@ -657,16 +836,26 @@ public final class ComputePassRunner implements AutoCloseable {
         destroyPipeline(backend, pipeline);
     }
 
+    private void destroyImageReuseTimeline() {
+        if (imageReuseTimelineSemaphore != 0) {
+            VK13.vkDestroySemaphore(backend.device().vkDevice(), imageReuseTimelineSemaphore, null);
+            imageReuseTimelineSemaphore = 0;
+        }
+    }
+
     private void destroyRingResources() {
         var device = backend.device().vkDevice();
-        for (RingSlot slot : ring) {
+        for (int slotIndex = 0; slotIndex < ring.length; slotIndex++) {
+            RingSlot slot = ring[slotIndex];
             if (slot == null) continue;
             if (slot.submitted && slot.fence != 0) {
                 // Teardown has no retry option: log a failed wait and destroy anyway. Leaking the
                 // fence/pool would be strictly worse than the small chance of destroying a handle
                 // the GPU has already finished with.
-                fenceWaitSucceeded(VK13.vkWaitForFences(device, slot.fence, true, FENCE_WAIT_TIMEOUT),
-                        "ring teardown in '" + spec.name() + "'");
+                if (fenceWaitSucceeded(VK13.vkWaitForFences(device, slot.fence, true, FENCE_WAIT_TIMEOUT),
+                        "ring teardown in '" + spec.name() + "'")) {
+                    computeTimer.drainCompleted(slotIndex);
+                }
             }
             if (slot.fence != 0) {
                 VK13.vkDestroyFence(device, slot.fence, null);
@@ -708,6 +897,106 @@ public final class ComputePassRunner implements AutoCloseable {
     private static void checkVk(int result, String call) {
         if (result != VK13.VK_SUCCESS) {
             throw new IllegalStateException(call + " failed with VkResult " + result);
+        }
+    }
+
+    /** Raw Vulkan query pool shared by this runner's fence-aligned timing slots. */
+    private static final class RawTimestampQueries implements ComputePassTimer.QueryResults {
+        private final org.lwjgl.vulkan.VkDevice device;
+        private final int validBits;
+        private long pool;
+
+        private RawTimestampQueries(org.lwjgl.vulkan.VkDevice device, long pool, int validBits) {
+            this.device = device;
+            this.pool = pool;
+            this.validBits = validBits;
+        }
+
+        @Nullable
+        static RawTimestampQueries tryCreate(VulkanComputeBackend backend, String passName) {
+            float periodNs = backend.device().getDeviceInfo().timestampPeriod();
+            if (periodNs <= 0f) {
+                FornaxMod.LOGGER.warn("[Fornax] Compute timestamps unsupported; '{}' will run untimed", passName);
+                return null;
+            }
+            try {
+                int validBits = resolveTimestampValidBits(backend);
+                if (validBits == 0) {
+                    FornaxMod.LOGGER.warn("[Fornax] Compute queue timestamps unsupported; '{}' will run untimed",
+                            passName);
+                    return null;
+                }
+                try (MemoryStack stack = MemoryStack.stackPush()) {
+                    VkQueryPoolCreateInfo info = VkQueryPoolCreateInfo.calloc(stack)
+                            .sType$Default()
+                            .queryType(VK13.VK_QUERY_TYPE_TIMESTAMP)
+                            .queryCount(FRAMES_IN_FLIGHT * 2);
+                    LongBuffer out = stack.mallocLong(1);
+                    int result = VK13.vkCreateQueryPool(backend.device().vkDevice(), info, null, out);
+                    if (result != VK13.VK_SUCCESS) {
+                        FornaxMod.LOGGER.warn(
+                                "[Fornax] vkCreateQueryPool returned VkResult {}; '{}' will run untimed",
+                                result, passName);
+                        return null;
+                    }
+                    return new RawTimestampQueries(backend.device().vkDevice(), out.get(0), validBits);
+                }
+            } catch (RuntimeException e) {
+                FornaxMod.LOGGER.warn("[Fornax] Compute timestamp allocation failed; '{}' will run untimed: {}",
+                        passName, e.toString());
+                return null;
+            }
+        }
+
+        long pool() {
+            return pool;
+        }
+
+        int validBits() {
+            return validBits;
+        }
+
+        /** Resolves timestamp support for the exact queue family this runner submits against. */
+        private static int resolveTimestampValidBits(VulkanComputeBackend backend) {
+            int familyIndex = backend.computeQueue().queueFamilyIndex();
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                IntBuffer count = stack.mallocInt(1);
+                VK13.vkGetPhysicalDeviceQueueFamilyProperties(
+                        backend.device().vkDevice().getPhysicalDevice(), count, null);
+                int familyCount = count.get(0);
+                if (familyIndex < 0 || familyIndex >= familyCount) {
+                    throw new IllegalStateException("compute queue family index " + familyIndex
+                            + " outside physical-device family count " + familyCount);
+                }
+                VkQueueFamilyProperties.Buffer properties =
+                        VkQueueFamilyProperties.calloc(familyCount, stack);
+                VK13.vkGetPhysicalDeviceQueueFamilyProperties(
+                        backend.device().vkDevice().getPhysicalDevice(), count, properties);
+                return properties.get(familyIndex).timestampValidBits();
+            }
+        }
+
+        @Override
+        public OptionalLong tryRead(int queryIndex) {
+            if (pool == 0) {
+                return OptionalLong.empty();
+            }
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                LongBuffer value = stack.mallocLong(1);
+                int result = VK13.vkGetQueryPoolResults(device, pool, queryIndex, 1, value,
+                        Long.BYTES, VK13.VK_QUERY_RESULT_64_BIT);
+                return result == VK13.VK_SUCCESS
+                        ? OptionalLong.of(value.get(0))
+                        : OptionalLong.empty();
+            }
+        }
+
+        @Override
+        public void close() {
+            if (pool != 0) {
+                VK13.vkDestroyQueryPool(device, pool, null);
+                pool = 0;
+            }
         }
     }
 }

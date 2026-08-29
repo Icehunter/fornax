@@ -9,10 +9,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Pure-JVM rolling-stats aggregator for per-label millisecond timings -- no blaze3d imports, so it's
- * unit-testable without a GPU device. {@link PassTimer} is the sole GPU-facing producer ({@code
- * bracketBegin}/{@code bracketEnd} pairs converted to ms and handed to {@link #record}), but nothing
- * here assumes GPU timestamps specifically; any millisecond duration source could feed it.
+ * Pure-JVM rolling-stats aggregator for per-label millisecond timings: no blaze3d imports, so it's
+ * unit-testable without a GPU device. {@link PassTimer} supplies graphics-encoder brackets and
+ * {@link ComputePassTimer} supplies raw compute-queue dispatch durations, both converted to ms and
+ * handed to {@link #record}; nothing here assumes GPU timestamps specifically, so any millisecond
+ * duration source can feed it.
  *
  * <p>Each label keeps its own last-{@link #WINDOW}-samples ring; {@link #snapshot()} reports them in
  * first-seen label order so a HUD (a later task) renders a stable row order frame to frame.

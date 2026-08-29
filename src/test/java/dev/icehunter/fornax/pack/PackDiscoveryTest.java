@@ -6,6 +6,7 @@ import org.junit.jupiter.api.io.TempDir;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.net.URISyntaxException;
 import java.nio.file.FileSystem;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -191,6 +192,55 @@ class PackDiscoveryTest {
                 () -> PackDiscovery.loadFrom(root, 1920, 1080));
         assertEquals("textures.waterWaveNormal.file", e.key());
         assertTrue(e.reason().contains("failed to decode"), e.reason());
+    }
+
+    // [textures.*] volume path: a raw binary asset (RawVolumeAsset), not a PNG, validated against
+    // its own declared dimensions/format rather than decoded by NativeImage.
+
+    @Test
+    void volumeTextureWithTruncatedFileFailsLoadTimeValidation() {
+        FornaxPackError e = assertThrows(FornaxPackError.class,
+                () -> PackDiscovery.loadFrom(resourcePackRoot("volume_bad_header"), 1920, 1080));
+        assertEquals("textures.badVolume.file", e.key());
+        // The RawVolumeAsset-backed path and the NativeImage-decode path throw the same key shape
+        // ("textures.NAME.file") on a bad file, so the key alone can't tell an untouched 2D
+        // fallback from a real volume-path failure.
+        assertTrue(e.reason().contains("failed to read volume texture"), e.reason());
+        assertFalse(e.reason().contains("failed to decode texture"), e.reason());
+    }
+
+    @Test
+    void volumeTextureWithMismatchedHeaderFailsLoadTimeValidation() {
+        // Well-formed, fully-populated file (real texel bytes, not truncated) whose own header
+        // (2x2x2) disagrees with graph.toml's declared width (3). Exercises the dimension
+        // cross-check in PackDiscovery.validateVolumeTextureAsset, not RawVolumeAsset.read's own
+        // truncation guard (already covered by RawVolumeAssetTest and the fixture above).
+        FornaxPackError e = assertThrows(FornaxPackError.class,
+                () -> PackDiscovery.loadFrom(resourcePackRoot("volume_mismatched_header"), 1920, 1080));
+        assertEquals("textures.badVolume", e.key());
+        assertTrue(e.reason().contains("does not match the asset file's own header"), e.reason());
+    }
+
+    @Test
+    void volumeTextureWithUnrecognizedFormatTokenFailsLoadTimeValidation() {
+        // graph.toml declares format = "rg16f", a token PackTomlLoader accepts as a plain string
+        // (it never validates the value) but RawVolumeAsset.parseFormat rejects. Exercises
+        // validateVolumeTextureAsset's parseFormat wiring, not just parseFormat in isolation
+        // (already covered by RawVolumeAssetTest.parseFormatRejectsUnknownToken).
+        FornaxPackError e = assertThrows(FornaxPackError.class,
+                () -> PackDiscovery.loadFrom(resourcePackRoot("volume_bad_format_token"), 1920, 1080));
+        assertEquals("textures.badVolume.format", e.key());
+        assertTrue(e.reason().contains("rg16f"), e.reason());
+    }
+
+    private static Path resourcePackRoot(String name) {
+        var url = PackDiscoveryTest.class.getResource("/packs/" + name);
+        assertNotNull(url, "missing test fixture: packs/" + name);
+        try {
+            return Path.of(url.toURI());
+        } catch (URISyntaxException ex) {
+            throw new IllegalStateException(ex);
+        }
     }
 
     private static void writePng(Path file, int width, int height) throws IOException {

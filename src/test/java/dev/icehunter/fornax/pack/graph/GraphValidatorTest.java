@@ -360,7 +360,7 @@ class GraphValidatorTest {
 
     // --- Gate-consistency: a pass must never be enabled while a target it references is
     // unallocated. An enabled pass referencing a disabled (never-allocated) target fails at
-    // runner build, which ensureRunnersBuilt()'s retry swallows -- taking the ENTIRE post chain
+    // runner build, which ensureRunnersBuilt()'s retry swallows, taking the ENTIRE post chain
     // (resolve included) down silently: terrain draws into the G-buffer but nothing composites it.
     // These pin the load-loud refusal instead. -------------------------------------------------
 
@@ -683,7 +683,7 @@ class GraphValidatorTest {
 
     @Test
     void geometryPassOmittingSlotDefaultsToTerrainAndCollidesWithAnExplicitOne() {
-        // An omitted slot is not "unset" -- it is terrain, so it collides with an explicit terrain
+        // An omitted slot is not "unset": it is terrain, so it collides with an explicit terrain
         // pass exactly as two explicit ones would. Guards against the default silently creating a
         // second, invisible claim on the same bind group.
         GraphSpec g = PackTomlLoader.loadGraph(new java.io.StringReader("""
@@ -766,7 +766,7 @@ class GraphValidatorTest {
     @Test
     void passShaderReferencingVanillaOverridePathThrows() {
         // shaders/vanilla/* files are vanilla core-shader overrides (VanillaShaderOverrides), never
-        // a valid pass shader -- a pack graph referencing one directly would silently skip the
+        // a valid pass shader. A pack graph referencing one directly would silently skip the
         // fullscreen-pass preamble splices GraphRunner.rebuild applies to every other pass shader.
         GraphSpec g = PackTomlLoader.loadGraph(new java.io.StringReader("""
                 [targets.gAlbedo]
@@ -820,7 +820,7 @@ class GraphValidatorTest {
     }
 
     // --- Water-surface builtins: builtin.waterNormal/builtin.waterDepth resolve like the other
-    // engine-owned builtins (sunShadowMap/builtin.depth_opaque) -- written at the opaque stage HEAD
+    // engine-owned builtins (sunShadowMap/builtin.depth_opaque), written at the opaque stage HEAD
     // (before builtin.depth_opaque's own mid-finish() capture), so unlike builtin.depth_opaque they
     // carry no geometry-only PassType restriction: any pass type may reference them. -------------
 
@@ -867,14 +867,22 @@ class GraphValidatorTest {
 
     @Test
     void fixturePackAndScreensTomlsLoadCleanly() {
-        for (String name : List.of("missing_target", "cycle", "runtime_in_enabledif", "bad_toml")) {
+        for (String name : List.of("missing_target", "cycle", "runtime_in_enabledif", "bad_toml", "volume_missing_dims")) {
             assertDoesNotThrow(() -> PackTomlLoader.loadMeta(resource(name + "/pack.toml"), "pack.toml"));
             assertDoesNotThrow(() -> PackTomlLoader.loadScreens(resource(name + "/screens.toml"), "screens.toml"));
         }
     }
 
+    @Test
+    void volumeTextureMissingWidthHeightFailsToParse() {
+        FornaxPackError e = assertThrows(FornaxPackError.class,
+                () -> PackTomlLoader.loadGraph(resource("volume_missing_dims/graph.toml"), "graph.toml"));
+        assertEquals("graph.toml", e.file());
+        assertEquals("textures.badVolume", e.key());
+    }
+
     // --- Pack-shipped texture assets ([textures.*]): a pack-supplied static image, not a render
-    // target -- resolved by bare name (no builtin. prefix), read-only, no history slot. -----------
+    // target. Resolved by bare name (no builtin. prefix), read-only, no history slot. -----------
 
     @Test
     void packTextureAsFullscreenInputValidatesClean() {

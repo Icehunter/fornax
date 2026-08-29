@@ -1,0 +1,6 @@
+[textures.badVolume]
+file = "textures/valid_volume.bin"
+depth = 2
+width = 2
+height = 2
+format = "rg16f"

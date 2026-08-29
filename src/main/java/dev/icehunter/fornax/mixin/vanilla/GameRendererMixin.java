@@ -190,9 +190,10 @@ public class GameRendererMixin {
     }
 
     /**
-     * The single end-of-frame injection: off-screen-target restore, then the sceneHistory copy,
-     * then the jitter advance, in that order, as EXPLICIT sequential calls from one method body.
-     * Deliberately not three sibling {@code @Inject}s at the same RETURN point -- Mixin orders
+     * The single end-of-frame injection: off-screen-target restore, sceneHistory copy, debug
+     * presentation, graphics-storage-read timeline publication, then jitter advance, in that order,
+     * as EXPLICIT sequential calls from one method body. Deliberately not sibling {@code @Inject}s
+     * at the same RETURN point: Mixin orders
      * same-priority handlers at one injection point by little more than declaration order, and the
      * sceneHistory copy is only correct AFTER {@link #fornax$restoreNativeTarget} has resolved and
      * swapped {@code mainRenderTarget} back to native (copying first would snapshot the off-screen
@@ -227,6 +228,11 @@ public class GameRendererMixin {
         // Generic pack-owned graph-target presentation. Water shaft diagnostics and the archived
         // M1 shadow view route through the same live, no-recompile path.
         GraphTargetDebugPass.presentIfEnabled(this.mainRenderTarget);
+        // Storage targets written by raw compute may have been sampled by graph passes, history
+        // copies, or the debug presenters above. Publish that all such graphics reads have been
+        // recorded before next frame's compute write is allowed to reuse the physical image. This
+        // only appends timeline signals to Blaze3D's persistent encoder; it does not submit or wait.
+        GraphRunner.recordGraphicsStorageReadsComplete();
         // Unconditional (even when jitter is disabled, so re-enabling TAA/TAAU mid-session doesn't
         // produce a discontinuous jitter sequence), and last -- never from fornax$setProjection,
         // which fires partway through renderLevel BEFORE a later CameraJitter.currentOffsetNdc()

@@ -2,6 +2,7 @@ package dev.icehunter.fornax.pack.graph;
 
 import dev.icehunter.fornax.pack.FornaxPackError;
 import dev.icehunter.fornax.pack.GraphSpec;
+import dev.icehunter.fornax.pack.PackTextureSpec;
 import dev.icehunter.fornax.pack.PackTomlLoader;
 import dev.icehunter.fornax.pack.PassSpec;
 import dev.icehunter.fornax.pack.PassType;
@@ -10,10 +11,12 @@ import dev.icehunter.fornax.pack.layout.PackOptionsLayout;
 import dev.icehunter.fornax.pack.option.OptionType;
 import dev.icehunter.fornax.pack.option.PackOption;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.lwjgl.vulkan.VK13;
 
 import java.io.StringReader;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -25,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Pure-JVM test of the positional inputs+outputs -> binding-kind resolution a compute pass's
- * descriptor set is built from -- no GPU device involved, so this runs in plain JUnit. */
+ * descriptor set is built from. No GPU device is involved, so this runs in plain JUnit. */
 class ComputeTargetBindingTest {
     private static final String FILE = "graph.toml";
 
@@ -35,7 +38,7 @@ class ComputeTargetBindingTest {
                 List.of("voxelOccupancy", "depth"), List.of("rtDirect"), null, null, List.of(1, 1, 1), null, null, null);
         List<String> combined = ComputePassRunner.combinedBindingOrder(spec);
         assertEquals(List.of("voxelOccupancy", "depth", "rtDirect"), combined,
-                "inputs first (in order), then outputs (in order) -- binding N = index N");
+                "inputs first (in order), then outputs (in order): binding N = index N");
     }
 
     @Test
@@ -61,7 +64,7 @@ class ComputeTargetBindingTest {
 
     @Test
     void bufferKindTargetRejectsTextureOnlyKeys() {
-        // format/scale/history/basis are texture-only fields -- a buffer-kind target sized by
+        // format/scale/history/basis are texture-only fields. A buffer-kind target sized by
         // TargetRegistry.ensureBufferSize has none of these, so declaring any of them alongside
         // kind = "buffer" must be refused as an unknown key for this target shape.
         String toml = """
@@ -137,7 +140,7 @@ class ComputeTargetBindingTest {
         assertThrows(FornaxPackError.class, () -> PackTomlLoader.loadGraph(new StringReader(toml), FILE));
     }
 
-    // --- Part A3/A7.3: GraphValidator regression -- a buffer-kind target (no format) referenced
+    // --- Part A3/A7.3: GraphValidator regression: a buffer-kind target (no format) referenced
     // as a compute pass's input must validate cleanly, never hit TargetFormat.parse(null, ...). ---
 
     @Test
@@ -186,7 +189,7 @@ class ComputeTargetBindingTest {
     @Test
     void computePassWithoutPackOptionsInputGetsNoBindingIndex() {
         // GraphRunner.rebuild() skips prepending a u_PackOptions block entirely for a compute pass
-        // whose inputs don't reference the reserved "packOptions" name -- indexOf returning -1 is the
+        // whose inputs don't reference the reserved "packOptions" name. indexOf returning -1 is the
         // signal it uses to make that call.
         PassSpec spec = new PassSpec("some_other_compute", PassType.COMPUTE, null, null, "shaders/compute/other.comp",
                 List.of("depth"), List.of("out"), null, null, List.of(1, 1, 1), List.of(8, 8), null, null);
@@ -195,9 +198,9 @@ class ComputeTargetBindingTest {
     }
 
     // --- Task 5c: builtin.* recognition boundary for ComputePassRunner.build()'s descriptor-type
-    // loop -- the exact condition `GraphValidator.BUILTINS.contains(name)` branches on. Real
+    // loop: the exact condition `GraphValidator.BUILTINS.contains(name)` branches on. Real
     // build()/updateAndBindDescriptorSet() GPU behavior can't be unit-tested without a live Vulkan
-    // device (no test in this file exercises build() against a real device -- every test here stays
+    // device (no test in this file exercises build() against a real device; every test here stays
     // pure-JVM), so this covers the pure, GPU-free boundary condition directly. ------------------
 
     @Test
@@ -211,7 +214,7 @@ class ComputeTargetBindingTest {
     @Test
     void bufferAndReservedInputNamesAreNeverBuiltins() {
         // A buffer target name (voxelOccupancy) and the reserved packOptions name must never be
-        // accidentally treated as a builtin -- build()'s packOptions check runs first, and a buffer
+        // accidentally treated as a builtin. build()'s packOptions check runs first, and a buffer
         // target name must fall through to the registry.getBuffer() branch, not this one.
         assertFalse(GraphValidator.BUILTINS.contains("voxelOccupancy"));
         assertFalse(GraphValidator.BUILTINS.contains(ComputePassRunner.PACK_OPTIONS_INPUT));
@@ -226,7 +229,7 @@ class ComputeTargetBindingTest {
     // registry.getBuffer/get checks below it would ever match, and the runner build would throw
     // "references target 'sunShadowMap' which is neither an allocated buffer nor texture target" every
     // frame (the whole graph never building). build() itself needs a live Vulkan device (SPIRV compile,
-    // descriptor pool/layout creation) so it can't run headless -- this covers the same pure, GPU-free
+    // descriptor pool/layout creation) so it can't run headless. This covers the same pure, GPU-free
     // boundary condition the Task 5c tests above do: the exact name membership build()'s branches
     // depend on. -------------------------------
 
@@ -280,8 +283,8 @@ class ComputeTargetBindingTest {
     @Test
     void globalsClassifiesAsAUniformBufferOnAComputePass() {
         // The classification that makes a compute pass's clock possible at all. Without this branch
-        // the name falls through every check to the terminal throw, which ensureRunnersBuilt swallows
-        // -- discarding every other runner in that attempt, every frame, forever.
+        // the name falls through every check to the terminal throw, which ensureRunnersBuilt swallows,
+        // discarding every other runner in that attempt, every frame, forever.
         PassSpec spec = computePass(List.of("globals"), List.of("snowField"));
         assertEquals(VK13.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 ComputePassRunner.descriptorTypeFor(spec, ParticlePassRunner.GLOBALS_INPUT, emptyRegistry()));
@@ -313,7 +316,7 @@ class ComputeTargetBindingTest {
     @Test
     void globalsTakesAPositionalBindingIndexLikeAnyOtherInput() {
         // The number a pack hardcodes as layout(std140, binding = N) uniform u_Globals. It is the
-        // input's own position in combinedBindingOrder -- so inserting an input BEFORE it moves the
+        // input's own position in combinedBindingOrder, so inserting an input BEFORE it moves the
         // block, and nothing at load or run time would notice.
         PassSpec spec = computePass(List.of("snowPrev", "globals", "packOptions"), List.of("snowField"));
         List<String> order = ComputePassRunner.combinedBindingOrder(spec);
@@ -324,11 +327,10 @@ class ComputeTargetBindingTest {
 
     @Test
     void sunShadowMapIsNeitherABuiltinNorAReservedInputName() {
-        // Confirms the root cause directly: sunShadowMap was never a member of BUILTINS (by design --
-        // it's engine-owned but not builtin.-prefixed) and isn't the reserved packOptions name either,
-        // so it needs its OWN classification branch in ComputePassRunner.build() (added this task,
-        // mirroring GraphValidator's own peer-of-BUILTINS treatment) rather than falling into either
-        // existing check.
+        // sunShadowMap is engine-owned but not builtin.-prefixed, so it is not a member of BUILTINS,
+        // and it isn't the reserved packOptions name either. It needs its OWN classification branch
+        // in ComputePassRunner.build(), mirroring GraphValidator's own peer-of-BUILTINS treatment,
+        // rather than falling into either existing check.
         assertEquals("sunShadowMap", ShadowMapManager.TARGET);
         assertFalse(GraphValidator.BUILTINS.contains(ShadowMapManager.TARGET));
         assertFalse(ShadowMapManager.TARGET.equals(ComputePassRunner.PACK_OPTIONS_INPUT));
@@ -336,10 +338,10 @@ class ComputeTargetBindingTest {
 
     @Test
     void computePassDeclaringSunShadowMapInputIsGraphValidatorLegal() {
-        // The precondition ComputePassRunner.build() must now honor at runtime: GraphRunner never
+        // The precondition ComputePassRunner.build() must honor at runtime: GraphRunner never
         // builds a runner for a pass GraphValidator already rejected, so a compute pass reading
         // sunShadowMap reaching build() at all proves GraphValidator already treats it as legal
-        // (Task 2) -- this pins that precondition against the exact voxel_water_refl input shape
+        // (Task 2). This pins that precondition against the exact voxel_water_refl input shape
         // (Task 3) so this test and ComputePassRunner.build()'s classification branch can't drift
         // apart silently.
         String toml = """
@@ -367,11 +369,11 @@ class ComputeTargetBindingTest {
         assertDoesNotThrow(() -> GraphValidator.validate(graph, Map.of(), 1920, 1080));
 
         // And the exact per-binding classification ComputePassRunner.build() computes for this pass's
-        // combinedBindingOrder (inputs then outputs) -- every non-buffer, non-reserved name here must
+        // combinedBindingOrder (inputs then outputs): every non-buffer, non-reserved name here must
         // resolve to a real classification, matching build()'s own branch order (BUILTINS,
-        // ShadowMapManager.TARGET, registry buffer, registry texture): builtin.waterNormal/
-        // builtin.waterDepth hit BUILTINS, sunShadowMap hits the branch this task adds, and the three
-        // voxel*  names are buffer-kind targets -- none of them may hit the terminal "neither an
+        // ShadowMapManager.TARGET, registry buffer, registry texture). builtin.waterNormal/
+        // builtin.waterDepth hit BUILTINS, sunShadowMap hits its own branch, and the three
+        // voxel* names are buffer-kind targets; none of them may hit the terminal "neither an
         // allocated buffer nor texture target" throw.
         List<String> binding = ComputePassRunner.combinedBindingOrder(graph.passes().get(0));
         assertEquals(List.of("builtin.waterNormal", "builtin.waterDepth", "sunShadowMap",
@@ -383,5 +385,70 @@ class ComputeTargetBindingTest {
             assertTrue(classifiable, "binding '" + name + "' must classify to a descriptor type in "
                     + "ComputePassRunner.build() instead of hitting its terminal throw");
         }
+    }
+
+    // --- Pack-shipped texture (2D or 3D volume) classification boundary. A compute pass consuming a
+    // [textures.*] entry is the ONLY way a sampler3D volume texture can be bound at all: against the
+    // shipped client jar, com.mojang.blaze3d.vulkan.glsl.GlslCompiler's graphics-pipeline reflection
+    // rejects any sampler whose SPIR-V dimension isn't 2D/Cube (the "must have type of SpvDim2D or
+    // SpvDimCube" check in GlslCompiler.addToBindGroup). A pack texture is neither a TargetRegistry
+    // buffer nor a texture target, so descriptorTypeFor needs its own branch for this case rather
+    // than falling through every other branch to the terminal throw. ------------------------------
+
+    @AfterEach
+    void clearPackTextureRegistry() {
+        // Global static state (GraphRunner.packTextureRegistry) shared across the whole test run:
+        // every test that sets it must restore null itself, or a later, unrelated test could see a
+        // fake registry that was never its own.
+        GraphRunner.setPackTextureRegistryForTest(null);
+    }
+
+    @Test
+    void declaredPackTextureIsASampledImageInCompute() {
+        // depth=48/width=48/height=48/format="r8": the exact shape cloudBaseShape.vol ships as.
+        PackTextureSpec volume = new PackTextureSpec("cloudBaseShape", "shaders/textures/cloud_base_shape.vol",
+                48, 48, 48, "r8");
+        GraphRunner.setPackTextureRegistryForTest(
+                PackTextureRegistry.create(Path.of("."), Map.of("cloudBaseShape", volume)));
+
+        assertEquals(VK13.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                ComputePassRunner.descriptorTypeFor(
+                        computePass(List.of("cloudBaseShape"), List.of()), "cloudBaseShape", emptyRegistry()),
+                "a declared pack texture (2D or 3D volume) must classify as a sampled image in a "
+                        + "compute pass, the same as it already does in a fullscreen pass: this is the "
+                        + "path a sampler3D volume must use, since GlslCompiler's own reflection refuses it");
+    }
+
+    @Test
+    void ordinaryTexture2DPackAssetIsAlsoASampledImageInCompute() {
+        // The 2D shape (depth == null) classifies identically: this branch is not volume-specific,
+        // it is "any pack-declared texture", matching FullscreenPassRunner's own sampler special-case.
+        PackTextureSpec png = PackTextureSpec.texture2D("causticsTexture", "shaders/textures/water_caustics.png");
+        GraphRunner.setPackTextureRegistryForTest(
+                PackTextureRegistry.create(Path.of("."), Map.of("causticsTexture", png)));
+
+        assertEquals(VK13.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                ComputePassRunner.descriptorTypeFor(
+                        computePass(List.of("causticsTexture"), List.of()), "causticsTexture", emptyRegistry()));
+    }
+
+    @Test
+    void undeclaredNameStillHitsTheTerminalThrowWithNoPackLoaded() {
+        // GraphRunner.packTextureRegistry() is null when no pack is loaded (the real steady state
+        // between packs, and every test above this one in this class), so descriptorTypeFor's
+        // branch must null-check it rather than NPE, and an unrecognized name must still fail loudly.
+        assertThrows(IllegalStateException.class, () -> ComputePassRunner.descriptorTypeFor(
+                computePass(List.of("notATarget"), List.of()), "notATarget", emptyRegistry()));
+    }
+
+    @Test
+    void undeclaredNameHitsTheTerminalThrowEvenWithAPackLoaded() {
+        // A real registry that simply doesn't declare this name must fall through to the same throw,
+        // not silently classify as a sampled image because a registry instance merely exists.
+        PackTextureSpec png = PackTextureSpec.texture2D("causticsTexture", "shaders/textures/water_caustics.png");
+        GraphRunner.setPackTextureRegistryForTest(
+                PackTextureRegistry.create(Path.of("."), Map.of("causticsTexture", png)));
+        assertThrows(IllegalStateException.class, () -> ComputePassRunner.descriptorTypeFor(
+                computePass(List.of("notATarget"), List.of()), "notATarget", emptyRegistry()));
     }
 }

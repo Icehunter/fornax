@@ -4,13 +4,18 @@ import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.GpuDevice;
+import com.mojang.blaze3d.systems.GpuDeviceBackend;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.vulkan.VulkanDevice;
 import dev.icehunter.fornax.FornaxMod;
+import dev.icehunter.fornax.mixin.vulkan.GpuDeviceBackendAccessor;
 import dev.icehunter.fornax.pack.FornaxPackError;
 import dev.icehunter.fornax.pack.PackTextureSpec;
+import dev.icehunter.fornax.pack.RawVolumeAsset;
 import org.jspecify.annotations.Nullable;
+import org.lwjgl.vulkan.VK13;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -64,6 +69,12 @@ public final class PackTextureRegistry implements AutoCloseable {
         return specs.containsKey(name);
     }
 
+    /** True iff {@code name} declares a genuine 3D volume rather than a mipmapped 2D image. */
+    public boolean isVolume(String name) {
+        PackTextureSpec spec = specs.get(name);
+        return spec != null && spec.isVolume();
+    }
+
     /**
      * Decodes and uploads every declared texture not yet built. No-op once every declared texture
      * has been loaded (the common steady-state case, checked without touching the GPU) or if no
@@ -86,6 +97,79 @@ public final class PackTextureRegistry implements AutoCloseable {
     }
 
     private void load(GpuDevice device, PackTextureSpec spec) {
+        if (spec.isVolume()) {
+            loadVolume(spec);
+        } else {
+            load2D(device, spec);
+        }
+    }
+
+    /**
+     * Loads a {@code [textures.*]} volume spec through {@link Volume3DTexture}, the engine's one
+     * hand-built {@code VK_IMAGE_TYPE_3D} path: {@code device.createTexture} itself throws for any
+     * {@code depthOrLayers > 1} (see that class's own doc), so unlike {@link #load2D} this method
+     * never touches the {@link GpuDevice} Blaze3D handed {@link #ensureLoaded()}; it re-derives the
+     * Vulkan backend directly, the same way {@link Volume3DTexture#create} itself does.
+     *
+     * <p>Skips (does not throw) on a non-Vulkan backend, since a GL device can never host a real 3D
+     * image and there is nothing to retry: the same permanent-skip contract
+     * {@code Volume3DTexture.create} documents for itself.
+     */
+    private void loadVolume(PackTextureSpec spec) {
+        Path file = packRoot.resolve(spec.file());
+        GpuDevice device = RenderSystem.tryGetDevice();
+        if (device == null) {
+            // Mirrors Volume3DTexture.create's own gpuDevice == null guard (Volume3DTexture.java)
+            // rather than casting straight to GpuDeviceBackendAccessor. Unreachable today since
+            // ensureLoaded() already null-checked the device synchronously just above this call, but
+            // this method must never assume that stays true.
+            return;
+        }
+        GpuDeviceBackend backend = ((GpuDeviceBackendAccessor) (Object) device).fornax$backend();
+        // Duplicates the instanceof check Volume3DTexture.create already makes internally
+        // (including its unavailableOnThisBackend latch); kept here only so the non-Vulkan case logs
+        // its own specific message instead of the generic "no GPU device yet" one below. Must stay
+        // in sync with create()'s gate if that ever changes shape.
+        if (!(backend instanceof VulkanDevice)) {
+            FornaxMod.LOGGER.warn("[Fornax] Skipping volume texture '{}': not on Vulkan backend", spec.name());
+            return;
+        }
+        // Hoisted above the try, mirroring load2D's texture/view hoist: create() can succeed and
+        // hand back a real, GPU-backed volume, and the separate upload() call below can then throw
+        // (IllegalArgumentException on a mismatch, GpuFatalException on a fence timeout), both landing
+        // in this method's own catch. Without this reference the catch has no way to free an
+        // already-constructed volume, and ensureLoaded() retries a not-yet-loaded spec every frame,
+        // so a persistently failing upload would leak one full 3D image per frame, forever.
+        Volume3DTexture volume = null;
+        try {
+            RawVolumeAsset asset = RawVolumeAsset.read(file);
+            int vkFormat = asset.format() == RawVolumeAsset.Format.R8
+                    ? VK13.VK_FORMAT_R8_UNORM : VK13.VK_FORMAT_R8G8B8A8_UNORM;
+            volume = Volume3DTexture.create("Fornax Pack Volume " + spec.name(),
+                    GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
+                    vkFormat, asset.width(), asset.height(), asset.depth());
+            if (volume == null) {
+                FornaxMod.LOGGER.warn("[Fornax] Skipping volume texture '{}': no GPU device yet", spec.name());
+                return;
+            }
+            volume.upload(asset);
+            textures.put(spec.name(), volume);
+            views.put(spec.name(), volume.view());
+            FornaxMod.LOGGER.info("[Fornax] Pack volume texture '{}' loaded from {} ({}x{}x{}, {})",
+                    spec.name(), spec.file(), asset.width(), asset.height(), asset.depth(), asset.format());
+        } catch (IOException | RuntimeException e) {
+            // Same rationale as load2D's own catch: PackDiscovery already proved this file reads and
+            // validates at load time, so reaching this catch means the file changed on disk after
+            // validation, or a transient GPU failure. Logged, not thrown, for the same reason. Free
+            // the volume if create() succeeded but something after it (upload, here) failed; see
+            // the hoist comment above. Only put into textures/views once every step succeeds.
+            if (volume != null) volume.close();
+            FornaxMod.LOGGER.error("[Fornax] PackTextureRegistry: failed to (re)load volume texture '{}' from {}: {}",
+                    spec.name(), spec.file(), e.getMessage());
+        }
+    }
+
+    private void load2D(GpuDevice device, PackTextureSpec spec) {
         Path file = packRoot.resolve(spec.file());
         // Hoisted above the try so the catch can free it: only put into textures/views once BOTH
         // the texture and its view succeed, or a failure creating the view left the texture

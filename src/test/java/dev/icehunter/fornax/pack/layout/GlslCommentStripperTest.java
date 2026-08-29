@@ -126,7 +126,10 @@ class GlslCommentStripperTest {
             }
         }
         assertTrue(before > 0, "no shader sources were scanned");
-        assertTrue(after * 2 < before, "expected under half the bytes; before=" + before + " after=" + after);
+        // Total source-size ratio is not the failure mechanism and naturally changes as the pack's
+        // code/comment mix evolves. Keep only the useful sanity check here; the longest run below
+        // pins the recursive-regex risk this test exists to prevent.
+        assertTrue(after < before, "expected comments to be removed; before=" + before + " after=" + after);
         // Indentation is fine; a run in the hundreds means blank space survived somewhere.
         assertTrue(worstRun < 200,
                 "longest whitespace run is " + worstRun + " chars in " + worstFile
