@@ -490,6 +490,21 @@ public class GlobalUniformsWriteMixin {
         builder.putVec4(actor.fluidKind(), actor.surfaceContact(), actor.verticalSpeed(),
                 actor.reset() ? 1.0f : 0.0f);
 
+        // World clock (bytes 800..816): the calendar, which the wind clock above is not. The day
+        // clock follows /time set, doDaylightCycle and its own rate; getGameTime() ignores all
+        // three, so a pack keying weather on it sees the sun cross hundreds of days while its day
+        // count barely moves.
+        //
+        // getDefaultClockTime(), not getOverworldClockTime(): this dimension's own clock, so the day
+        // count agrees with the dimension-aware SUN_ANGLE the probe hands SkyProbe.
+        //
+        // Index and fraction split because a float32 carries 24 mantissa bits. Both the division and
+        // the modulus are taken on the long, and floorDiv/floorMod agree if a clock runs negative.
+        long dayTime = Minecraft.getInstance().level.getDefaultClockTime();
+        float dayIndex = (float) Math.floorDiv(dayTime, 24000L);
+        float dayFraction = (float) (Math.floorMod(dayTime, 24000L) / 24000.0);
+        builder.putVec4(dayIndex, dayFraction, 0.0f, 0.0f);
+
         return original.call(builder);
     }
 
