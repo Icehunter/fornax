@@ -29,6 +29,29 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class PbrSettingsLayoutTest {
 
+    /**
+     * Glass refraction strength has to reach terrain, and has to arrive off with no pack.
+     *
+     * <p>Unbridged, the identifier is either a link failure or a silent compile-time default: its
+     * consumer is terrain.fsh's forward arm, which has no {@code u_PackOptions} block. The fallback
+     * is 0 because a non-zero engine default would be Fornax deciding how much a pane bends.
+     */
+    @Test
+    void refractStrengthRidesTheGeometryBridgeAndDefaultsOff() {
+        PbrSettingsLayout.Member refract = PbrSettingsLayout.MEMBERS.stream()
+                .filter(member -> member.option().equals("u_RefractStrength"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        "u_RefractStrength must reach terrain through u_PbrSettings: its only"
+                                + " consumer is the forward translucent arm, which has no"
+                                + " u_PackOptions block to receive it"));
+        assertEquals(0.0f, refract.fallback(),
+                "with no pack loaded the engine must not refract on its own");
+        assertEquals(PbrSettingsLayout.MEMBERS.getLast(), refract,
+                "APPEND ONLY: u_RefractStrength must stay last, or every short-prefix declaration"
+                        + " of this block shifts by one float");
+    }
+
     @Test
     void waveSpeedRidesTheGeometryBridgeAtNeutralFallback() {
         PbrSettingsLayout.Member waveSpeed = PbrSettingsLayout.MEMBERS.stream()

@@ -253,7 +253,14 @@ public final class PbrSettingsLayout {
             new Member("u_FogDryDensity", 1.0f),
             new Member("u_FogDryDistance", 1.0f),
             new Member("u_FogDrySharpness", 1.0f),
-            new Member("u_PomShadowStrength", 0.6f));
+            new Member("u_PomShadowStrength", 0.6f),
+            // --- Glass refraction -----------------------------------------------------------------
+            //
+            // Slab thickness for translucent terrain's refraction. Rides this bridge for the usual
+            // reason: its only consumer is terrain.fsh's forward arm, which has no u_PackOptions
+            // block. Fallback 0.0 because a refracting engine default would be Fornax picking a look.
+            // APPENDED LAST by the std140 ABI rule.
+            new Member("u_RefractStrength", 0.0f));
 
     /**
      * Bytes the block occupies, for the ring buffer's allocation.
