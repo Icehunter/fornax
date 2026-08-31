@@ -9,7 +9,9 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.tags.FluidTags;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.phys.Vec3;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
@@ -18,24 +20,25 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-/** Publishes loaded surface-fluid columns for generic shader-pack simulations. */
+/**
+ * Publishes loaded surface-fluid columns for generic shader-pack simulations.
+ *
+ * <p>Every column is searched from its OWN motion-blocking top downward, so elevation is a
+ * per-column property and unrelated bodies -- a river above a lake, a canal beside a pond, a
+ * waterfall's plunge pool -- all resolve in the same window. A single shared reference level
+ * instead would report every column beyond a tier's vertical reach of it as dry, leaving consumers
+ * silently dead on all but one body.
+ */
 public final class SurfaceFluidClipmapUpload {
     private static final int GRID = SurfaceFluidClipmapBuffer.GRID;
     private static final int ROW_BYTES = GRID * SurfaceFluidClipmapBuffer.BYTES_PER_COLUMN;
     private static final int MAX_ROWS_PER_FRAME = 16;
-    private static final int[] REFERENCE_OFFSETS = {0, -1, 1, -2, 2, -3, 3, -4, 4};
 
-    /** Four words per toroidal column; zero means unknown. */
-    private static final int[] MIRROR = new int[
-            SurfaceFluidClipmapBuffer.COLUMNS * SurfaceFluidClipmapBuffer.WORDS_PER_COLUMN];
     private static final int[] ROW = new int[GRID * SurfaceFluidClipmapBuffer.WORDS_PER_COLUMN];
     private static final ByteBuffer SCRATCH = MemoryUtil.memAlloc(MAX_ROWS_PER_FRAME * ROW_BYTES)
             .order(ByteOrder.nativeOrder());
 
     private static ClientLevel mirrorLevel;
-    private static int referenceBlockY;
-    private static int referenceFluidKind;
-    private static boolean hasReference;
     private static boolean pendingClear;
     private static int rowCursor;
 
@@ -55,38 +58,17 @@ public final class SurfaceFluidClipmapUpload {
         if (tier == SurfaceFluidClipmapBuffer.TIER_OFF) return;
 
         LocalActorFrameState.Snapshot actor = LocalActorFrameState.current();
-        int actorX = (int) Math.floor(actor.x());
-        int actorZ = (int) Math.floor(actor.z());
-        if (actor.surfaceContact() > 0.5f && actor.fluidKind() != LocalActorFrameState.FLUID_NONE
-                && level.hasChunk(SectionPos.blockToSectionCoord(actorX),
-                        SectionPos.blockToSectionCoord(actorZ))) {
-            Surface reference = findReference(level, actorX, (int) Math.floor(actor.y()), actorZ,
-                    actor.fluidKind());
-            if (reference != null && (!hasReference || reference.blockY() != referenceBlockY
-                    || reference.kind() != referenceFluidKind)) {
-                referenceBlockY = reference.blockY();
-                referenceFluidKind = reference.kind();
-                hasReference = true;
-                invalidateField();
-            }
-        }
-
-        if (!hasReference) {
-            publish(List.of());
-            return;
-        }
-
         int rows = SurfaceFluidClipmapBuffer.rowsPerFrame(tier);
-        int[] verticalOffsets = SurfaceFluidClipmapBuffer.verticalOffsets(tier);
-        int baseX = SurfaceFluidClipmapBuffer.windowBase(actorX);
-        int baseZ = SurfaceFluidClipmapBuffer.windowBase(actorZ);
+        int searchDepth = SurfaceFluidClipmapBuffer.searchDepth(tier);
+        int baseX = SurfaceFluidClipmapBuffer.windowBase((int) Math.floor(actor.x()));
+        int baseZ = SurfaceFluidClipmapBuffer.windowBase((int) Math.floor(actor.z()));
         List<EngineBufferUploadQueue.Range> ranges = new ArrayList<>(rows);
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         BlockPos.MutableBlockPos above = new BlockPos.MutableBlockPos();
         for (int i = 0; i < rows; i++) {
             int worldZ = baseZ + ((rowCursor + i) & (GRID - 1));
             int toroidalRow = worldZ & (GRID - 1);
-            fillRow(level, pos, above, baseX, worldZ, toroidalRow, verticalOffsets, ROW);
+            fillRow(level, pos, above, baseX, worldZ, searchDepth, ROW);
             int scratchOffset = i * ROW_BYTES;
             for (int word = 0; word < ROW.length; word++) {
                 SCRATCH.putInt(scratchOffset + word * Integer.BYTES, ROW[word]);
@@ -108,74 +90,68 @@ public final class SurfaceFluidClipmapUpload {
 
     private static void resetWorld(ClientLevel level) {
         mirrorLevel = level;
-        hasReference = false;
-        referenceBlockY = 0;
-        referenceFluidKind = SurfaceFluidClipmapBuffer.FLUID_DRY;
-        invalidateField();
-    }
-
-    private static void invalidateField() {
-        Arrays.fill(MIRROR, 0);
         rowCursor = 0;
         pendingClear = true;
     }
 
-    private static Surface findReference(ClientLevel level, int x, int actorY, int z, int wantedKind) {
-        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-        BlockPos.MutableBlockPos above = new BlockPos.MutableBlockPos();
-        for (int offset : REFERENCE_OFFSETS) {
-            Surface surface = exposedSurface(level, pos, above, x, actorY + offset, z);
-            if (surface != null && surface.kind() == wantedKind) return surface;
-        }
-        return null;
-    }
-
     private static void fillRow(ClientLevel level, BlockPos.MutableBlockPos pos,
                                 BlockPos.MutableBlockPos above, int baseX, int worldZ,
-                                int toroidalRow, int[] verticalOffsets, int[] row) {
+                                int searchDepth, int[] row) {
         int chunkZ = SectionPos.blockToSectionCoord(worldZ);
         for (int i = 0; i < GRID; i++) {
             int worldX = baseX + i;
-            int toroidalX = worldX & (GRID - 1);
-            int rowWord = toroidalX * SurfaceFluidClipmapBuffer.WORDS_PER_COLUMN;
-            int mirrorWord = (toroidalRow * GRID + toroidalX)
-                    * SurfaceFluidClipmapBuffer.WORDS_PER_COLUMN;
+            int rowWord = (worldX & (GRID - 1)) * SurfaceFluidClipmapBuffer.WORDS_PER_COLUMN;
 
             if (!level.hasChunk(SectionPos.blockToSectionCoord(worldX), chunkZ)) {
                 // Fluid topology changes with chunk lifetime; last-known water is unsafe here.
                 // Unknown must fail closed so pressure cannot flow into an unloaded column.
                 Arrays.fill(row, rowWord, rowWord + SurfaceFluidClipmapBuffer.WORDS_PER_COLUMN, 0);
-                Arrays.fill(MIRROR, mirrorWord,
-                        mirrorWord + SurfaceFluidClipmapBuffer.WORDS_PER_COLUMN, 0);
                 continue;
             }
 
-            Surface found = null;
-            for (int offset : verticalOffsets) {
-                found = exposedSurface(level, pos, above, worldX, referenceBlockY + offset, worldZ);
-                if (found != null) break;
-            }
-            if (found == null) {
-                SurfaceFluidClipmapBuffer.writeRecord(row, rowWord, worldX, worldZ, 0.0f,
-                        SurfaceFluidClipmapBuffer.FLUID_DRY);
+            // NO_LEAVES, not plain MOTION_BLOCKING: a tree overhanging a lake would otherwise start
+            // the search at the canopy, and the water below it would never be reached within the
+            // tier's search depth.
+            int top = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, worldX, worldZ);
+            // A void column's top sits on the world floor, so an unclamped scan would probe below it.
+            int reach = Math.min(searchDepth, top - level.getMinY());
+            int fluidY = SurfaceFluidClipmapBuffer.findExposedFluidY(top, reach,
+                    y -> fluidKindAt(level, above, worldX, y, worldZ));
+
+            // The heightmap counts fluids, so its top is the WATER's top on an open lake. What a
+            // wave can wash over is a solid, and the block at top-1 is motion-blocking by
+            // definition -- so whether that one block is fluid decides whether this column has a
+            // solid top at all.
+            boolean fluidOnTop = reach > 0
+                    && fluidKindAt(level, above, worldX, top - 1, worldZ)
+                            != SurfaceFluidClipmapBuffer.FLUID_DRY;
+            float solidTop = fluidOnTop ? SurfaceFluidClipmapBuffer.NO_SOLID_TOP : (float) top;
+
+            if (fluidY == SurfaceFluidClipmapBuffer.NO_SURFACE) {
+                // The heightmap value IS the top plane of the highest motion-blocking block: it
+                // names the first free Y above it. A partial block -- slab, path, farmland --
+                // reports the full block top, so an overtop test against this is conservative by up
+                // to one block on those.
+                SurfaceFluidClipmapBuffer.writeRecord(row, rowWord, worldX, worldZ, (float) top,
+                        solidTop, SurfaceFluidClipmapBuffer.FLUID_DRY, 0.0, 0.0);
             } else {
+                pos.set(worldX, fluidY, worldZ);
+                FluidState fluid = level.getFluidState(pos);
+                // Vanilla's own flow vector, the one it uses to push entities and orient the
+                // flowing texture, rather than a gradient re-derived from neighbour levels. Zero
+                // for a still source.
+                Vec3 flow = fluid.getFlow(level, pos);
                 SurfaceFluidClipmapBuffer.writeRecord(row, rowWord, worldX, worldZ,
-                        found.surfaceY(), found.kind());
+                        fluidY + fluid.getOwnHeight(), solidTop, fluidKind(fluid),
+                        flow.x, flow.z);
             }
-            System.arraycopy(row, rowWord, MIRROR, mirrorWord,
-                    SurfaceFluidClipmapBuffer.WORDS_PER_COLUMN);
         }
     }
 
-    private static Surface exposedSurface(ClientLevel level, BlockPos.MutableBlockPos pos,
-                                           BlockPos.MutableBlockPos above, int x, int y, int z) {
-        pos.set(x, y, z);
-        FluidState fluid = level.getFluidState(pos);
-        int kind = fluidKind(fluid);
-        if (kind == SurfaceFluidClipmapBuffer.FLUID_DRY) return null;
-        above.set(x, y + 1, z);
-        if (fluidKind(level.getFluidState(above)) == kind) return null;
-        return new Surface(y, y + fluid.getOwnHeight(), kind);
+    private static int fluidKindAt(ClientLevel level, BlockPos.MutableBlockPos scratch,
+                                   int x, int y, int z) {
+        scratch.set(x, y, z);
+        return fluidKind(level.getFluidState(scratch));
     }
 
     private static int fluidKind(FluidState fluid) {
@@ -183,6 +159,4 @@ public final class SurfaceFluidClipmapUpload {
         if (fluid.is(FluidTags.LAVA)) return SurfaceFluidClipmapBuffer.FLUID_LAVA;
         return SurfaceFluidClipmapBuffer.FLUID_DRY;
     }
-
-    private record Surface(int blockY, float surfaceY, int kind) {}
 }

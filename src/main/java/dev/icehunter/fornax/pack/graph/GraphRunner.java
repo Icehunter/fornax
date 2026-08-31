@@ -2029,6 +2029,11 @@ public final class GraphRunner {
      * never appears even fully unobstructed), so it instead reads the same real
      * {@code u_SunDirection.xyz} every other glitter-relevant site uses, same as
      * {@code water_composite}.
+     *
+     * <p>{@code cloud_shadow_mask} casts the cloud deck's shadow onto the world and needs the
+     * direction it is cast from, reading both {@code u_SunDirection.xyz} and {@code .w}. It is
+     * matched exactly: the name looks like the {@code clouds_march} family but shares no prefix
+     * with it, so the family entry above does not cover it.
      */
     static boolean wantsSunAndDebugParams(String name) {
         return name.equals("resolve") || name.startsWith("resolve_hdr")
@@ -2036,7 +2041,8 @@ public final class GraphRunner {
                 || name.startsWith("water_volume_march")
                 || name.equals("water_volume_scatter_history")
                 || name.equals("ssr_water_fill") || name.equals("direct_light_analytic")
-                || name.startsWith("clouds_march") || name.equals("glint_occlusion");
+                || name.startsWith("clouds_march") || name.equals("cloud_shadow_mask")
+                || name.equals("glint_occlusion");
     }
 
     /**
