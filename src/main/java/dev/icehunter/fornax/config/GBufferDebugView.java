@@ -593,7 +593,15 @@ public enum GBufferDebugView {
      */
     public boolean isSelectable() {
         return switch (this) {
-            case VOXEL_RAYMARCH, WATER_PREPASS, CELESTIAL_SHADOW_VOXEL,
+            // WATER_PREPASS is absent from this list on purpose: WaterPrepassDebugPass is hooked
+            // at GameRendererMixin's renderLevel RETURN and presents waterNormal on every frame the
+            // view is set. It is the only view that shows whether the pre-pass rasterized water
+            // where the frame says there is water.
+            //
+            // CELESTIAL_SHADOW_VOXEL has no presenter hooked anywhere; pack targets reach the
+            // screen through GraphTargetDebugPass. Listing it would offer a view that presents
+            // nothing.
+            case VOXEL_RAYMARCH, CELESTIAL_SHADOW_VOXEL,
                     ENV_SPEC_RATIO, ENV_DECOMP_SKY, ENV_DECOMP_MIX, ENV_DECOMP_MAT,
                     ENV_DECOMP_LOCAL, ENV_DECOMP_AO, ENV_DECOMP_RESIDUAL,
                     ENV_DECOMP_ALBEDO_WRITE_VS_READ, ENV_DECOMP_ALBEDO_IDENTITY_INPUTS,

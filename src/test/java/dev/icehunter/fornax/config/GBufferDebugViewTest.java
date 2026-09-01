@@ -298,8 +298,11 @@ class GBufferDebugViewTest {
         assertTrue(GBufferDebugView.WATER_SHAFT_SHADOW_VISIBILITY.isSelectable());
         assertTrue(GBufferDebugView.WATER_SHAFT_RAW_SCATTER.isSelectable());
 
+        assertTrue(GBufferDebugView.WATER_PREPASS.isSelectable(),
+                "WaterPrepassDebugPass is hooked and presents every frame; the cycle must reach it");
+
         assertFalse(GBufferDebugView.VOXEL_RAYMARCH.isSelectable());
-        assertFalse(GBufferDebugView.WATER_PREPASS.isSelectable());
+        // No presenter hooked; pack targets go through GraphTargetDebugPass.
         assertFalse(GBufferDebugView.CELESTIAL_SHADOW_VOXEL.isSelectable());
         assertFalse(GBufferDebugView.ENV_SPEC_RATIO.isSelectable());
         assertFalse(GBufferDebugView.ENV_DECOMP_ALBEDO_IDENTITY_INPUTS.isSelectable());
