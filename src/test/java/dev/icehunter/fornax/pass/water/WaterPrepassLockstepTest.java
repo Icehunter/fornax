@@ -29,10 +29,20 @@ class WaterPrepassLockstepTest {
     }
 
     @Test void waterDepthConsumersStayAllocatedWhenOpaqueReflectionsAreOff() {
-        assertTrue(WaterSurfaceManager.shouldRenderPrepass(true, 3),
+        assertTrue(WaterSurfaceManager.shouldRenderPrepass(true, 2),
                 "SSR_WATER_MODE owns the shared water-depth prepass; opaque SSR quality must not disable it");
-        assertFalse(WaterSurfaceManager.shouldRenderPrepass(true, 1));
-        assertFalse(WaterSurfaceManager.shouldRenderPrepass(false, 3));
+        assertFalse(WaterSurfaceManager.shouldRenderPrepass(false, 2));
+    }
+
+    @Test void theDrawRunsForEveryTierThatWantsAPackWaterSurface() {
+        // The draw rasterizes the wave normals and the water-present flag. A tier that wants waves
+        // without a screen-space reflection still needs it: gated higher, the targets are allocated
+        // and cleared, every consumer reads "no water anywhere", and the surface is absent.
+        assertFalse(WaterSurfaceManager.shouldRenderPrepass(true, 0),
+                "the lowest tier leaves water to the pack's forward terrain arm");
+        assertTrue(WaterSurfaceManager.shouldRenderPrepass(true, 1),
+                "a no-reflection surface tier still needs wave normals rasterized");
+        assertTrue(WaterSurfaceManager.shouldRenderPrepass(true, 2));
     }
 
     @Test void targetsAllocateAtEveryWaterModeSoUngatedConsumersResolve() {
@@ -49,8 +59,9 @@ class WaterPrepassLockstepTest {
     }
 
     @Test void allocationIsBroaderThanTheDraw() {
-        // Nothing draws below Traced; the targets still exist.
+        // Nothing draws at the lowest tier; the targets still exist, so builtin.waterDepth resolves
+        // for the ungated passes that read it unconditionally.
         assertTrue(WaterSurfaceManager.shouldAllocateTargets(true));
-        assertFalse(WaterSurfaceManager.shouldRenderPrepass(true, 1));
+        assertFalse(WaterSurfaceManager.shouldRenderPrepass(true, 0));
     }
 }

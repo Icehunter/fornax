@@ -96,12 +96,20 @@ public final class WaterSurfaceManager {
     }
 
     /**
-     * Whether the pre-pass draw runs. The water pre-pass is shared infrastructure, not an opaque-SSR
-     * implementation detail: the targets exist at every {@code SSR_WATER_MODE} and only the geometry
-     * is gated here. See {@link #shouldAllocateTargets}.
+     * Whether the pre-pass draw runs: whenever the pack asks for its own water surface, which is
+     * {@code SSR_WATER_MODE} above its lowest value. The lowest value leaves water to the pack's
+     * forward terrain arm.
+     *
+     * <p>Not tied to a reflection tier. This draw rasterizes the wave normals and the water-present
+     * flag, so a tier wanting waves without a screen-space reflection still needs it. Gated higher,
+     * such a tier gets allocated but cleared targets, every consumer reads "no water anywhere", and
+     * no surface is drawn while the lake bed shows through.
+     *
+     * <p>The targets exist at every {@code SSR_WATER_MODE}; that is
+     * {@link #shouldAllocateTargets}'s question, not this one.
      */
     public static boolean shouldRenderPrepass(boolean graphActive, int waterMode) {
-        return graphActive && waterMode > 1;
+        return graphActive && waterMode > 0;
     }
 
     /**
