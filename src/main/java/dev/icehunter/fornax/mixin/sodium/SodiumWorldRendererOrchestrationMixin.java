@@ -339,8 +339,7 @@ public class SodiumWorldRendererOrchestrationMixin {
      * the same once-per-frame flags rather than duplicated logic.
      */
     private void fornax$renderWaterPrepass(ChunkRenderMatrices matrices, double x, double y, double z, GpuSampler terrainSampler) {
-        if (!WaterSurfaceManager.shouldRenderPrepass(
-                GraphRunner.isActive(), GraphRunner.compileOptionValue("SSR_WATER_MODE", 0))) {
+        if (!WaterSurfaceManager.shouldAllocateTargets(GraphRunner.isActive())) {
             return;
         }
 
@@ -348,6 +347,16 @@ public class SodiumWorldRendererOrchestrationMixin {
         int height = Minecraft.getInstance().gameRenderer.mainRenderTarget().height;
         WaterSurfaceManager.ensureSize(width, height);
         WaterSurfaceManager.clear();
+
+        // Allocation and the clear sit above this gate, not inside it. builtin.waterDepth is an
+        // input to ungated fullscreen passes (resolve, clouds_composite, both underwater blurs,
+        // tonemap); a name that resolves to no allocated target disables those passes for the
+        // session. A cleared target is the right content when nothing draws, so below Traced the
+        // graph gets valid empty targets and only the geometry is skipped.
+        if (!WaterSurfaceManager.shouldRenderPrepass(
+                GraphRunner.isActive(), GraphRunner.compileOptionValue("SSR_WATER_MODE", 0))) {
+            return;
+        }
 
         // MAIN camera matrices/fog, exactly like fornax$renderShadowPass -- see "update()/PBR/context
         // guard" above for why these three calls are safe to repeat even when fornax$renderShadowPass

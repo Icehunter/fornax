@@ -79,9 +79,26 @@ public final class WaterSurfaceManager {
     }
 
     /**
-     * The water pre-pass is shared infrastructure, not an opaque-SSR implementation detail.
-     * Fullscreen consumers such as the resolve, cloud composite, underwater refraction and tonemap
-     * can require {@link #DEPTH_NAME} even when opaque screen-space reflections are disabled.
+     * Whether the targets must exist. Allocation is a separate question from whether anything draws
+     * into them. {@link #DEPTH_NAME} is an input to ungated fullscreen passes: the resolve, the
+     * cloud composite, both underwater blurs and the tonemap. A name that resolves to no allocated
+     * target makes {@code GraphInputResolver} throw, and {@code FullscreenPassRunner} retries three
+     * frames before disabling that pass for the rest of the session. Losing the tonemap and the
+     * resolve costs the whole frame, not the water.
+     *
+     * <p>Cleared targets are the right content when nothing draws. {@code waterDepth} is reversed-Z,
+     * so a cleared {@code 0.0} is the far plane and reads as no water at every pixel, and
+     * {@code waterNormal}'s alpha is the water-present flag, cleared to zero. Consumers see a frame
+     * that has no water in it.
+     */
+    public static boolean shouldAllocateTargets(boolean graphActive) {
+        return graphActive;
+    }
+
+    /**
+     * Whether the pre-pass draw runs. The water pre-pass is shared infrastructure, not an opaque-SSR
+     * implementation detail: the targets exist at every {@code SSR_WATER_MODE} and only the geometry
+     * is gated here. See {@link #shouldAllocateTargets}.
      */
     public static boolean shouldRenderPrepass(boolean graphActive, int waterMode) {
         return graphActive && waterMode > 1;

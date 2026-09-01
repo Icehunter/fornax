@@ -34,4 +34,23 @@ class WaterPrepassLockstepTest {
         assertFalse(WaterSurfaceManager.shouldRenderPrepass(true, 1));
         assertFalse(WaterSurfaceManager.shouldRenderPrepass(false, 3));
     }
+
+    @Test void targetsAllocateAtEveryWaterModeSoUngatedConsumersResolve() {
+        // builtin.waterDepth is an input to ungated fullscreen passes: the resolve, the cloud
+        // composite, both underwater blurs and the tonemap. FullscreenPassRunner disables a pass
+        // that throws for three frames, so a name resolving to no target costs the whole frame.
+        for (int waterMode = 0; waterMode <= 3; waterMode++) {
+            assertTrue(WaterSurfaceManager.shouldAllocateTargets(true),
+                    "targets must exist at SSR_WATER_MODE=" + waterMode
+                            + "; a cleared reversed-Z depth reads as no water");
+        }
+        assertFalse(WaterSurfaceManager.shouldAllocateTargets(false),
+                "no graph, no engine targets");
+    }
+
+    @Test void allocationIsBroaderThanTheDraw() {
+        // Nothing draws below Traced; the targets still exist.
+        assertTrue(WaterSurfaceManager.shouldAllocateTargets(true));
+        assertFalse(WaterSurfaceManager.shouldRenderPrepass(true, 1));
+    }
 }
