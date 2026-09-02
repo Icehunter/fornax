@@ -602,14 +602,14 @@ Vulkan pass runners. Pack sources arrive with their complete import graph flatte
 this boundary removes dead helpers and folds the native module before a backend translates it into
 a compute function, without moving any visual policy out of the pack.
 
-### Geometry-pass inputs (`u_GeomInput0..3`) and `builtin.depth_opaque`
+### Geometry-pass inputs (`u_GeomInput0..7`) and `builtin.depth_opaque`
 
 A `GEOMETRY`-typed pass, previously a pure placeholder for Sodium's own opaque/cutout terrain draw
 (see §3), can declare `inputs = [...]` like any other pass type, resolved onto a small, fixed set of
 sampler slots appended to Sodium's shared terrain bind group (descriptor set 0):
-`u_GeomInput0..GeometryInputs.RESERVED-1` (`GeometryInputs.RESERVED == 4`). The slot count is fixed
+`u_GeomInput0..GeometryInputs.RESERVED-1` (`GeometryInputs.RESERVED == 8`). The slot count is fixed
 at class-init, before any pack loads, because `ShaderChunkRenderer.BIND_GROUP` is a process-wide
-static built once (`ShaderChunkRendererBindGroupMixin` appends the four slots there); it cannot vary
+static built once (`ShaderChunkRendererBindGroupMixin` appends the eight slots there); it cannot vary
 per pack the way a `TargetRegistry` allocation can.
 
 - **Slot mapping is declaration order.** A geometry pass's *i*-th declared input resolves onto
@@ -669,10 +669,12 @@ Three constraints drove that design, each of which fails badly if ignored:
 
 Unmapped on purpose, not an oversight: `ARMOR_DECAL_CUTOUT_NO_CULL` and `GLINT` depth-test `EQUAL`
 against their base pass, so substituting one without the other (or changing either's depth output)
-makes decals z-fight or vanish. Translucent entity pipelines get their own slot because
-`RenderPipeline.build()` requires every non-null colour target to share one `BlendFunction`; blended
+makes decals z-fight or vanish. Translucent entity pipelines get their own slot because blended
 geometry can never write an unblended multi-target G-buffer, so it stays forward-shaded like
-terrain's translucent arm.
+terrain's translucent arm. The constraint is a shading one, not an API one: blend state is
+per-attachment. `withColorTargetState(int, ColorTargetState)` takes an `Optional<BlendFunction>` per
+attachment and `build()` compares only the blend functions present, so `DeferredGeometryPipelines`
+hands all five G-buffer lanes `Optional.empty()` in a loop.
 - **`builtin.depth_opaque`** (`OpaqueDepth`) is the one builtin usable only from a geometry pass;
   `checkInputRef` rejects it for every other pass type, since only a geometry pass has the
   SOLID/CUTOUT-vs-TRANSLUCENT sub-draw split the freshness rule below depends on. It is an
@@ -726,7 +728,7 @@ terrain's translucent arm.
 
 ## 6. Uniform contracts
 
-### `u_Globals` (std140, 800 bytes)
+### `u_Globals` (std140, 816 bytes)
 
 Written in two pieces sharing one physical buffer: Sodium's own uniform writer produces the first
 184 bytes unmodified, and `GlobalUniformsWriteMixin` appends the remaining fields to the same
@@ -770,10 +772,12 @@ buffer object. The backing ring buffer (`UniformBufferManagerMixin`) is widened 
 | `u_LocalActorMotion` | vec4 | 752 | 16 |
 | `u_LocalActorShape` | vec4 | 768 | 16 |
 | `u_LocalActorFluid` | vec4 | 784 | 16 |
+| `u_WorldClock` | vec4 | 800 | 16 |
 
-Total: 800 bytes exactly. Both sides apply the same std140 alignment rules (std140 is a fixed,
-standard packing convention that lets GPU shader code and CPU-side buffer-writing code agree on
-where each field sits in memory) to the same declared type sequence in the same order, so in
+Total: 816 bytes exactly, the size `UniformBufferManagerMixin` widens the ring storage to. Both
+sides apply the same std140 alignment rules (std140 is a fixed, standard packing convention that
+lets GPU shader code and CPU-side buffer-writing code agree on where each field sits in memory) to
+the same declared type sequence in the same order, so in
 principle the offsets can only agree. But they are written in two languages by hand, and a
 disagreement produces no compile error, no validation failure, and no log line: only a uniform
 silently holding a neighbouring field's bytes. `GlobalsLayoutContractTest` therefore computes the
@@ -1902,6 +1906,13 @@ dedicated debug-view uniform; it is one value of a mechanism built for something
 - **A mixin absent from the mixin config fails silently.** A mixin class that exists in source
   but isn't listed in the config is never applied, with no error, warning, or log line of any kind
   distinguishing that from an intentional removal.
+- **A constant quoted in this file is a third copy that nothing reads.** The GLSL declaration and
+  the Java allocation are tied to each other by a contract test; the prose here is tied to neither,
+  so it drifts on any change that updates both. The wrong number is what someone budgets a pack's
+  inputs against or picks a uniform tail offset from, and both land as data read from the wrong
+  place rather than as an error. `ArchitectureDocConstantsContractTest` pins the geometry-input
+  slot count and the `u_Globals` size and offset table; a numeric claim added here about a surface
+  the code also states belongs in that test.
 - **A YACL-bound `FornaxSettings` field must appear in `SettingsApplyRouter.route`'s diff, or its
   change is silently lost.** YACL applies the field into the live `FornaxConfig.get()` before the
   save callback runs, so it takes effect immediately regardless of what `route()` reports. Missed

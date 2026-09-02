@@ -285,6 +285,55 @@ vec3 sectionWorldOffset(uint drawId) {
 vec3 worldPosition = u_RegionOffset + sectionWorldOffset(_draw_id) + _vert_position;
 ```
 
+### Read when a section appeared
+
+Terrain streams in a section at a time, and a section becomes drawable in a single frame. If you
+want to introduce new geometry gradually rather than let it pop, the arrival time of each section is
+available to any terrain program. Declare the buffer yourself, alongside the push-constant block:
+
+```glsl
+uniform isamplerBuffer u_SectionTimeInfo;
+```
+
+The slot for the section being drawn is its region's id times the 256 section positions a region
+holds, plus the draw id:
+
+```glsl
+int sectionSlot = int((u_RegionID * 256u) + uint(_draw_id));
+int sectionAppearedAt = texelFetch(u_SectionTimeInfo, sectionSlot).r;
+```
+
+**The clock is per region, not global.** The stored value is milliseconds from the moment that
+section's own region was created to the moment the section's mesh was uploaded. Every region has a
+different zero point, so the number means nothing on its own. `u_CurrentTime` from the push-constant
+block above is the matching "now" on that same clock, which is what makes the subtraction valid:
+
+```glsl
+float elapsedMillis = float(u_CurrentTime - sectionAppearedAt);
+```
+
+Compare it against a frame counter, a world time, or any clock of your own and you get garbage that
+varies by region, which reads as terrain revealing at random rates in different directions.
+
+**Test the sign for "settled", never a literal.** A negative value means this section is not
+arriving and needs no reveal treatment. Zero is a legitimate value meaning it appeared at the instant
+its region was created, so `== 0` is wrong, and the specific negative filler is an implementation
+detail, so `== -1` is wrong too:
+
+```glsl
+float reveal = (sectionAppearedAt < 0) ? 1.0 : clamp(elapsedMillis * yourRateHere, 0.0, 1.0);
+```
+
+Three things the engine handles. A recycled region never inherits the previous occupant's times; a
+section's slot is written before that section can enter any draw batch, so no frame draws against a
+stale slot; and the stored value cannot reach you wrapped. One thing it does not: a region that has
+never uploaded geometry has no id assigned, so a pack that tracks region ids itself must treat an
+unassigned one as no data rather than computing a slot from it.
+
+`u_Globals` also carries `u_FadePeriodInv`, the reciprocal of the client's own chunk-fade duration,
+for the engine's fallback shader. If you read it, do not assume it is finite. Deriving your own rate
+from `elapsedMillis` is a look decision and belongs in your pack.
+
 ### Use compile options, not runtime options
 
 **A runtime option in a geometry shader will not compile.** Runtime options become uniforms, and
@@ -463,6 +512,11 @@ all change with the pack. Read them from the texture, or use the helper that doe
 machinery, which does not keep a previous-frame copy. Declaring both gets you one of them.
 
 **Never declare `sceneHistory`.** The engine owns it. Read `sceneHistory.history`.
+
+**`u_SectionTimeInfo` runs on a per-region clock.** Subtract it from `u_CurrentTime` in the same
+push-constant block and nothing else. Any global clock gives a different wrong answer per region,
+which looks like terrain revealing at different rates depending on which way you face. See
+section 4.
 
 **`filter = "linear"` is required on any target you downsample.** Without it the hardware cannot
 sample between pixels and the result is blocky.

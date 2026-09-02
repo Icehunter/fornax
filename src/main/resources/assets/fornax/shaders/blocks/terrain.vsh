@@ -40,10 +40,10 @@ out float v_BlockLight;
 // output set never changes shape between the forward and deferred fragment variants.
 out vec2 v_MotionVector;
 
-#ifdef USE_FOG
+// Unguarded: terrain.fsh declares both as plain `in`, so a guard here would make the stage
+// interface depend on a define only one stage sees.
 out vec2 v_FragDistance;
 out float v_FadeFactor;
-#endif
 
 uniform isamplerBuffer u_SectionTimeInfo;
 
@@ -86,14 +86,14 @@ void main() {
 
     vec3 worldPosition = u_RegionOffset + sectionWorldOffset(_draw_id) + _vert_position;
 
-#ifdef USE_FOG
     v_FragDistance = getFragDistance(worldPosition);
 
+    // Both times are milliseconds from the owning region's creation, so the epochs match. A slot
+    // reads negative until that section's mesh uploads; negative means settled.
     int sectionSlot = int((u_RegionID * 256u) + uint(_draw_id));
     int sectionBuiltAt = texelFetch(u_SectionTimeInfo, sectionSlot).r;
     float fadeProgress = clamp(float(u_CurrentTime - sectionBuiltAt) * u_FadePeriodInv, 0.0, 1.0);
     v_FadeFactor = (sectionBuiltAt < 0) ? 1.0 : fadeProgress;
-#endif
 
     gl_Position = u_ProjectionMatrix * u_ModelViewMatrix * vec4(worldPosition, 1.0);
 
