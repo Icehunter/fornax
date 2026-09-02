@@ -1,29 +1,21 @@
 package dev.icehunter.fornax.voxel;
 
-import com.mojang.blaze3d.vulkan.VulkanDevice;
-import dev.icehunter.fornax.FornaxMod;
-import dev.icehunter.fornax.pack.graph.BufferInstance;
+import dev.icehunter.fornax.pack.graph.EngineBufferUploadQueue;
 import dev.icehunter.fornax.pack.graph.PrecipClipmapBuffer;
 import dev.icehunter.fornax.pack.graph.TargetRegistry;
-import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.levelgen.Heightmap;
-import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
-import org.lwjgl.vulkan.VK13;
-import org.lwjgl.vulkan.VkCommandBuffer;
-import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
-import org.lwjgl.vulkan.VkFenceCreateInfo;
-import org.lwjgl.vulkan.VkMemoryBarrier;
-import org.lwjgl.vulkan.VkSubmitInfo;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.LongBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 /**
  * Fills {@link PrecipClipmapBuffer}'s field from vanilla's own per-column precipitation answer, a few
@@ -68,38 +60,44 @@ import java.nio.LongBuffer;
  * has not reached yet reports "unknown" rather than reporting a stale neighbour. That is the same
  * bargain {@code VoxelWindow.recenterAndResync} makes with its shell, without needing the executor:
  * one row is 128 biome queries against already-resident chunk data, not a section harvest.
+ *
+ * <h2>Upload</h2>
+ *
+ * Rows ride {@link EngineBufferUploadQueue}, recorded into the first consuming compute pass's
+ * command buffer ahead of its dispatch: no submit, no fence. A level change or a whole-window jump
+ * queues a clear ahead of that frame's rows. The tag identifies a column, not a world, and the same
+ * X/Z exists in every dimension; clearing the mirror alone leaves the old world's elements on the
+ * GPU for a full sweep.
  */
 public final class PrecipClipmapUpload {
     /** One row is 128 columns; at 8 per frame the field refreshes every 16 frames. */
     private static final int ROWS_PER_FRAME = 8;
     private static final int GRID = PrecipClipmapBuffer.GRID;
     private static final int ROW_BYTES = GRID * Integer.BYTES;
-    private static final long FENCE_WAIT_TIMEOUT = 0xFFFF_FFFF_FFFF_FFFFL;
 
     /**
      * What was last uploaded, so an unloaded column can keep its last known answer instead of being
      * overwritten with a value that means "desert" to every reader. 64 KiB, allocated once.
      *
-     * <p>Also the dimension guard: cleared whenever the level instance changes, because the tag
-     * identifies a COLUMN and says nothing about which world it was in -- without this, stepping
-     * through a Nether portal would have the overworld's biomes describing the Nether for the ~16
-     * frames it takes the cursor to sweep past them.
+     * <p>Cleared, with the GPU buffer, when the level instance changes or the window jumps by a
+     * whole grid: the tag identifies a column, not a world, and a whole-window jump is the only
+     * way a tag-period alias can enter the window.
      */
     private static final int[] MIRROR = new int[PrecipClipmapBuffer.COLUMNS];
 
     /**
-     * Reused across frames rather than allocated per call: this runs every frame for the whole
-     * session, and {@code memAlloc}/{@code memFree} of the same 4 KiB sixty times a second is pure
-     * churn. Render-thread only ({@code GraphRunner.prepare} is the sole caller), so no guard is
-     * needed; deliberately never freed, since its lifetime is the process's.
+     * Allocated once; runs every frame. Render-thread only ({@code GraphRunner.prepare} is the
+     * sole caller). The queue records from read-only slices, drained before the next frame refills.
      */
-    private static ByteBuffer scratch;
+    private static final ByteBuffer SCRATCH = MemoryUtil.memAlloc(ROWS_PER_FRAME * ROW_BYTES)
+            .order(ByteOrder.nativeOrder());
     private static final int[] ROW = new int[GRID];
-    private static final int[] ROW_INDICES = new int[ROWS_PER_FRAME];
 
     private static ClientLevel mirrorLevel;
+    private static int lastBaseX;
+    private static int lastBaseZ;
     private static int rowCursor;
-    private static boolean submitFailureLogged;
+    private static boolean pendingClear;
 
     private PrecipClipmapUpload() {}
 
@@ -109,7 +107,7 @@ public final class PrecipClipmapUpload {
      * calling, so a null buffer here means a torn-down registry rather than an ordering mistake.
      */
     public static void onFrame(TargetRegistry registry) {
-        if (registry == null) {
+        if (registry == null || registry.getBuffer(PrecipClipmapBuffer.TARGET) == null) {
             return;
         }
         Minecraft client = Minecraft.getInstance();
@@ -117,11 +115,6 @@ public final class PrecipClipmapUpload {
         if (level == null || client.player == null) {
             mirrorLevel = null;
             return;
-        }
-        if (mirrorLevel != level) {
-            java.util.Arrays.fill(MIRROR, 0);
-            mirrorLevel = level;
-            rowCursor = 0;
         }
 
         // The player BODY, matching u_WeatherAnchor exactly (GlobalUniformsWriteMixin's own tail):
@@ -132,23 +125,35 @@ public final class PrecipClipmapUpload {
         var body = client.player.getPosition(partialTick);
         int baseX = PrecipClipmapBuffer.windowBase((int) Math.floor(body.x));
         int baseZ = PrecipClipmapBuffer.windowBase((int) Math.floor(body.z));
-
-        if (scratch == null) {
-            scratch = MemoryUtil.memAlloc(ROWS_PER_FRAME * ROW_BYTES).order(ByteOrder.nativeOrder());
+        if (mirrorLevel != level
+                || Math.abs(baseX - lastBaseX) >= GRID || Math.abs(baseZ - lastBaseZ) >= GRID) {
+            Arrays.fill(MIRROR, 0);
+            mirrorLevel = level;
+            rowCursor = 0;
+            pendingClear = true;
         }
+        lastBaseX = baseX;
+        lastBaseZ = baseZ;
+
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        List<EngineBufferUploadQueue.Range> ranges = new ArrayList<>(ROWS_PER_FRAME);
         for (int i = 0; i < ROWS_PER_FRAME; i++) {
             int worldZ = baseZ + ((rowCursor + i) & (GRID - 1));
             int toroidalRow = worldZ & (GRID - 1);
             fillRow(level, pos, baseX, worldZ, toroidalRow, ROW);
-            ROW_INDICES[i] = toroidalRow;
-            // Absolute puts, so the buffer's own position stays at 0 for upload() to set per row.
+            int scratchOffset = i * ROW_BYTES;
             for (int x = 0; x < GRID; x++) {
-                scratch.putInt((i * GRID + x) * Integer.BYTES, ROW[x]);
+                SCRATCH.putInt(scratchOffset + x * Integer.BYTES, ROW[x]);
             }
+            ByteBuffer bytes = SCRATCH.asReadOnlyBuffer();
+            bytes.position(scratchOffset).limit(scratchOffset + ROW_BYTES);
+            ranges.add(new EngineBufferUploadQueue.Range((long) toroidalRow * ROW_BYTES,
+                    bytes.slice().order(ByteOrder.nativeOrder())));
         }
         rowCursor = (rowCursor + ROWS_PER_FRAME) & (GRID - 1);
-        upload(registry, scratch, ROW_INDICES, ROWS_PER_FRAME);
+        // A pending clear shares this frame's entry, ahead of the rows.
+        EngineBufferUploadQueue.publish(PrecipClipmapBuffer.TARGET, pendingClear, ranges);
+        pendingClear = false;
     }
 
     /**
@@ -188,79 +193,5 @@ public final class PrecipClipmapUpload {
             case RAIN -> PrecipClipmapBuffer.TYPE_RAIN;
             case SNOW -> PrecipClipmapBuffer.TYPE_SNOW;
         };
-    }
-
-    /**
-     * One {@code vkCmdUpdateBuffer} per row -- 512 bytes at a 512-aligned offset, far inside the
-     * 65536-byte inline limit and trivially 4-aligned -- all in one command buffer, one submit, one
-     * fence, exactly as {@link BrickGridUpload#uploadBatchLocked} does. Rows are not merged even when
-     * their toroidal indices happen to be adjacent: eight extra commands per frame is not worth the
-     * wrap-handling, and the wrap is guaranteed to occur once per sweep.
-     */
-    private static void upload(TargetRegistry registry, ByteBuffer scratch, int[] rowIndices, int rowCount) {
-        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
-            BufferInstance buffer = registry.getBuffer(PrecipClipmapBuffer.TARGET);
-            if (buffer == null || buffer.sizeBytes() < PrecipClipmapBuffer.BYTE_SIZE) {
-                return;
-            }
-            VulkanComputeBackend backend = VulkanComputeBackend.tryCreate();
-            if (backend == null) {
-                return;
-            }
-            try {
-                uploadLocked(backend, buffer.vkBuffer(), scratch, rowIndices, rowCount);
-            } finally {
-                backend.close();
-            }
-        }
-    }
-
-    /** Caller holds {@code SHARED_QUEUE_LOCK}. */
-    private static void uploadLocked(VulkanComputeBackend backend, long dst, ByteBuffer scratch,
-                                     int[] rowIndices, int rowCount) {
-        VulkanDevice device = backend.device();
-        VkCommandBuffer cmd = backend.commandPool().allocateBuffer();
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            VK13.vkBeginCommandBuffer(cmd, VkCommandBufferBeginInfo.calloc(stack).sType$Default());
-            for (int i = 0; i < rowCount; i++) {
-                scratch.limit((i + 1) * ROW_BYTES).position(i * ROW_BYTES);
-                VK13.vkCmdUpdateBuffer(cmd, dst, (long) rowIndices[i] * ROW_BYTES, scratch);
-            }
-            scratch.clear();
-            // Same global transfer -> shader-read barrier BrickGridUpload records, and for the same
-            // reason: without it a compute pass reading this buffer intermittently sees a stale page
-            // of an otherwise static field.
-            VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack).sType$Default()
-                    .srcAccessMask(VK13.VK_ACCESS_TRANSFER_WRITE_BIT)
-                    .dstAccessMask(VK13.VK_ACCESS_SHADER_READ_BIT);
-            VK13.vkCmdPipelineBarrier(cmd, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, barrier, null, null);
-            VK13.vkEndCommandBuffer(cmd);
-
-            LongBuffer fenceOut = stack.mallocLong(1);
-            if (VK13.vkCreateFence(device.vkDevice(), VkFenceCreateInfo.calloc(stack).sType$Default(),
-                    null, fenceOut) != VK13.VK_SUCCESS) {
-                return;
-            }
-            long fence = fenceOut.get(0);
-            try {
-                VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack).sType$Default()
-                        .pCommandBuffers(stack.pointers(cmd));
-                int submitResult = VK13.vkQueueSubmit(backend.computeQueue().vkQueue(), submitInfo, fence);
-                if (submitResult != VK13.VK_SUCCESS) {
-                    // Never wait on a fence nothing was submitted against -- that blocks this
-                    // SHARED_QUEUE_LOCK-holding thread for the full timeout, i.e. forever.
-                    if (!submitFailureLogged) {
-                        submitFailureLogged = true;
-                        FornaxMod.LOGGER.error("[Fornax] PrecipClipmapUpload: vkQueueSubmit failed with"
-                                + " VkResult {} -- per-column precipitation will stop updating", submitResult);
-                    }
-                    return;
-                }
-                VK13.vkWaitForFences(device.vkDevice(), fence, true, FENCE_WAIT_TIMEOUT);
-            } finally {
-                VK13.vkDestroyFence(device.vkDevice(), fence, null);
-            }
-        }
     }
 }

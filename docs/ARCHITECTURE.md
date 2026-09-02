@@ -488,6 +488,9 @@ precede them in that buffer. This reset is the required defence against the boun
 until it is queued `GraphRunner` withholds the graph's passes for that frame rather than expose old
 slots under a new window. Normal frames update eight rows (16 KiB), complete a sweep in sixteen
 frames, and retain an already-valid same-cell record when its chunk is temporarily unavailable.
+`precipClipmap`, the per-block-column field, uploads the same way: eight 512-byte rows a frame.
+A level change or a whole-window jump queues a clear ahead of them, since the tag identifies a
+column, not a world.
 
 This is a raw world-data ABI, not a cloud policy. The engine does not smooth biome boundaries,
 extend the field, classify storm shapes, or darken the sky. The required compute preprocessor owns

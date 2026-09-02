@@ -47,8 +47,9 @@ package dev.icehunter.fornax.pack.graph;
  * <p>NO VULKAN AND NO MINECRAFT IMPORTS, and that is structural rather than tidy: {@link
  * GraphValidator} names {@link #TARGET} in {@code ENGINE_BUFFERS}, and a class whose {@code <clinit>}
  * dragged in LWJGL or Sodium would break every headless test that touches graph validation. This is
- * the {@link AnalyticLightListBuffer} shape for exactly that reason. The Vulkan half lives in
- * {@code dev.icehunter.fornax.voxel.PrecipClipmapUpload}.
+ * the {@link AnalyticLightListBuffer} shape for exactly that reason. The harvest lives in
+ * {@code dev.icehunter.fornax.voxel.PrecipClipmapUpload} and uploads through
+ * {@link EngineBufferUploadQueue}.
  */
 public final class PrecipClipmapBuffer {
     public static final String TARGET = "precipClipmap";
@@ -83,6 +84,7 @@ public final class PrecipClipmapBuffer {
     }
 
     public static void free(TargetRegistry registry) {
+        EngineBufferUploadQueue.discard(TARGET);
         registry.releaseBuffer(TARGET);
     }
 
