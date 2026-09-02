@@ -426,8 +426,9 @@ exactly two possible owners, and which one applies is decided by name, against
 
 * **Engine-owned**: `voxelBrickIndex`/`voxelOccupancy`/`voxelPayload`/`voxelFaceSeal`/
   `voxelPalette`/`voxelLightVolume`/`voxelBrickSummary` (`BrickGridUpload`), `voxelWaterRefl`
-  (`VoxelWaterReflBuffer`), `analyticLightList` (`AnalyticLightListBuffer`), `precipClipmap`, and
-  `precipCoarseClipmap` (`PrecipClipmapBuffer`/`PrecipCoarseClipmapBuffer`). Their byte counts come
+  (`VoxelWaterReflBuffer`), `analyticLightList` (`AnalyticLightListBuffer`), `precipClipmap` and
+  `precipCoarseClipmap` (`PrecipClipmapBuffer`/`PrecipCoarseClipmapBuffer`), `surfaceFluidClipmap`
+  (`SurfaceFluidClipmapBuffer`) and `waterActors` (`WaterActorBuffer`). Their byte counts come
   from runtime quantities the graph cannot express (voxel window diameter, render resolution, or a
   fixed engine data grid), so their own engine call site drives `TargetRegistry.ensureBufferSize`.
   A pack declares the target purely so the name is referenceable, and must not give it a size; the
@@ -464,22 +465,29 @@ records transfer visibility only to the compute queue, so `GraphValidator` accep
 input to an enabled `compute` preprocessing pass. That pass must produce the texture sampled by
 later graphics passes; no fullscreen, particle, geometry, copy, or mipchain pass may bind the raw
 field. It is a 128 x 128 toroidal grid of four-block cells, covering a 512 x 512-block window whose
-origin follows the player body in sixteen-block snaps. Each 32-bit word stores the representative
-column's `NONE`/`RAIN`/`SNOW` value in the low byte, a sampled-valid bit at bit 8, and bounded
-eight-bit X/Z tile tags in the high sixteen bits. A zero word is therefore explicitly unknown,
-including where a valid dry cell's tag would otherwise also be zero. Tags reject ordinary stale
-toroidal slots but repeat every 131,072 blocks on either axis, so they are a local validity check,
-not an unbounded world identity.
+origin follows the player body in sixteen-block snaps. Each cell is four 32-bit words, one
+`ivec4`, the alignment rule `surfaceFluidClipmap` set. Word 0 stores the representative column's
+`NONE`/`RAIN`/`SNOW` value in the low byte, a sampled-valid bit at bit 8, and bounded eight-bit X/Z
+tile tags in the high sixteen bits. Word 1 stores the height-adjusted surface temperature that
+classification thresholded (signed 16-bit, 1/256 steps), downfall in 0..255, and a tag byte of biome
+categories (hot, cold, wet, dry from the shared convention tags; ocean, jungle, badlands, mountain
+from vanilla's). Word 2 stores the biome's nominal temperature; the rest is reserved and written
+zero. The temperature and downfall reads reach private game members through the access widener
+(§8). A zero word 0 is therefore explicitly unknown, including where a valid dry cell's tag would
+otherwise also be zero. Tags reject ordinary stale toroidal slots but repeat every 131,072 blocks on
+either axis, so they are a local validity check, not an unbounded world identity.
 
 The engine samples only loaded chunks, at the centre-side column of each four-by-four cell and the
 `MOTION_BLOCKING` surface height. Unloaded cells remain unknown; the engine never guesses that they
-are dry. The uploader does not publish a first window, level change, or discontinuous recenter until
-its complete 64 KiB reset upload both submits and has a successful fence wait. This reset is the
-required defence against the bounded tag period. Until it completes, `GraphRunner` withholds the
-graph's passes for that frame rather than expose old slots under a new window. Normal frames update
-eight rows (4 KiB), complete a sweep in sixteen frames, and retain an already-valid same-cell word
-when its chunk is temporarily unavailable. A failed normal update leaves the prior, self-tagging
-window usable while retrying the same rows next frame.
+are dry. Uploads ride `EngineBufferUploadQueue`: they are recorded into the first consuming compute
+pass's own command buffer ahead of its dispatch, so nothing submits a queue or waits on a fence on
+the render thread. A first window, level change or discontinuous recenter queues a clear and then
+the complete 256 KiB refill in ranges of at most 64 KiB, the queue's inline-update limit; the
+window is published the moment both are queued, because no dispatch can
+precede them in that buffer. This reset is the required defence against the bounded tag period, and
+until it is queued `GraphRunner` withholds the graph's passes for that frame rather than expose old
+slots under a new window. Normal frames update eight rows (16 KiB), complete a sweep in sixteen
+frames, and retain an already-valid same-cell record when its chunk is temporarily unavailable.
 
 This is a raw world-data ABI, not a cloud policy. The engine does not smooth biome boundaries,
 extend the field, classify storm shapes, or darken the sky. The required compute preprocessor owns
@@ -728,7 +736,7 @@ hands all five G-buffer lanes `Optional.empty()` in a loop.
 
 ## 6. Uniform contracts
 
-### `u_Globals` (std140, 816 bytes)
+### `u_Globals` (std140, 832 bytes)
 
 Written in two pieces sharing one physical buffer: Sodium's own uniform writer produces the first
 184 bytes unmodified, and `GlobalUniformsWriteMixin` appends the remaining fields to the same
@@ -773,8 +781,9 @@ buffer object. The backing ring buffer (`UniformBufferManagerMixin`) is widened 
 | `u_LocalActorShape` | vec4 | 768 | 16 |
 | `u_LocalActorFluid` | vec4 | 784 | 16 |
 | `u_WorldClock` | vec4 | 800 | 16 |
+| `u_WorldBounds` | vec4 | 816 | 16 |
 
-Total: 816 bytes exactly, the size `UniformBufferManagerMixin` widens the ring storage to. Both
+Total: 832 bytes exactly, the size `UniformBufferManagerMixin` widens the ring storage to. Both
 sides apply the same std140 alignment rules (std140 is a fixed, standard packing convention that
 lets GPU shader code and CPU-side buffer-writing code agree on where each field sits in memory) to
 the same declared type sequence in the same order, so in
@@ -1113,6 +1122,17 @@ be restated here.
 | `CategoryTabMixin` | `YACLScreen$CategoryTab` | Inject the Import.../Export.../Defaults... chrome buttons into YACL's own right-side button cluster (beside search/Reset/Undo/Done) on a `PackManageScreen`-built screen, scoped via `screen.PackChromeActions`; shrinks `descriptionWidget` by replacing its dimension supplier (via `OptionDescriptionWidgetAccessor`) rather than a one-off resize, since it re-reads that supplier every frame. Fails soft: any lookup/layout failure logs one warning total and leaves stock YACL chrome untouched, never crashing the screen | Inject (TAIL) x2 |
 | `OptionDescriptionWidgetAccessor` | `OptionDescriptionWidget` | Expose the private final `dimensions` supplier so `CategoryTabMixin` can wrap it | Accessor |
 | `YACLScreenCloseMixin` | `YACLScreen` | Route close/apply through the active pack edit session so staged pack values are not lost | Inject |
+
+### Access widener
+
+`src/main/resources/fornax.accesswidener` (`official` namespace: the 26.2 jars are already named
+and Loom runs with obfuscation disabled, so `named` is refused at build time) widens three private
+biome members for `PrecipCoarseClipmapUpload`: `Biome.getTemperature(BlockPos, int)`, the memoised
+height-adjusted temperature the precipitation classification thresholds; the `climateSettings`
+field; and its package-private record type, for `downfall()`. A mixin accessor cannot name that
+type from outside its package, which is why this is a widener and not a mixin. Referenced from
+`build.gradle` (`loom.accessWidenerPath`) and `fabric.mod.json` (`accessWidener`); a missing
+reference in either is silent, so `BiomeClimateAccessContractTest` pins both.
 
 ## 9. Material system
 
@@ -1963,8 +1983,8 @@ dedicated debug-view uniform; it is one value of a mechanism built for something
 - **A raw data buffer with compute-only synchronization has a compute-only graph gate.**
   `precipCoarseClipmap` is not a general buffer-reader exception: validation rejects graphics
   readers and `anyEnabledComputePassReadsPrecipCoarseClipmap` therefore deliberately asks only for
-  enabled compute inputs. Its failed full-reset readiness gate suppresses graph execution until a
-  complete current window is visible to that compute queue.
+  enabled compute inputs. Its readiness gate suppresses graph execution until a complete current
+  window's clear and refill are queued ahead of that compute pass's dispatch.
 - **An unresolvable shader include fails silently downstream, so this engine validates eagerly.**
   The underlying shader-composition mechanism splices an error string into the composed source for
   a missing include rather than failing the load, which would otherwise surface only as a broken

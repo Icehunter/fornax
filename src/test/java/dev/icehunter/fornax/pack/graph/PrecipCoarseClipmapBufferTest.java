@@ -18,7 +18,64 @@ class PrecipCoarseClipmapBufferTest {
         assertEquals(16_384, PrecipCoarseClipmapBuffer.COLUMNS);
         // 128 cells of four blocks each cover the accepted 512-block nearby-weather window.
         assertEquals(512, PrecipCoarseClipmapBuffer.GRID * PrecipCoarseClipmapBuffer.CELL_STRIDE);
-        assertEquals(65_536L, PrecipCoarseClipmapBuffer.BYTE_SIZE);
+        // Four words per cell, one ivec4, the alignment rule SurfaceFluidClipmapBuffer set.
+        assertEquals(4, PrecipCoarseClipmapBuffer.WORDS_PER_CELL);
+        assertEquals(16, PrecipCoarseClipmapBuffer.BYTES_PER_CELL);
+        assertEquals(262_144L, PrecipCoarseClipmapBuffer.BYTE_SIZE);
+        assertEquals(0, PrecipCoarseClipmapBuffer.BYTE_SIZE % 4, "vkCmdFillBuffer needs a 4-byte multiple");
+        assertEquals(0, PrecipCoarseClipmapBuffer.WORDS_PER_CELL % 4,
+                "a cell must be a whole number of ivec4s or shader-side indexing misaligns");
+    }
+
+    @Test
+    void aCellsFirstWordSitsAtItsSlotTimesTheWordsPerCell() {
+        int cellX = -337;
+        int cellZ = 22_000;
+        assertEquals(PrecipCoarseClipmapBuffer.slotForCell(cellX, cellZ) * 4,
+                PrecipCoarseClipmapBuffer.wordOffsetForCell(cellX, cellZ));
+        // The last cell's last word must still fall inside the buffer.
+        int lastOffset = PrecipCoarseClipmapBuffer.wordOffsetForCell(127, 127) + 3;
+        assertTrue((long) (lastOffset + 1) * Integer.BYTES <= PrecipCoarseClipmapBuffer.BYTE_SIZE);
+    }
+
+    @Test
+    void theClimateWordRoundTripsTemperatureDownfallAndTags() {
+        // -0.7 is the coldest vanilla biome; 1.9 the hottest. Fixed point at 1/256 must keep both.
+        int cold = PrecipCoarseClipmapBuffer.encodeClimate(-0.7f, 0.0f,
+                PrecipCoarseClipmapBuffer.TAG_COLD | PrecipCoarseClipmapBuffer.TAG_MOUNTAIN);
+        assertEquals(-0.7f, PrecipCoarseClipmapBuffer.decodeTemperature(cold), 1.0f / 256.0f);
+        assertEquals(0.0f, PrecipCoarseClipmapBuffer.decodeDownfall(cold), 0.0f);
+        assertEquals(PrecipCoarseClipmapBuffer.TAG_COLD | PrecipCoarseClipmapBuffer.TAG_MOUNTAIN,
+                PrecipCoarseClipmapBuffer.decodeTags(cold));
+
+        int hot = PrecipCoarseClipmapBuffer.encodeClimate(1.9f, 0.9f, PrecipCoarseClipmapBuffer.TAG_HOT
+                | PrecipCoarseClipmapBuffer.TAG_WET | PrecipCoarseClipmapBuffer.TAG_JUNGLE);
+        assertEquals(1.9f, PrecipCoarseClipmapBuffer.decodeTemperature(hot), 1.0f / 256.0f);
+        assertEquals(0.9f, PrecipCoarseClipmapBuffer.decodeDownfall(hot), 1.0f / 255.0f);
+        assertEquals(PrecipCoarseClipmapBuffer.TAG_HOT | PrecipCoarseClipmapBuffer.TAG_WET
+                | PrecipCoarseClipmapBuffer.TAG_JUNGLE, PrecipCoarseClipmapBuffer.decodeTags(hot));
+
+        // Height adjustment subtracts fractions of a degree per block; the scale must resolve it.
+        int adjusted = PrecipCoarseClipmapBuffer.encodeClimate(0.15f - 0.00125f, 0.5f, 0);
+        assertTrue(PrecipCoarseClipmapBuffer.decodeTemperature(adjusted) < 0.15f,
+                "a temperature just below the snow threshold must not round up across it");
+    }
+
+    @Test
+    void theBaseWordCarriesOnlyTheNominalTemperature() {
+        int base = PrecipCoarseClipmapBuffer.encodeBase(0.8f);
+        assertEquals(0.8f, PrecipCoarseClipmapBuffer.decodeTemperature(base), 1.0f / 256.0f);
+        assertEquals(0, base >>> 16, "the upper half of word 2 is reserved and written zero");
+    }
+
+    @Test
+    void theTagBitsAreDistinctAndFitTheByte() {
+        int all = PrecipCoarseClipmapBuffer.TAG_HOT | PrecipCoarseClipmapBuffer.TAG_COLD
+                | PrecipCoarseClipmapBuffer.TAG_WET | PrecipCoarseClipmapBuffer.TAG_DRY
+                | PrecipCoarseClipmapBuffer.TAG_OCEAN | PrecipCoarseClipmapBuffer.TAG_JUNGLE
+                | PrecipCoarseClipmapBuffer.TAG_BADLANDS | PrecipCoarseClipmapBuffer.TAG_MOUNTAIN;
+        assertEquals(0xFF, all);
+        assertEquals(8, Integer.bitCount(all));
     }
 
     @Test

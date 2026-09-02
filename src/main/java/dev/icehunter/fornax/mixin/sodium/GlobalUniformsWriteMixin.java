@@ -21,6 +21,7 @@ import dev.icehunter.fornax.voxel.EmitterFrameState;
 import dev.icehunter.fornax.voxel.VoxelWindow;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.material.FogType;
@@ -34,7 +35,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import java.nio.ByteBuffer;
 
 /**
- * Appends Fornax's {@code u_Globals} tail fields (bytes 184..608: two previous-frame camera
+ * Appends Fornax's {@code u_Globals} tail fields (bytes 184..832: two previous-frame camera
  * matrices, current/previous jitter vec2s, {@code u_InvProjModelView}, {@code u_SunViewProj},
  * {@code u_VoxelWindow}, {@code u_CameraAbs}, then the sky tail -- {@code u_SkyColor}, {@code
  * u_SunriseColor}, {@code u_SkyCelestial}, {@code u_SkyState} -- then the one-vec4 water tail,
@@ -69,7 +70,8 @@ import java.nio.ByteBuffer;
  * round appends one further vec4, {@code u_CameraSkyLight}, at 592; past the jitter-immunity mat4,
  * {@code u_FrameState}, {@code u_HeldLight} and {@code u_WeatherAnchor}, the water-motion-vector
  * round appends {@code u_CameraDelta} at 720. The local-actor ABI then occupies four vec4s at
- * 736/752/768/784, ending the block at 800 -- all vec4-tail-safe for the same reason, matching both
+ * 736/752/768/784, {@code u_WorldClock} sits at 800 and {@code u_WorldBounds} at 816, ending the
+ * block at 832. All are vec4-tail-safe for the same reason, matching both
  * {@code UniformBufferManagerMixin}'s widened {@code DynamicUniformStorage} block size and the
  * {@code globals.glsl} override's declared struct.
  */
@@ -504,6 +506,17 @@ public class GlobalUniformsWriteMixin {
         float dayIndex = (float) Math.floorDiv(dayTime, 24000L);
         float dayFraction = (float) (Math.floorMod(dayTime, 24000L) / 24000.0);
         builder.putVec4(dayIndex, dayFraction, 0.0f, 0.0f);
+
+        // World bounds (bytes 816..832): sea level, the buildable Y range, and which dimension this
+        // is. getMaxY() is exclusive, the game's own convention, and published as such. The
+        // dimension is the level's identity, not its sky kind: Skybox.NONE would fold the Nether in
+        // with every custom skyless dimension, which is exactly the thing a pack needs to tell apart.
+        var world = Minecraft.getInstance().level;
+        float dimension = world.dimension() == Level.OVERWORLD ? 1.0f
+                : world.dimension() == Level.NETHER ? 2.0f
+                : world.dimension() == Level.END ? 3.0f
+                : 0.0f;
+        builder.putVec4(world.getSeaLevel(), world.getMinY(), world.getMaxY(), dimension);
 
         return original.call(builder);
     }

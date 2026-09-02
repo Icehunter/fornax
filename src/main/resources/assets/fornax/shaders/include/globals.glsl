@@ -322,4 +322,15 @@ layout(std140) uniform u_Globals {
     // past about 350 days. A pack cannot derive this either, since the moon phase gives the day
     // only modulo 8.
     vec4 u_WorldClock;
+
+    // World bounds (bytes 816..832): the shape of the world the camera is in.
+    //   x = sea level, blocks.
+    //   y = lowest buildable Y (inclusive).
+    //   z = one above the highest buildable Y (exclusive, the game's own convention).
+    //   w = dimension: 0 other or custom, 1 overworld, 2 nether, 3 end.
+    //
+    // Zero-first on w so the zero-fill default is the honest "unknown", as every other lane's
+    // enum does. A pack cannot derive any of these: sea level and height are per-dimension data
+    // the shader never sees, and the dimension has no colour or angle that identifies it.
+    vec4 u_WorldBounds;
 };

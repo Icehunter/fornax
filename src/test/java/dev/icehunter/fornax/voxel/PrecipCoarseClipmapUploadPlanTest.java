@@ -42,7 +42,7 @@ class PrecipCoarseClipmapUploadPlanTest {
     }
 
     @Test
-    void steadyStatePlansExactlyEightToroidalRowsAndFourKiB() {
+    void steadyStatePlansExactlyEightToroidalRowsAndSixteenKiB() {
         PrecipCoarseClipmapUploadPlan state = new PrecipCoarseClipmapUploadPlan();
         Object level = new Object();
         PrecipCoarseClipmapUploadPlan.UploadPlan reset = state.plan(level, 5, -3);
@@ -50,7 +50,8 @@ class PrecipCoarseClipmapUploadPlanTest {
 
         PrecipCoarseClipmapUploadPlan.UploadPlan steady = state.plan(level, 5, -3);
         assertFalse(steady.fullReset());
-        assertEquals(8 * 128 * Integer.BYTES, steady.bytes());
+        // Eight rows of 128 cells at 16 bytes each.
+        assertEquals(8 * 128 * 16, steady.bytes());
         assertArrayEquals(new int[] {125, 126, 127, 0, 1, 2, 3, 4}, steady.slotRows());
         state.commit(steady, level);
         assertEquals(8, state.rowCursor());

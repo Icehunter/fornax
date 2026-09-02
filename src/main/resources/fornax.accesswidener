@@ -1,0 +1,12 @@
+accessWidener v2 official
+
+# Biome climate for the coarse climate field (PrecipCoarseClipmapUpload).
+#
+# The precipitation classification thresholds a height-adjusted temperature that no public method
+# returns, and downfall lives on a package-private record with no getter. Both are world facts the
+# engine owes packs unconditionally, and a mixin accessor cannot name the record's type from
+# outside its package, so these three members are widened instead. Nothing is overridden or
+# re-implemented; the engine reads the same numbers the game uses.
+accessible class net/minecraft/world/level/biome/Biome$ClimateSettings
+accessible field net/minecraft/world/level/biome/Biome climateSettings Lnet/minecraft/world/level/biome/Biome$ClimateSettings;
+accessible method net/minecraft/world/level/biome/Biome getTemperature (Lnet/minecraft/core/BlockPos;I)F

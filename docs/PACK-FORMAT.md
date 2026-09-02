@@ -334,6 +334,19 @@ unassigned one as no data rather than computing a slot from it.
 for the engine's fallback shader. If you read it, do not assume it is finite. Deriving your own rate
 from `elapsedMillis` is a look decision and belongs in your pack.
 
+### Read the climate field and the world bounds
+
+Two more world facts a shader cannot derive. `precipCoarseClipmap` is an engine-filled buffer any
+compute pass may declare as an input: one `ivec4` per four-block column over a 512-block window
+around the player. Word 0 is the precipitation class with a self-validating tag; word 1 packs the
+surface temperature the game's own rain-or-snow decision used (signed 16-bit, 1/256 steps), downfall
+0..255, and a byte of biome tags (hot, cold, wet, dry, ocean, jungle, badlands, mountain); word 2 is
+the biome's nominal temperature. Index it as `slot * 4 + word`. Only a compute pass may read it, so
+turn it into a texture there and sample that from graphics passes.
+
+`u_Globals` also carries `u_WorldBounds`: sea level, the lowest buildable Y, one above the highest,
+and the dimension (0 other, 1 overworld, 2 nether, 3 end). Filled every frame.
+
 ### Use compile options, not runtime options
 
 **A runtime option in a geometry shader will not compile.** Runtime options become uniforms, and

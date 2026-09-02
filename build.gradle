@@ -6,6 +6,12 @@ group = "dev.icehunter"
 version = "${project.mod_version}+mc${project.minecraft_version}"
 base { archivesName = "fornax" }
 
+loom {
+    // Widens three private biome climate members the coarse climate field reads; see the file's
+    // own header for which and why.
+    accessWidenerPath = file("src/main/resources/fornax.accesswidener")
+}
+
 repositories {
     maven { url = "https://api.modrinth.com/maven" } // official Sodium artifacts
     maven { url = "https://maven.terraformersmc.com/releases" } // ModMenu, compile-only

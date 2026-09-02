@@ -11,7 +11,7 @@ import dev.icehunter.fornax.pack.graph.PrecipCoarseClipmapBuffer;
  */
 final class PrecipCoarseClipmapUploadPlan {
     static final int ROWS_PER_FRAME = 8;
-    static final int ROW_BYTES = PrecipCoarseClipmapBuffer.GRID * Integer.BYTES;
+    static final int ROW_BYTES = PrecipCoarseClipmapBuffer.GRID * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
 
     private Object committedLevel;
     private int committedBaseCellX;
