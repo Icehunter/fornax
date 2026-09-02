@@ -145,10 +145,12 @@ public class FornaxChunkVertex extends CompactChunkVertex {
     public ChunkVertexEncoder getEncoder() {
         return (ptr, materialBits, vertices, section) -> {
             int faceIndex = deriveFaceIndex(vertices);
-            int materialId = MaterialIdContext.get();
-            int precipitationType = MaterialIdContext.getPrecipitation();
-            int blockFacts = packBlockFacts(MaterialIdContext.getLightEmission(),
-                                            MaterialIdContext.getBlockClass());
+            // Stamped vertices (translucent sorting's copies) outlive their block's context.
+            int facts = VertexFacts.resolve(vertices);
+            int materialId = VertexFacts.materialId(facts);
+            int precipitationType = VertexFacts.precipitation(facts);
+            int blockFacts = packBlockFacts(VertexFacts.lightEmission(facts),
+                                            VertexFacts.blockClassFlags(facts));
 
             for (int i = 0; i < 4; i++) {
                 var vertex = vertices[i];

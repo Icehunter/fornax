@@ -966,7 +966,27 @@ in the general case, and only flagged if validation layers happen to be enabled.
 range and the pushed range disagree, the failure mode is not a crash but quiet data corruption:
 fields past the declared boundary (here, the sun direction and previous-frame region offset) never reach the shader, and everything depending on them reads zero with no error anywhere.
 
+### Section arrival time (`u_SectionTimeInfo`)
+
+One signed 32-bit integer per section slot, addressed `u_RegionID * 256 + _draw_id`, bound on the
+shared terrain bind group for every terrain draw. Sodium owns the buffer and writes each slot once,
+at mesh build, as milliseconds on the owning region's clock (region creation is the epoch).
+`u_CurrentTime` in the per-region push-constant block is the same clock, written by
+`DrawContextVKMixin` with the identical `System.currentTimeMillis() - region.getCreationTime()`
+narrowing. Only their difference is meaningful; either side changing its epoch silently breaks
+every fade. Negative means settled. The engine never writes the buffer. Gated on the pack graph
+being active; with no pack, stock Sodium draws terrain from its own stamps.
+
 ## 7. Vertex format
+
+The encoder reads a quad's per-block facts (material id, precipitation, light emission, block
+class) from `MaterialIdContext`, live only while that block is meshed. Translucent sorting keeps
+quads as vertex objects, splits intersecting ones along a plane, and re-encodes the pieces after
+the per-block loop with the context cleared. `ChunkVertexFactsMixin` stamps the destination of
+every `copyVertexTo` with `VertexFacts`: from the context on the first copy, from the source's
+stamp on later ones. The encoder prefers a stamp and otherwise reads the context. The push path's
+scratch vertices are never copied, so they read the context. Without the stamp a split water quad
+loses `MAT_WATER`, emission, class and precipitation.
 
 Terrain uses a dedicated 24-byte vertex format, substituted in place of Sodium's own compact format
 at its one construction site. Because every real consumer of vertex layout resolves the concrete
@@ -1029,6 +1049,7 @@ be restated here.
 | Mixin | Target | Purpose | Shape |
 |---|---|---|---|
 | `BlockRendererMaterialIdMixin` | `BlockRenderer` | Set/clear the per-thread material ID around each block's model meshing call | Inject (HEAD/RETURN) |
+| `ChunkVertexFactsMixin` | `ChunkVertexEncoder.Vertex` | Stamp each copied vertex with its block's packed facts (`VertexFacts`) so quads split by translucent sorting keep them past the context clear | Inject |
 | `ChunkBuilderMeshingTaskMixin` | `ChunkBuilderMeshingTask` | Harvest each section's block data for the voxel grid the moment Sodium (re)builds it, piggybacking on Sodium's own change detection (background worker thread, per rebuild, never per frame) | Inject |
 | `FluidRendererMaterialIdMixin` | `DefaultFluidRenderer` | Set/clear the per-thread material ID around each block's fluid-surface meshing call (the `renderModel`-parallel path for water/lava quads) | Inject (HEAD/RETURN) |
 | `CompactChunkVertexMixin` | `ChunkMeshFormats` | Substitute the engine's own vertex format for the stock compact format | Redirect |

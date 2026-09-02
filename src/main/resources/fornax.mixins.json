@@ -5,6 +5,7 @@
   "client": [
     "sodium.BlockRendererMaterialIdMixin",
     "sodium.ChunkBuilderMeshingTaskMixin",
+    "sodium.ChunkVertexFactsMixin",
     "sodium.CompactChunkVertexMixin",
     "sodium.DefaultChunkRendererFaceCullingMixin",
     "sodium.DefaultChunkRendererGeometryStorageMixin",

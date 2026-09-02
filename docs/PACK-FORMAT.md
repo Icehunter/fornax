@@ -513,6 +513,11 @@ machinery, which does not keep a previous-frame copy. Declaring both gets you on
 
 **Never declare `sceneHistory`.** The engine owns it. Read `sceneHistory.history`.
 
+**A compile option is undefined inside an include.** An import is spliced where it sits, before
+the program's `#define`s, so a shared file testing `#if MY_OPTION` sees no such name. The
+preprocessor silently reads it as 0 and the shader compiles. Pass the value into the include's
+functions as an argument from the program file.
+
 **`u_SectionTimeInfo` runs on a per-region clock.** Subtract it from `u_CurrentTime` in the same
 push-constant block and nothing else. Any global clock gives a different wrong answer per region,
 which looks like terrain revealing at different rates depending on which way you face. See
