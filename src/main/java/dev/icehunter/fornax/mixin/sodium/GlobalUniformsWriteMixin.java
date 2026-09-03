@@ -7,6 +7,7 @@ import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
 import dev.icehunter.fornax.pass.taa.CameraJitter;
 import dev.icehunter.fornax.pipeline.CameraMotionState;
+import dev.icehunter.fornax.pipeline.DayCrossfadeState;
 import dev.icehunter.fornax.pipeline.PreviousFrameCameraTransform;
 import dev.icehunter.fornax.pipeline.HeldLight;
 import dev.icehunter.fornax.pipeline.LocalActorFrameState;
@@ -505,7 +506,12 @@ public class GlobalUniformsWriteMixin {
         long dayTime = Minecraft.getInstance().level.getDefaultClockTime();
         float dayIndex = (float) Math.floorDiv(dayTime, 24000L);
         float dayFraction = (float) (Math.floorMod(dayTime, 24000L) / 24000.0);
-        builder.putVec4(dayIndex, dayFraction, 0.0f, 0.0f);
+        // z: how far a per-day value (one random draw per Minecraft day, e.g. morning mist's daily
+        // variance) has crossfaded into today, 0..1: see DayCrossfadeAccumulator's own doc for why
+        // this must be timed in real seconds rather than blended across dayFraction, and why a
+        // shader cannot compute it itself. A pack blends mix(hash(dayIndex - 1.0), hash(dayIndex), z)
+        // instead of switching on dayIndex directly.
+        builder.putVec4(dayIndex, dayFraction, DayCrossfadeState.step(dayIndex), 0.0f);
 
         // World bounds (bytes 816..832): sea level, the buildable Y range, and which dimension this
         // is. getMaxY() is exclusive, the game's own convention, and published as such. The

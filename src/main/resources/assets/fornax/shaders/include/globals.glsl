@@ -312,7 +312,12 @@ layout(std140) uniform u_Globals {
     // World clock (bytes 800..816): the DAY the world is on, from this dimension's own day clock
     // (Level.getDefaultClockTime()).
     //   x = day index, floor(dayTime / 24000). Exact as a float past 16 million days.
-    //   y = fraction through that day. z, w reserved, zero-filled.
+    //   y = fraction through that day.
+    //   z = crossfade progress into today for a one-value-per-day draw, 0 the instant the day
+    //       changed, ramping to 1 over a fixed real-time window and holding there. Blend a daily
+    //       hash with mix(hash(x - 1.0), hash(x), z) instead of switching on x directly: a shader
+    //       has no frame memory to time that fade itself, so the engine keeps it. w reserved,
+    //       zero-filled.
     //
     // Not u_SkyState.w. That lane is getGameTime(), immune to /time set, doDaylightCycle and the
     // clock rate: right for a wind clock, wrong as a calendar. A pack keying weather on it sees the

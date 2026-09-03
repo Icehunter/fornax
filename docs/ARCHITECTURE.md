@@ -2235,3 +2235,13 @@ dedicated debug-view uniform; it is one value of a mechanism built for something
   real allocation never appears in that report. Pricing it needs either a `TargetKind` array
   variant or a separate accounting path keyed off `PassType.CONSOLIDATE`. Left until a pack
   actually needs it measured.
+- **A per-day pack value must not fade by blending across `u_WorldClock.y` (the day fraction);
+  it must read `u_WorldClock.z` instead.** A shader has no frame-to-frame memory, so it cannot time
+  a fade in real seconds on its own: the same reason `WetnessAccumulator` exists rather than being
+  pack code. `DayCrossfadeAccumulator`/`DayCrossfadeState` hold that memory engine-side and publish
+  `.z`: 0 the instant the day index changes, ramping via a fixed-duration smoothstep (not an
+  exponential ease, which would never actually complete) to 1 over real time, independent of clock
+  rate and still advancing while the world clock is paused. A pack blends
+  `mix(hash(dayIndex - 1.0), hash(dayIndex), z)`; blending across `dayFrac` instead ties the fade's
+  real-world duration to the clock rate (near-instant at a high rate) and, summed with a large
+  `dayIndex`, loses the fraction's own float32 precision on an aged world regardless.
