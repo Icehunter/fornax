@@ -65,6 +65,11 @@ import net.minecraft.network.chat.Component;
  *       phase-3 array-texture holders before anything is built on that assumption. Touches no live
  *       render target and has zero visible effect; see that class's own doc comment for why both a
  *       write and a real sampling round-trip are needed to prove a layer actually works.</li>
+ *   <li>Array Copy-Layer Probe (unbound by default): one-shot {@link
+ *       ArrayTextureCopyLayerProbe#run()}. GPU-copies two ordinary 2D textures into an array
+ *       texture's two layers, then shader-samples both back, proving {@link
+ *       dev.icehunter.fornax.atlas.ArrayTextures#copyLayer} reaches the sampler, not just the
+ *       destination image. Zero rendering-visible effect, same shape as Array Layer Probe.</li>
  * </ul>
  *
  * <p>Registered separately from {@link FornaxKeybind} (development/debugging aids, not
@@ -115,6 +120,10 @@ public final class FornaxDebugKeys {
         // step and reports its verdict synchronously (see ArrayTextureLayerProbe's own doc).
         KeyMapping arrayLayerProbe = KeyMappingHelper.registerKeyMapping(new KeyMapping(
                 "key.fornax.array_layer_probe", InputConstants.Type.KEYSYM,
+                InputConstants.UNKNOWN.getValue(), FornaxKeybind.CATEGORY));
+        // Unbound by default, same rationale as Array Layer Probe above.
+        KeyMapping arrayCopyLayerProbe = KeyMappingHelper.registerKeyMapping(new KeyMapping(
+                "key.fornax.array_copy_layer_probe", InputConstants.Type.KEYSYM,
                 InputConstants.UNKNOWN.getValue(), FornaxKeybind.CATEGORY));
         // Unbound by default -- paged-atlas sample-provenance tint (2026-08-21): live toggle, no
         // reload; recompiles terrain with the tint define so every overflow-layer sample shows red
@@ -169,6 +178,11 @@ public final class FornaxDebugKeys {
                 dev.icehunter.fornax.FornaxMod.LOGGER.info("[Fornax][key] array_layer_probe pressed");
                 String verdict = ArrayTextureLayerProbe.run();
                 actionbar("[Fornax] Array layer probe: " + verdict + " (see log for details)");
+            }
+            while (arrayCopyLayerProbe.consumeClick()) {
+                dev.icehunter.fornax.FornaxMod.LOGGER.info("[Fornax][key] array_copy_layer_probe pressed");
+                String verdict = ArrayTextureCopyLayerProbe.run();
+                actionbar("[Fornax] Array copy-layer probe: " + verdict + " (see log for details)");
             }
             while (atlasDebugTint.consumeClick()) {
                 dev.icehunter.fornax.FornaxMod.LOGGER.info("[Fornax][key] atlas_debug_tint pressed");

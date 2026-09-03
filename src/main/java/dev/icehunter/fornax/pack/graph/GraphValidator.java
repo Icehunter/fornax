@@ -205,6 +205,9 @@ public final class GraphValidator {
             if (p.type() == PassType.TEMPORAL) {
                 checkTemporalPass(p, graph);
             }
+            if (p.type() == PassType.CONSOLIDATE) {
+                checkConsolidatePass(p, graph);
+            }
         }
 
         checkAtMostOneGeometryPassPerSlot(graph);
@@ -450,9 +453,29 @@ public final class GraphValidator {
         return d;
     }
 
+    /** Whether {@code ref} is a {@link PassType#CONSOLIDATE} pass's declared output. Such a name
+     * is never a {@code [targets.*]} entry, so {@link #checkInputRef}/{@link #checkOutputRef} need
+     * this lookup instead of {@code targets.containsKey}. */
+    private static boolean isConsolidateOutput(String ref, GraphSpec graph) {
+        for (PassSpec p : graph.passes()) {
+            if (p.type() == PassType.CONSOLIDATE && p.outputs().contains(ref)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void checkInputRef(String ref, GraphSpec graph, PassSpec pass) {
         Map<String, TargetSpec> targets = graph.targets();
         String base = ref.endsWith(".history") ? ref.substring(0, ref.length() - ".history".length()) : ref;
+        if (isConsolidateOutput(base, graph)) {
+            if (ref.endsWith(".history")) {
+                throw new FornaxPackError(FILE, "pass." + pass.name() + ".inputs",
+                        "'" + ref + "': a consolidate pass's array output has no history slot;"
+                                + " reference '" + base + "' directly");
+            }
+            return;
+        }
         if (graph.textures().containsKey(base)) {
             // A pack-shipped static texture asset (see PackTextureSpec) -- no render-output
             // machinery, so unlike a declared target it has no history slot at all; referencing it
@@ -652,6 +675,111 @@ public final class GraphValidator {
                 : target.scale() + "/" + target.basis());
     }
 
+    /**
+     * The only builtins a {@code consolidate} pass may name: the G-buffer color attachments, all
+     * RGBA8 at render resolution by construction ({@code GBufferManager}'s allocation). {@code
+     * builtin.gNormal} (RGBA16_SNORM) and {@code builtin.gMotion} (RG16F) are excluded: a
+     * different format per layer is exactly what an array texture can't express.
+     */
+    static final Map<String, String> CONSOLIDATE_BUILTIN_FORMATS = Map.of(
+            "builtin.gAlbedo", "rgba8",
+            "builtin.gMaterial", "rgba8",
+            "builtin.gAo", "rgba8");
+
+    /**
+     * A {@code consolidate} pass copies several same-shaped inputs into one array texture, one
+     * layer each, so a later pass reads them through one {@code sampler2DArray} instead of one
+     * {@code sampler2D} per input (Metal caps distinct sampler states, not textures). Requires:
+     * <ul>
+     *   <li>no {@code shader}: the copy is engine-owned, like {@code copy};</li>
+     *   <li>no {@code enabled_if}: its output is never a declared target, so
+     *       {@link #checkGateConsistency} has nothing to check a reader's gate against;</li>
+     *   <li>at least one input, exactly one output;</li>
+     *   <li>every input either a declared {@code [targets.*]} TEXTURE (no {@code .history}) or one
+     *       of {@link #CONSOLIDATE_BUILTIN_FORMATS}'s builtins, never a mix;</li>
+     *   <li>every declared-target input agrees on format and texture shape;</li>
+     *   <li>the output name collides with neither a declared {@code [targets.*]} nor {@code
+     *       [textures.*]} entry.</li>
+     * </ul>
+     */
+    private static void checkConsolidatePass(PassSpec p, GraphSpec graph) {
+        String key = "pass." + p.name();
+        if (p.shader() != null) {
+            throw new FornaxPackError(FILE, key + ".shader",
+                    "a consolidate pass's copy is engine-owned; remove the 'shader' key");
+        }
+        if (p.enabledIf() != null) {
+            throw new FornaxPackError(FILE, key + ".enabled_if",
+                    "a consolidate pass may not declare enabled_if: its output is never a declared"
+                            + " target");
+        }
+        if (p.inputs().isEmpty() || p.outputs().size() != 1) {
+            throw new FornaxPackError(FILE, key,
+                    "a consolidate pass must have at least one input and exactly one output (got "
+                            + p.inputs().size() + " inputs, " + p.outputs().size() + " outputs)");
+        }
+        boolean anyBuiltin = p.inputs().stream().anyMatch(CONSOLIDATE_BUILTIN_FORMATS::containsKey);
+        if (anyBuiltin) {
+            checkConsolidateBuiltinInputs(p, key);
+        } else {
+            checkConsolidateDeclaredInputs(p, graph, key);
+        }
+        String out = p.outputs().get(0);
+        if (graph.targets().containsKey(out) || graph.textures().containsKey(out)) {
+            throw new FornaxPackError(FILE, key + ".outputs",
+                    "a consolidate pass's output '" + out + "' must not collide with a declared"
+                            + " [targets." + out + "] or [textures." + out + "] name");
+        }
+    }
+
+    private static void checkConsolidateBuiltinInputs(PassSpec p, String key) {
+        String firstFormat = null;
+        for (String in : p.inputs()) {
+            String format = CONSOLIDATE_BUILTIN_FORMATS.get(in);
+            if (format == null) {
+                throw new FornaxPackError(FILE, key,
+                        "a consolidate pass mixing a known G-buffer builtin input with '" + in
+                                + "' is not supported: every input must be one of "
+                                + CONSOLIDATE_BUILTIN_FORMATS.keySet() + ", or none of them (declared"
+                                + " [targets.*] textures only)");
+            }
+            if (firstFormat == null) {
+                firstFormat = format;
+            } else if (!firstFormat.equals(format)) {
+                // Currently unreachable: every allowlisted builtin shares one format. Kept as a
+                // structural guard against a future allowlist entry breaking that invariant silently.
+                throw new FornaxPackError(FILE, key,
+                        "every consolidate pass input must agree on format (" + p.inputs().get(0)
+                                + " is " + firstFormat + ", " + in + " is " + format + ")");
+            }
+        }
+    }
+
+    private static void checkConsolidateDeclaredInputs(PassSpec p, GraphSpec graph, String key) {
+        TargetSpec first = null;
+        for (String in : p.inputs()) {
+            if (in.startsWith("builtin.") || in.endsWith(".history")) {
+                throw new FornaxPackError(FILE, key,
+                        "a consolidate pass's inputs must all be declared [targets.*] textures, or"
+                                + " all be one of the known G-buffer builtins ("
+                                + CONSOLIDATE_BUILTIN_FORMATS.keySet() + "): '" + in + "' is neither");
+            }
+            TargetSpec spec = graph.targets().get(in);
+            if (spec == null || spec.kind() != TargetKind.TEXTURE) {
+                throw new FornaxPackError(FILE, key,
+                        "a consolidate pass's input '" + in + "' must be a declared [targets.*] texture");
+            }
+            if (first == null) {
+                first = spec;
+            } else if (!first.format().equals(spec.format()) || !sameTextureShape(first, spec)) {
+                throw new FornaxPackError(FILE, key,
+                        "every consolidate pass input must agree on format and texture shape ("
+                                + p.inputs().get(0) + " is " + describeTextureShape(first) + ", " + in
+                                + " is " + describeTextureShape(spec) + ")");
+            }
+        }
+    }
+
     private static void checkParticlesPass(PassSpec p, GraphSpec graph) {
         String key = "pass." + p.name();
         if (p.shader() == null) {
@@ -775,6 +903,10 @@ public final class GraphValidator {
 
     private static void checkOutputRef(String ref, PassSpec pass, GraphSpec graph) {
         Map<String, TargetSpec> targets = graph.targets();
+        if (pass.type() == PassType.CONSOLIDATE) {
+            // checkConsolidatePass (called after this loop) validates the output name instead.
+            return;
+        }
         if (ref.equals("builtin.output")) return;
         if (ref.equals("builtin.sceneDepth")) {
             // Writable like builtin.output, but only for a copy pass -- it's the main render target's

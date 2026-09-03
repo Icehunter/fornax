@@ -523,7 +523,7 @@ public final class PackTomlLoader {
             return PassType.valueOf(raw.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException ex) {
             throw new FornaxPackError(file, "pass." + passName + ".type",
-                    "unknown pass type '" + raw + "' (expected geometry|fullscreen|mipchain|copy|compute|particles|temporal)");
+                    "unknown pass type '" + raw + "' (expected geometry|fullscreen|mipchain|copy|compute|particles|temporal|consolidate)");
         }
     }
 

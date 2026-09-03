@@ -737,6 +737,37 @@ hands all five G-buffer lanes `Optional.empty()` in a loop.
   catch it. This is a pack-authoring rule the engine cannot enforce structurally, unlike the
   load-time rules above.
 
+### Array targets (a `consolidate` pass's output)
+
+`TargetKind` only has `texture` and `buffer`: no array kind, since `TargetInstance`/
+`TargetRegistry.reconcile` hardcode `depthOrLayers = 1`. A `consolidate` pass
+(`PassType.CONSOLIDATE`) copies several same-shaped inputs into one layer each of a shared array
+texture (`ArrayTextures.copyLayer`, a hand-recorded `vkCmdCopyImage`, see §12), so a later
+fullscreen pass reads them through one `sampler2DArray` instead of one `sampler2D` per input.
+Metal caps distinct sampler states, not textures: 40 `texture2d<float>` bindings sharing 2
+samplers compile; 17 distinct samplers don't.
+
+Its declared `output` is never a `[targets.*]` entry, since `TargetKind` can't express its shape.
+`GraphValidator.checkConsolidatePass` refuses a name collision; `GraphInputResolver` resolves it
+against `GraphRunner.consolidateTargets()` (a static accessor, like `packTextureRegistry()`/
+`opaqueDepth()`) before falling back to `TargetRegistry`, the same way `mipchain` resolves against
+`mipchainTargets`. `ConsolidateRunner` owns the array texture outside the registry.
+
+Inputs are one of two kinds, never mixed in one pass:
+
+- Declared `[targets.*]` textures, sized from the first input's `TargetSpec` (every input must
+  share format and shape) via the usual `TargetPlan.textureWidth`/`textureHeight` formula.
+- The three allowlisted G-buffer builtins in `GraphValidator.CONSOLIDATE_BUILTIN_FORMATS`
+  (`builtin.gAlbedo`/`gMaterial`/`gAo`, all RGBA8 at G-buffer resolution), sized directly off
+  render resolution via `GBufferManager.ensureSize`. `gNormal` and `gMotion` are excluded: their
+  formats differ, which an array texture can't express.
+
+`GraphValidator.checkConsolidatePass` requires: no `shader` (engine-owned, like `copy`); no
+`enabled_if` (no declared target for `checkGateConsistency` to check a reader's gate against, so a
+gated pass is refused outright); at least one input, exactly one output; inputs all declared
+targets or all builtins, never mixed; declared-target inputs agree on format and shape; output
+name doesn't collide with a declared target or pack texture asset.
+
 ## 6. Uniform contracts
 
 ### `u_Globals` (std140, 832 bytes)
@@ -2188,3 +2219,19 @@ dedicated debug-view uniform; it is one value of a mechanism built for something
   proves the OS holds the new value, yet the HUD doesn't change (confirmed live, even with a forced
   window resize). `metalHud` is therefore restart-to-apply in both directions: only the value
   already true when `Metal.framework` initializes (`FornaxPreLaunch` -> `MetalHudEnv`) shows.
+- **An array texture can only be GPU-copied through one hand-recorded seam.**
+  `ArrayTextures.copyLayer` records a raw `vkCmdCopyImage` into one layer, spliced into the current
+  frame's submission via `execute` (no flush, no host wait), not through
+  `CommandEncoder.copyTextureToTexture`, which refuses whenever a texture has
+  `getDepthOrLayers() > 1`. Barriers stay `GENERAL` to `GENERAL`: Blaze3D keeps every sampled
+  texture in `GENERAL` permanently, and nothing here crosses queues, so no layout transition and no
+  queue-family transfer. Must run between `GraphRunner`'s declared passes, never inside a
+  `RenderPass`. Rendering directly into an array layer stays unsupported; copying an
+  already-rendered ordinary target in is the only path this seam opens. `create` zero-fills every
+  layer at allocation via the same layer-aware `writeToTexture` the CPU-upload path uses, since an
+  array texture can't be cleared through a render-pass clear.
+- **A `consolidate` pass's array texture is not VRAM-budgeted.** `GraphValidator`'s VRAM report
+  walks `graph.targets()`; a consolidate pass's output is never one (§5, "Array targets"), so its
+  real allocation never appears in that report. Pricing it needs either a `TargetKind` array
+  variant or a separate accounting path keyed off `PassType.CONSOLIDATE`. Left until a pack
+  actually needs it measured.

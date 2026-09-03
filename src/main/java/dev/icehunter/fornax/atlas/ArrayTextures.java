@@ -6,18 +6,26 @@ import com.mojang.blaze3d.systems.GpuDeviceBackend;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import com.mojang.blaze3d.vulkan.VulkanConst;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
 import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanUtils;
 import dev.icehunter.fornax.mixin.vulkan.GpuDeviceBackendAccessor;
+import dev.icehunter.fornax.util.GpuFatalException;
 import org.jspecify.annotations.Nullable;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VK12;
+import org.lwjgl.vulkan.VK13;
+import org.lwjgl.vulkan.VkCommandBuffer;
+import org.lwjgl.vulkan.VkImageCopy;
+import org.lwjgl.vulkan.VkImageMemoryBarrier;
 import org.lwjgl.vulkan.VkImageViewCreateInfo;
 
+import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 
 /**
@@ -55,13 +63,15 @@ import java.nio.LongBuffer;
  * Vulkan requires the view's type to match the sampler's dimensionality, and a stock view is
  * {@code 2D} regardless of layer count.
  *
- * <p><b>What an array texture can never do on this backend</b> (all rejected inside
- * {@code CommandEncoder} itself whenever either texture has {@code getDepthOrLayers() > 1}, so
- * these are API walls, not driver quirks): be a render-pass attachment, be cleared, or be either
- * side of {@code copyTextureToTexture}/{@code copyTextureToBuffer}. Layers are populated
- * exclusively by CPU-side {@code writeToTexture(..., mipLevel, depthOrLayer, ...)} (which is
- * layer-aware and bounds-checked) and proven readable only by an actual shader sample -- see
- * {@code ArrayTextureLayerProbe} for the round-trip proof this class's assumptions rest on.
+ * <p><b>What an array texture can never do through Blaze3D's own {@code CommandEncoder}</b> (API
+ * walls, not driver quirks, whenever a texture has {@code getDepthOrLayers() > 1}): be a
+ * render-pass attachment, be cleared, or be either side of {@code copyTextureToTexture}/
+ * {@code copyTextureToBuffer}. The only CPU write path is layer-aware, bounds-checked
+ * {@code writeToTexture(..., mipLevel, depthOrLayer, ...)}; see {@code ArrayTextureLayerProbe} for
+ * the shader-sample proof a layer written that way is actually readable. {@link #copyLayer}
+ * reaches past the same wall from the GPU side, like {@link #create} reaches past
+ * {@code GpuDevice.createTexture}: a hand-recorded {@code vkCmdCopyImage} that never goes through
+ * {@code CommandEncoder.copyTextureToTexture}.
  *
  * <p>Vulkan-backend-only by construction: on any other {@code GpuDeviceBackend} implementation
  * {@link #create} latches unavailable and returns {@code null} permanently, mirroring
@@ -96,6 +106,10 @@ public final class ArrayTextures {
      * doc) with an all-layer {@code 2D_ARRAY} view. Returns {@code null} before any GPU device
      * exists yet (retry next frame, the established device-not-ready convention) or permanently on
      * a non-Vulkan backend.
+     *
+     * <p>Zero-fills every layer of the base mip before returning, since VRAM isn't zero-filled
+     * (docs/ARCHITECTURE.md §12) and arrays can't use a render-pass clear. A caller that populates
+     * layers gradually via {@link #copyLayer} never shows a stale layer before its first copy.
      */
     @Nullable
     public static Allocation create(String label, GpuFormat format, int width, int height,
@@ -123,14 +137,131 @@ public final class ArrayTextures {
                 format, width, height, layers, mipLevels);
         GpuTextureView view;
         try {
+            zeroFillLayers(vulkanDevice, texture, format, width, height, layers);
             view = new ArrayView(vulkanDevice, (VulkanGpuTexture) texture);
         } catch (RuntimeException e) {
-            // The hand-built array view's own super-constructor (see ArrayView's doc) can throw
-            // after texture already succeeded above; free it here rather than leaking it.
+            // The zero-fill or ArrayView's constructor can throw after texture already succeeded;
+            // free it here rather than leak it.
             texture.close();
             throw e;
         }
         return new Allocation(texture, view);
+    }
+
+    /** Zero-fills every layer of a freshly created array texture's base mip; arrays can't satisfy
+     * the "cleared explicitly at allocation" law (docs/ARCHITECTURE.md §12) via render-pass clear. */
+    private static void zeroFillLayers(VulkanDevice vulkanDevice, GpuTexture texture,
+                                       GpuFormat format, int width, int height, int layers) {
+        int byteSize = width * height * format.blockSize();
+        ByteBuffer zero = MemoryUtil.memCalloc(byteSize);
+        try {
+            var encoder = vulkanDevice.createCommandEncoder();
+            for (int layer = 0; layer < layers; layer++) {
+                zero.position(0);
+                encoder.writeToTexture(texture, zero, 0, layer, 0, 0, width, height);
+            }
+        } finally {
+            MemoryUtil.memFree(zero);
+        }
+    }
+
+    /**
+     * Copies an ordinary, already-rendered 2D texture into one layer of an array texture from
+     * {@link #create}, via a hand-recorded {@code vkCmdCopyImage} spliced into the current frame's
+     * submission, never through {@code CommandEncoder.copyTextureToTexture} (refuses whenever
+     * either side has {@code getDepthOrLayers() > 1}). Both textures stay permanently in
+     * {@code VK_IMAGE_LAYOUT_GENERAL}, so every barrier is GENERAL to GENERAL: visibility/ordering
+     * only, never a layout transition, and no queue-family transfer since nothing crosses queues.
+     *
+     * <p>No flush, no host wait: appended to the encoder's current submission like
+     * {@code VulkanMetalInterop.recordIntoStream}. Must run between {@code GraphRunner}'s declared
+     * passes; {@code VulkanCommandEncoder.execute} throws if called inside a {@code RenderPass}.
+     *
+     * <p>A no-op on a device or backend {@link #create} would also refuse.
+     *
+     * @param source the already-rendered source view; its texture's width/height/aspect must match
+     *               {@code destination}'s exactly ({@code vkCmdCopyImage} requires it; not
+     *               re-checked here)
+     * @param destination the array texture and view pair from {@link #create}
+     * @param layer which layer of {@code destination} receives the copy
+     */
+    public static void copyLayer(GpuTextureView source, Allocation destination, int layer) {
+        GpuTexture destTexture = destination.texture();
+        if (layer < 0 || layer >= destTexture.getDepthOrLayers()) {
+            throw new IllegalArgumentException("layer " + layer + " out of range for a "
+                    + destTexture.getDepthOrLayers() + "-layer array texture");
+        }
+
+        GpuDevice device = RenderSystem.tryGetDevice();
+        if (device == null) {
+            return;
+        }
+        GpuDeviceBackend backend = ((GpuDeviceBackendAccessor) (Object) device).fornax$backend();
+        if (!(backend instanceof VulkanDevice vulkanDevice)) {
+            return;
+        }
+
+        long srcImage = ((VulkanGpuTexture) source.texture()).vkImage();
+        long dstImage = ((VulkanGpuTexture) destTexture).vkImage();
+        int aspect = destTexture.getFormat().hasColorAspect()
+                ? VK10.VK_IMAGE_ASPECT_COLOR_BIT : VK10.VK_IMAGE_ASPECT_DEPTH_BIT;
+        int width = destTexture.getWidth(0);
+        int height = destTexture.getHeight(0);
+
+        VulkanCommandEncoder encoder = vulkanDevice.createCommandEncoder();
+        VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            // Make the source's prior graphics writes visible to this transfer read.
+            copyBarrier(cmd, stack, srcImage, aspect, 0, 1,
+                    VK13.VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK13.VK_ACCESS_MEMORY_WRITE_BIT, VK13.VK_ACCESS_TRANSFER_READ_BIT);
+            // Order this write after any prior graphics read/write of this same destination layer.
+            copyBarrier(cmd, stack, dstImage, aspect, layer, 1,
+                    VK13.VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK13.VK_ACCESS_MEMORY_READ_BIT | VK13.VK_ACCESS_MEMORY_WRITE_BIT,
+                    VK13.VK_ACCESS_TRANSFER_WRITE_BIT);
+
+            VkImageCopy.Buffer region = VkImageCopy.calloc(1, stack);
+            region.srcSubresource().aspectMask(aspect).mipLevel(0).baseArrayLayer(0).layerCount(1);
+            region.dstSubresource().aspectMask(aspect).mipLevel(0).baseArrayLayer(layer).layerCount(1);
+            region.extent().set(width, height, 1);
+            VK13.vkCmdCopyImage(cmd,
+                    srcImage, VK13.VK_IMAGE_LAYOUT_GENERAL,
+                    dstImage, VK13.VK_IMAGE_LAYOUT_GENERAL,
+                    region);
+
+            // Publish the write back to whatever graphics pass samples this layer next (the
+            // resolve, ordinarily).
+            copyBarrier(cmd, stack, dstImage, aspect, layer, 1,
+                    VK13.VK_PIPELINE_STAGE_TRANSFER_BIT, VK13.VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                    VK13.VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK13.VK_ACCESS_MEMORY_READ_BIT | VK13.VK_ACCESS_MEMORY_WRITE_BIT);
+        }
+
+        int result = VK13.vkEndCommandBuffer(cmd);
+        if (result != VK13.VK_SUCCESS) {
+            throw new GpuFatalException("vkEndCommandBuffer failed: " + result);
+        }
+        encoder.execute(cmd);
+    }
+
+    /** GENERAL-to-GENERAL visibility/ordering barrier: see {@link #copyLayer}'s own doc for why
+     * this is never a layout transition and never a queue-family ownership transfer. */
+    private static void copyBarrier(VkCommandBuffer cmd, MemoryStack stack, long image, int aspect,
+            int baseLayer, int layerCount, int srcStage, int dstStage, int srcAccess, int dstAccess) {
+        VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, stack)
+                .sType$Default()
+                .srcAccessMask(srcAccess)
+                .dstAccessMask(dstAccess)
+                .oldLayout(VK13.VK_IMAGE_LAYOUT_GENERAL)
+                .newLayout(VK13.VK_IMAGE_LAYOUT_GENERAL)
+                .srcQueueFamilyIndex(VK13.VK_QUEUE_FAMILY_IGNORED)
+                .dstQueueFamilyIndex(VK13.VK_QUEUE_FAMILY_IGNORED)
+                .image(image);
+        barrier.subresourceRange()
+                .aspectMask(aspect).baseMipLevel(0).levelCount(1)
+                .baseArrayLayer(baseLayer).layerCount(layerCount);
+        VK13.vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, null, null, barrier);
     }
 
     /**

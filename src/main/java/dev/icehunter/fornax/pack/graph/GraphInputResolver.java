@@ -52,6 +52,12 @@ import java.util.Map;
  * its seed/reduce loop that a plain single-level {@link TargetInstance} doesn't model), so any
  * other pass reading that target by name (e.g. an SSR-trace-shaped pass sampling the full Hi-Z
  * chain) is resolved here first against that map before falling back to the registry.
+ *
+ * <p>A {@link PassType#CONSOLIDATE} pass's output resolves against {@link
+ * GraphRunner#consolidateTargets()}, a static accessor like {@link
+ * GraphRunner#packTextureRegistry()}/{@link GraphRunner#opaqueDepth()}, not a threaded parameter:
+ * unlike mipchain's per-level seed/reduce loop, every consumer here is a plain
+ * {@code sampler2DArray} read with no per-layer state to thread through.
  */
 final class GraphInputResolver {
     private GraphInputResolver() {
@@ -78,6 +84,11 @@ final class GraphInputResolver {
         MipchainRunner mip = mipchainTargets.get(base);
         if (mip != null) {
             return mip.fullChainView();
+        }
+
+        ConsolidateRunner consolidate = GraphRunner.consolidateTargets().get(base);
+        if (consolidate != null) {
+            return consolidate.fullArrayView();
         }
 
         TargetInstance instance = registry.get(base);

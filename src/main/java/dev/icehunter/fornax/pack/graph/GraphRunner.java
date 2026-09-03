@@ -145,6 +145,10 @@ public final class GraphRunner {
     // Keeping both indexes lets packs name a mipchain pass independently from the image it builds.
     private static final Map<String, MipchainRunner> mipchainRunners = new LinkedHashMap<>();
     private static final Map<String, MipchainRunner> mipchainTargets = new LinkedHashMap<>();
+    // Same split as the mipchain pair above (pass name vs. declared output name), but
+    // consolidateTargets is a static accessor, not a threaded parameter; see GraphInputResolver.
+    private static final Map<String, ConsolidateRunner> consolidateRunners = new LinkedHashMap<>();
+    private static final Map<String, ConsolidateRunner> consolidateTargets = new LinkedHashMap<>();
     private static final Map<String, ComputePassRunner> computeRunners = new LinkedHashMap<>();
     private static final Map<String, ParticlePassRunner> particleRunners = new LinkedHashMap<>();
     private static final Map<String, TemporalPassRunner> temporalRunners = new LinkedHashMap<>();
@@ -223,6 +227,13 @@ public final class GraphRunner {
     @Nullable
     public static PackTextureRegistry packTextureRegistry() {
         return packTextureRegistry;
+    }
+
+    /** Every {@link PassType#CONSOLIDATE} pass's live array texture, keyed by declared output
+     * name; same static-accessor shape as {@link #packTextureRegistry()}/{@link #opaqueDepth()}.
+     * Empty, never {@code null}, when no pack is loaded. */
+    public static Map<String, ConsolidateRunner> consolidateTargets() {
+        return consolidateTargets;
     }
 
     /** Test-only seam: lets a pure-JVM test drive {@link ComputePassRunner#descriptorTypeFor}'s
@@ -1100,7 +1111,10 @@ public final class GraphRunner {
         for (MipchainRunner m : mipchainRunners.values()) {
             m.ensureSize(width, height, outputWidth, outputHeight);
         }
-        // AFTER registry/mipchain sizing above, BEFORE Sodium's own opaque terrain draw (this frame's
+        for (ConsolidateRunner c : consolidateRunners.values()) {
+            c.ensureSize(width, height, outputWidth, outputHeight);
+        }
+        // AFTER registry/mipchain/consolidate sizing above, BEFORE Sodium's own opaque terrain draw (this frame's
         // only reader of geometryInputViews) runs -- so a declared input resolves against this
         // frame's freshly (re)sized target, never a stale one from before ensureSize ran.
         refreshGeometryInputViews();
@@ -1272,6 +1286,21 @@ public final class GraphRunner {
                             // every remaining pass to a device that already reported it is gone,
                             // and logPassRunFailureOnce's once-per-pass-name gate would hide every
                             // recurrence after the first.
+                            GpuFatalErrors.rethrowIfFatal(e);
+                            logPassRunFailureOnce(p.name(), e);
+                        }
+                    } else {
+                        logMissingRunnerOnce(p.name());
+                    }
+                }
+                case CONSOLIDATE -> {
+                    ConsolidateRunner runner = consolidateRunners.get(p.name());
+                    if (runner != null) {
+                        try {
+                            runner.run(r, mipchainTargets);
+                        } catch (RuntimeException e) {
+                            // Same rationale as the MIPCHAIN arm above: a dead device must abort
+                            // this loop rather than keep submitting to a device already gone.
                             GpuFatalErrors.rethrowIfFatal(e);
                             logPassRunFailureOnce(p.name(), e);
                         }
@@ -1465,6 +1494,7 @@ public final class GraphRunner {
         Map<String, ComputePassRunner> compute = new LinkedHashMap<>();
         Map<String, ParticlePassRunner> particles = new LinkedHashMap<>();
         Map<String, TemporalPassRunner> temporal = new LinkedHashMap<>();
+        Map<String, ConsolidateRunner> consolidate = new LinkedHashMap<>();
         try {
             for (PassSpec p : currentPack.graph().passes()) {
                 if (!enabledAtCompile(p)) {
@@ -1517,6 +1547,23 @@ public final class GraphRunner {
                         temporal.put(p.name(), TemporalPassRunner.build(p,
                                 TargetFormat.parse(outSpec.format(), p.outputs().get(0), "graph.toml")));
                     }
+                    case CONSOLIDATE -> {
+                        // GraphValidator.checkConsolidatePass already proved every input is either
+                        // all declared texture targets sharing one format/shape, or all one of the
+                        // allowlisted G-buffer builtins, never a mix.
+                        String firstInput = p.inputs().get(0);
+                        String builtinFormat = GraphValidator.CONSOLIDATE_BUILTIN_FORMATS.get(firstInput);
+                        if (builtinFormat != null) {
+                            consolidate.put(p.name(), ConsolidateRunner.buildForBuiltins(p, builtinFormat));
+                        } else {
+                            TargetSpec firstInputSpec = currentPack.graph().targets().get(firstInput);
+                            if (firstInputSpec == null) {
+                                throw new IllegalStateException("consolidate pass '" + p.name()
+                                        + "' names no allocated input target");
+                            }
+                            consolidate.put(p.name(), ConsolidateRunner.build(p, firstInputSpec));
+                        }
+                    }
                     case COPY, GEOMETRY -> {
                     }
                 }
@@ -1528,6 +1575,7 @@ public final class GraphRunner {
             mipchain.values().forEach(MipchainRunner::close);
             compute.values().forEach(ComputePassRunner::close);
             particles.values().forEach(ParticlePassRunner::close);
+            consolidate.values().forEach(ConsolidateRunner::close);
             FornaxMod.LOGGER.warn("[Fornax] GraphRunner: pass runners not ready yet ({}); retrying next frame", e.toString());
             return;
         }
@@ -1538,6 +1586,8 @@ public final class GraphRunner {
         computeRunners.putAll(compute);
         particleRunners.putAll(particles);
         temporalRunners.putAll(temporal);
+        consolidateRunners.putAll(consolidate);
+        consolidateTargets.putAll(indexConsolidateTargets(currentPack.graph(), consolidate));
         runnersBuilt = true;
     }
 
@@ -1561,6 +1611,24 @@ public final class GraphRunner {
             }
         }
         return byTarget;
+    }
+
+    /** Same shape as {@link #indexMipchainTargets}, keyed by a consolidate pass's single declared
+     * output rather than its (singular-field) {@code target}: see {@code
+     * PassSpec.outputs()}. */
+    static Map<String, ConsolidateRunner> indexConsolidateTargets(GraphSpec graph,
+                                                                  Map<String, ConsolidateRunner> runnersByPass) {
+        Map<String, ConsolidateRunner> byOutput = new LinkedHashMap<>();
+        for (PassSpec pass : graph.passes()) {
+            if (pass.type() != PassType.CONSOLIDATE) {
+                continue;
+            }
+            ConsolidateRunner runner = runnersByPass.get(pass.name());
+            if (runner != null) {
+                byOutput.put(pass.outputs().get(0), runner);
+            }
+        }
+        return byOutput;
     }
 
     /**
@@ -1817,7 +1885,9 @@ public final class GraphRunner {
                     } else if (reader.type() == PassType.FULLSCREEN || reader.type() == PassType.GEOMETRY
                             || reader.type() == PassType.TEMPORAL || reader.type() == PassType.MIPCHAIN) {
                         stages |= VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-                    } else if (reader.type() == PassType.COPY) {
+                    } else if (reader.type() == PassType.COPY || reader.type() == PassType.CONSOLIDATE) {
+                        // CONSOLIDATE's copy is ArrayTextures.copyLayer's own vkCmdCopyImage, same
+                        // transfer stage COPY's copyTextureToTexture runs at.
                         stages |= VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
                     }
                 }
@@ -2660,6 +2730,11 @@ public final class GraphRunner {
         }
         mipchainRunners.clear();
         mipchainTargets.clear();
+        for (ConsolidateRunner c : consolidateRunners.values()) {
+            c.close();
+        }
+        consolidateRunners.clear();
+        consolidateTargets.clear();
         for (ComputePassRunner c : computeRunners.values()) {
             c.close();
         }

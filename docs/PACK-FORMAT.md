@@ -132,6 +132,32 @@ Pass types:
 | `particles` | Draws the particle stream |
 | `temporal` | A fullscreen pass that the engine's temporal machinery drives |
 | `copy` | Copies one target to another |
+| `consolidate` | Copies several same-shaped inputs into one array texture, one layer each |
+
+**`consolidate` exists for the sampler budget, not for effect.** A fragment shader can only read so
+many distinct textures before the driver refuses to compile it (Metal's ceiling, 16). If a
+`fullscreen` pass needs more inputs than that, group some into a `consolidate` pass instead:
+
+```toml
+[[pass]]
+name = "gbuf_consolidate"
+type = "consolidate"
+inputs = ["builtin.gAlbedo", "builtin.gMaterial", "builtin.gAo"]
+outputs = ["consolidatedGbuf"]
+```
+
+Every input must be the same shape: either declared `[targets.*]` textures agreeing on `format`
+and `scale`/`basis` (or fixed size), or the three G-buffer builtins (`builtin.gAlbedo`,
+`builtin.gMaterial`, `builtin.gAo`), never a mix. No `shader`, no `enabled_if`. The output name is
+new, not a target you declare elsewhere. A later pass reads it as one `sampler2DArray`, layer `i`
+for the `i`-th `inputs` entry:
+
+```glsl
+uniform sampler2DArray u_Input0; // consolidatedGbuf
+vec4 albedo = texture(u_Input0, vec3(texCoord, 0.0));
+vec4 material = texture(u_Input0, vec3(texCoord, 1.0));
+vec4 ao = texture(u_Input0, vec3(texCoord, 2.0));
+```
 
 ### Builtin targets
 

@@ -11,6 +11,7 @@
   "key.fornax.analytic_light_list_dump": "Dump Analytic Light List",
   "key.fornax.measure_env_specular": "Measure Env Specular",
   "key.fornax.array_layer_probe": "Run Array-Texture Layer Probe",
+  "key.fornax.array_copy_layer_probe": "Run Array-Texture Copy-Layer Probe",
   "key.fornax.atlas_debug_tint": "Toggle Paged-Atlas Provenance Tint",
   "gui.fornax.pause_button": "Fornax",
   "gui.fornax.pause_button.tooltip": "Fornax engine settings",
