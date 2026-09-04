@@ -212,6 +212,8 @@ public final class PbrSettingsLayout {
             new Member("u_FogWetMist", 1.0f),
             new Member("u_FogColdMist", 1.0f),
             new Member("u_FogDryClear", 0.5f),
+            new Member("u_NetherFogDensity", 1.5f),
+            new Member("u_NetherFogDistance", 0.50f),
             new Member("u_FogClimbRise", 0.44f),
             new Member("u_FogCaveGuardLo", 0.05f),
             new Member("u_FogCaveGuardHi", 0.35f),
