@@ -248,6 +248,13 @@ public class GlobalUniformsWriteMixin {
         if (Minecraft.getInstance().level != fornax$smoothedWaterLevel) {
             fornax$smoothedWaterLevel = Minecraft.getInstance().level;
             fornax$waterSurface.reset();
+            // A dimension change or world rejoin is a discontinuity a fade would misrepresent as a
+            // gradual change: see WetnessState/DayCrossfadeState's own reset() doc. Both lanes are
+            // rewritten below every frame regardless, so resetting here only affects the one frame
+            // this fires on.
+            WetnessState.reset(sky.rainLevel());
+            DayCrossfadeState.reset((float) Math.floorDiv(
+                    Minecraft.getInstance().level.getDefaultClockTime(), 24000L));
         }
         if (eyeInWater) {
             BlockPos cameraBlock = Minecraft.getInstance().gameRenderer.mainCamera().blockPosition();

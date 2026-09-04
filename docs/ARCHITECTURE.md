@@ -2245,3 +2245,9 @@ dedicated debug-view uniform; it is one value of a mechanism built for something
   `mix(hash(dayIndex - 1.0), hash(dayIndex), z)`; blending across `dayFrac` instead ties the fade's
   real-world duration to the clock rate (near-instant at a high rate) and, summed with a large
   `dayIndex`, loses the fraction's own float32 precision on an aged world regardless.
+- **`WetnessState.reset`/`DayCrossfadeState.reset` must fire on a dimension change or world
+  rejoin, or both lanes fade into the new value instead of snapping to it.**
+  `GlobalUniformsWriteMixin` already tracks `Minecraft.getInstance().level` identity frame-to-frame
+  to reset `WaterSurfaceTracker` on exactly this discontinuity; both accumulators' resets are called
+  from that same guard so a portal trip or rejoining a world doesn't read as 20 seconds of drying
+  out or a slow mist fade from yesterday's value.
