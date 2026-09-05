@@ -155,6 +155,16 @@ public final class GeometryPipelineMap {
         put(RenderPipelines.CLOUDS, GeometrySlot.CLOUDS);
         put(RenderPipelines.FLAT_CLOUDS, GeometrySlot.CLOUDS);
 
+        // --- End portal -----------------------------------------------------------------------
+        // One snippet, two layer counts, so one pack program serves both. Opaque, depth-writing and
+        // drawn in the solid phase, so both defer. Unmapped they draw into vanilla's target and the
+        // graph's tonemap paints over them, which reads as a portal you can see straight through.
+        //
+        // The loading screen and the credits also draw on END_PORTAL. They come through GuiRenderer,
+        // not the draw chokepoint, and the chokepoint's GUI guard turns the substitution away.
+        put(RenderPipelines.END_PORTAL, GeometrySlot.END_PORTAL);
+        put(RenderPipelines.END_GATEWAY, GeometrySlot.END_PORTAL);
+
         // --- Lines ----------------------------------------------------------------------------
         // Block-outline and debug geometry. LINES_TRANSLUCENT is excluded: no depth write.
         put(RenderPipelines.LINES, GeometrySlot.LINES);

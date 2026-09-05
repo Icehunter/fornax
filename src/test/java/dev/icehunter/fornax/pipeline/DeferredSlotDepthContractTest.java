@@ -73,7 +73,7 @@ public class DeferredSlotDepthContractTest {
                 GeometrySlot.ENTITIES, GeometrySlot.ENTITIES_TRANSLUCENT, GeometrySlot.BLOCK_ENTITIES,
                 GeometrySlot.BLOCK_ENTITIES_TRANSLUCENT, GeometrySlot.PARTICLES, GeometrySlot.WEATHER,
                 GeometrySlot.BEACON_BEAM, GeometrySlot.LIGHTNING, GeometrySlot.CLOUDS,
-                GeometrySlot.LINES}) {
+                GeometrySlot.LINES, GeometrySlot.END_PORTAL}) {
             assertTrue(GeometryPipelineMap.isMapped(slot),
                     "slot '" + slot.token() + "' should have at least one vanilla pipeline mapped to it");
         }

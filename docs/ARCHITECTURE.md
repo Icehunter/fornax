@@ -633,7 +633,8 @@ per pack the way a `TargetRegistry` allocation can.
 - **Geometry passes are keyed by `GeometrySlot`.** A `type = "geometry"` pass names which kind of
   geometry its `program` shades via its `slot` key (`terrain`, `entities`, `hand`, `particles`,
   `weather`, `sky_basic`, `sky_textured`, `clouds`, `beacon_beam`, `lightning`, `damaged_block`,
-  `armor_glint`, `spider_eyes`, `lines`, `block_entities`, `shadow`, and others). Omitting `slot`
+  `armor_glint`, `spider_eyes`, `lines`, `block_entities`, `end_portal`, `shadow`, and others).
+  Omitting `slot`
   means `GeometrySlot.DEFAULT` (`terrain`); an unknown token, or `slot` on a non-geometry pass, fails
   load. Only `terrain` routes geometry today (`GeometrySlot.isRendered()`): every other constant is
   declared and validated but inert, so a pack can author and ship those programs before the engine
@@ -659,7 +660,8 @@ them is a separate mechanism from Sodium's terrain path:
 
 - `GeometryPipelineMap` maps vanilla `RenderPipelines` constants onto the `GeometrySlot` that shades
   them, keyed on pipeline identity (the constants are singletons; `RenderPipeline` has no value
-  equality). Only the entity pipelines are mapped today.
+  equality). Mapped today: the entity and item pipelines, block entities, the solid particle arm,
+  weather, beacon beams, lightning, clouds, block-outline lines, and the End portal and gateway.
 - `ShaderManagerGeometrySourceMixin` wraps the `precompilePipeline(pipeline, ShaderSource)` call in
   `ShaderManager.apply`, routing mapped pipelines at the shader-source level.
 

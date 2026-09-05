@@ -40,6 +40,20 @@ public enum GeometrySlot {
     BLOCK_ENTITIES("block_entities"),
     /** Block entities on a translucent render type. */
     BLOCK_ENTITIES_TRANSLUCENT("block_entities_translucent"),
+    /**
+     * The End portal and End gateway surface.
+     *
+     * <p>Its own slot, not a share of {@link #BLOCK_ENTITIES}: a block entity arrives with a colour,
+     * a texture coordinate and a lightmap, this arrives with a position and nothing else, so one
+     * program cannot read the other's varyings.
+     *
+     * <p>{@code END_PORTAL} and {@code END_GATEWAY} both land here. They come from one snippet and
+     * differ only in layer count, so one program serves both.
+     *
+     * <p>Casts no shadow: the surface sits inside a frame that already casts, and it gives off light
+     * rather than blocking it.
+     */
+    END_PORTAL("end_portal"),
 
     /** First-person held item and arm geometry, solid pass. */
     HAND("hand"),
@@ -168,7 +182,7 @@ public enum GeometrySlot {
         return switch (this) {
             case TERRAIN, ENTITIES, ENTITIES_TRANSLUCENT, BLOCK_ENTITIES, BLOCK_ENTITIES_TRANSLUCENT,
                  PARTICLES, PARTICLES_TRANSLUCENT, BEACON_BEAM, LIGHTNING, CLOUDS, LINES,
-                 SHADOW_ENTITIES, BANNER_PATTERNS -> true;
+                 SHADOW_ENTITIES, BANNER_PATTERNS, END_PORTAL -> true;
             default -> false;
         };
     }
