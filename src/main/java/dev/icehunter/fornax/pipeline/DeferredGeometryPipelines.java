@@ -346,6 +346,13 @@ public final class DeferredGeometryPipelines {
 
     /** Logs, once per pipeline, that a draw genuinely received a G-buffer render pass and at what size. */
     public static synchronized void noteDeferredPass(RenderPipeline pipeline, int width, int height) {
+        // Every call, not just the first: the census's REACHED/SUBSTITUTED sets separate "the hook
+        // ran and declined" from "this slot's program is bound". A deferred slot never marked
+        // substituted here is reported as declined while it draws correctly.
+        GeometrySlot slot = GeometryPipelineMap.slotOf(pipeline);
+        if (slot != null) {
+            SlotReachabilityCensus.noteSlotSubstituted(slot);
+        }
         if (DEFERRED_PASS_REPORTED.putIfAbsent(pipeline, Boolean.TRUE) == null) {
             FornaxMod.LOGGER.info("[Fornax][diag] deferred G-buffer pass applied to {} at {}x{}",
                     pipeline.getLocation(), width, height);
