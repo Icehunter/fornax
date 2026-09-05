@@ -525,10 +525,7 @@ public class GlobalUniformsWriteMixin {
         // dimension is the level's identity, not its sky kind: Skybox.NONE would fold the Nether in
         // with every custom skyless dimension, which is exactly the thing a pack needs to tell apart.
         var world = Minecraft.getInstance().level;
-        float dimension = world.dimension() == Level.OVERWORLD ? 1.0f
-                : world.dimension() == Level.NETHER ? 2.0f
-                : world.dimension() == Level.END ? 3.0f
-                : 0.0f;
+        float dimension = dev.icehunter.fornax.util.DimensionId.of(world);
         builder.putVec4(world.getSeaLevel(), world.getMinY(), world.getMaxY(), dimension);
 
         return original.call(builder);

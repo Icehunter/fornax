@@ -171,7 +171,8 @@ public final class PackTomlLoader {
                 }
                 String name = TomlSupport.requireString(p, "name", file);
                 TomlSupport.rejectUnknownKeys(p, Set.of("name", "type", "slot", "program",
-                        "shader", "inputs", "outputs", "target", "enabled_if", "dispatch", "local_size",
+                        "shader", "inputs", "outputs", "target", "enabled_if", "runtime_enabled_if",
+                        "dispatch", "local_size",
                         "blend", "vertex_shader", "instances"), file);
                 PassType type = parsePassType(TomlSupport.requireString(p, "type", file), name, file);
                 List<Integer> dispatch = TomlSupport.getIntList(p, "dispatch", file);
@@ -231,7 +232,8 @@ public final class PackTomlLoader {
                         dispatch,
                         localSize,
                         TomlSupport.getStringOrNull(p, "blend", file),
-                        particles));
+                        particles,
+                        TomlSupport.getStringOrNull(p, "runtime_enabled_if", file)));
             }
         }
         return new GraphSpec(targets, textures, passes);

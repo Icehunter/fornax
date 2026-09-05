@@ -1255,7 +1255,7 @@ public final class GraphRunner {
                 // wait cannot split the active Apple tile render encoder.
                 continue;
             }
-            if (!enabledAtCompile(p)) {
+            if (!enabledAtCompile(p) || !enabledThisFrame(p)) {
                 continue;
             }
             // COMPUTE passes own raw-Vulkan timestamp rings in ComputePassRunner, because a
@@ -1678,6 +1678,51 @@ public final class GraphRunner {
 
     private static boolean enabledAtCompile(PassSpec p) {
         return isEnabledAtCompile(p, compileValues);
+    }
+
+    /**
+     * The per-frame gate, {@code runtime_enabled_if}. Same grammar as {@code enabled_if}, checked
+     * each frame against the world instead of the pack's compile options.
+     *
+     * <p>One name, {@code dimension}, whose numbers are {@link dev.icehunter.fornax.util.DimensionId}
+     * and reach a shader as {@code u_WorldBounds.w}. A pack writes
+     * {@code runtime_enabled_if = "dimension != 3"} to stop a pass in the End.
+     *
+     * <p>A switch for the pack, not a decision by the engine: whether a dimension wants a pass is a
+     * look question, and the answer belongs in {@code graph.toml}.
+     */
+    public static boolean enabledThisFrame(PassSpec p) {
+        if (p.runtimeEnabledIf() == null) {
+            return true;
+        }
+        return EnabledIfExpr.parse(p.runtimeEnabledIf()).evaluate(runtimeValues());
+    }
+
+    /** The world facts a {@code runtime_enabled_if} may name. */
+    public static Map<String, Integer> runtimeValues() {
+        return Map.of("dimension",
+                dev.icehunter.fornax.util.DimensionId.of(net.minecraft.client.Minecraft.getInstance().level));
+    }
+
+    /**
+     * Whether the pack wants a shadow map drawn this frame.
+     *
+     * <p>Read off the pack's shadow-caster pass: declaring it is how a pack asks for shadows, so
+     * gating it off is how it declines them. The whole phase is skipped, not drawn and thrown away.
+     */
+    public static boolean shadowsEnabledThisFrame() {
+        PackModel pack = currentPack;
+        if (pack == null) {
+            return true;
+        }
+        for (PassSpec p : pack.graph().passes()) {
+            if (p.slot() == GeometrySlot.SHADOW_ENTITIES || p.slot() == GeometrySlot.SHADOW) {
+                if (!enabledThisFrame(p)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /** Shared {@code enabled_if} evaluation, factored out of {@link #enabledAtCompile} so {@link

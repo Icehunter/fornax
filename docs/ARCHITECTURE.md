@@ -630,6 +630,11 @@ per pack the way a `TargetRegistry` allocation can.
   `builtin.noise` as a safe, non-garbage default, never a null or stale view. A slot whose declared
   input transiently fails to resolve (a compile-disabled target, a registry mid-rebuild) falls back
   to noise for that frame the same way rather than propagating the failure.
+- **`runtime_enabled_if` gates a pass per frame.** Same grammar as `enabled_if`, checked each frame
+  against the world rather than the pack's compile options. One name, `dimension`, whose numbers
+  come from `util/DimensionId` and reach a shader as `u_WorldBounds.w`, so a gate and a shader
+  cannot disagree. `runtime_enabled_if = "dimension != 3"` stops a pass in the End. The shadow
+  driver reads the pack's shadow-caster pass this way: gate it off and the shadow phase is skipped.
 - **Geometry passes are keyed by `GeometrySlot`.** A `type = "geometry"` pass names which kind of
   geometry its `program` shades via its `slot` key (`terrain`, `entities`, `hand`, `particles`,
   `weather`, `sky_basic`, `sky_textured`, `clouds`, `beacon_beam`, `lightning`, `damaged_block`,

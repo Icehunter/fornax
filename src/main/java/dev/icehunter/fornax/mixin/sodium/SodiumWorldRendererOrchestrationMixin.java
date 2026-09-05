@@ -251,6 +251,14 @@ public class SodiumWorldRendererOrchestrationMixin {
                 : FALLBACK_SHADOW_DISTANCE_BLOCKS;
 
         ShadowMapManager.ensureSize(resolution);
+
+        // The pack gated its shadow-caster pass off here, so skip the clear, the camera and the
+        // draws. After ensureSize, never instead of it: the map keeps the size it had. Sizing it
+        // down would resize a live map on every dimension change, and the next draw carries a
+        // scissor from the old size and throws.
+        if (!GraphRunner.shadowsEnabledThisFrame()) {
+            return;
+        }
         ShadowMapManager.clear();
 
         Vector3f lightDir = SunDirection.computeSunDirection();
