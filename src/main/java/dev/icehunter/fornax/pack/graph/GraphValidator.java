@@ -211,6 +211,7 @@ public final class GraphValidator {
             }
         }
 
+        ComputeReuseValidation.validate(graph, options);
         checkAtMostOneGeometryPassPerSlot(graph);
         detectCycles(graph);
 

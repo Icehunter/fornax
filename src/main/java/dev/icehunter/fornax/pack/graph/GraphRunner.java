@@ -36,6 +36,7 @@ import dev.icehunter.fornax.pack.option.OptionType;
 import dev.icehunter.fornax.pack.option.PackOption;
 import dev.icehunter.fornax.pass.FrameGenPresenter;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
+import dev.icehunter.fornax.pipeline.FrameUniformValues;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pass.ssaa.SsaaManager;
@@ -998,6 +999,7 @@ public final class GraphRunner {
 
     /** Mirrors {@code FramePipeline.prepareGBufferForOpaquePass()}. */
     public static void prepare(ChunkRenderMatrices matrices, double x, double y, double z) {
+        FrameUniformValues.CURRENT.beginFrame();
         // One log line every 5s, no per-frame cost. Sampled BEFORE the isActive() gate so a session
         // is measured whether or not a pack is loaded -- "does it climb with no pack active too" is
         // itself one of the answers worth having. See MemoryWatchdog.
@@ -1053,6 +1055,9 @@ public final class GraphRunner {
         coarsePrecipitationReady = !coarsePrecipitationRequired;
         if (r != null) {
             r.ensureSize(width, height, outputWidth, outputHeight);
+            // New storage images still have transitions/clears recorded on graphics. Finish that
+            // batch before frame bindings or compute handoffs; unchanged frames do not submit/wait.
+            r.completeStorageTextureInitialization();
             // Voxel water reflection SSBO: re-checked EVERY frame against this frame's live render
             // resolution, exactly like every sibling render-basis resource just above (ensureBufferSize
             // already no-ops when the requested size matches the current allocation, so this costs

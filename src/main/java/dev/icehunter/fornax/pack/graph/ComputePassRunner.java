@@ -2,6 +2,7 @@ package dev.icehunter.fornax.pack.graph;
 
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.pack.PassSpec;
+import dev.icehunter.fornax.pipeline.FrameUniformValues;
 import dev.icehunter.fornax.pack.RawShaderImports;
 import dev.icehunter.fornax.pack.layout.PackOptionsBuffer;
 import dev.icehunter.fornax.pack.layout.RuntimeShaderPack;
@@ -126,6 +127,14 @@ public final class ComputePassRunner implements AutoCloseable {
     }
 
     private final PassSpec spec;
+    @Nullable private final ComputeReuseState reuseState;
+    private final List<String> reuseInputTargets;
+    private final List<String> reuseTargets;
+    private final int[] reuseValues;
+    private final Object[] reuseResources;
+    private final long[] reuseInputRevisions;
+    private final String dispatchCounterLabel;
+    private final String reuseCounterLabel;
     private final VulkanComputeBackend backend;
     private final ComputePipelineBuilder.CompiledComputePipeline pipeline;
     private final List<String> bindingOrder;
@@ -170,6 +179,18 @@ public final class ComputePassRunner implements AutoCloseable {
                                int extraPushConstantBytes, boolean graphicsCompletionBeforeStorageWrite,
                                FrameProfiler profiler) {
         this.spec = spec;
+        this.reuseState = spec.reuseWhenUnchanged() == null ? null : new ComputeReuseState();
+        this.reuseInputTargets = reuseState == null ? List.of() : spec.inputs().stream()
+                .filter(name -> !name.equals(PACK_OPTIONS_INPUT) && !name.equals(ParticlePassRunner.GLOBALS_INPUT))
+                .toList();
+        this.reuseTargets = new ArrayList<>(reuseInputTargets);
+        if (reuseState != null) reuseTargets.addAll(spec.outputs());
+        this.reuseValues = new int[reuseState == null ? 0
+                : ComputeReuseState.valueCount(spec.reuseWhenUnchanged())];
+        this.reuseResources = new Object[reuseTargets.size()];
+        this.reuseInputRevisions = new long[reuseInputTargets.size()];
+        this.dispatchCounterLabel = "compute dispatches " + spec.name();
+        this.reuseCounterLabel = "compute reuses " + spec.name();
         this.profiler = profiler;
         this.recycleTimingLabel = "compute recycle CPU " + spec.name();
         this.lockTimingLabel = "compute lock CPU " + spec.name();
@@ -487,7 +508,11 @@ public final class ComputePassRunner implements AutoCloseable {
                     @Nullable GpuBufferSlice globals, @Nullable ExtraPushConstants extra,
                     @Nullable int[] dispatchOverride,
                     boolean synchronousWait, long graphicsWaitStageMask) {
-        if (globals == null && bindingOrder.contains(ParticlePassRunner.GLOBALS_INPUT)) {
+        registry.requireStorageTextureInitializationComplete(spec.name());
+        if ((globals == null && bindingOrder.contains(ParticlePassRunner.GLOBALS_INPUT))
+                || (reuseState != null && !spec.reuseWhenUnchanged().globals().isEmpty()
+                && !FrameUniformValues.CURRENT.ready())) {
+            if (reuseState != null) reuseState.invalidate();
             return -1L;
         }
         int extraBytesThisCall = extra != null ? extra.byteSize() : 0;
@@ -593,16 +618,28 @@ public final class ComputePassRunner implements AutoCloseable {
                         groupsY = (out.height() + localSize.get(1) - 1) / localSize.get(1);
                     }
                 }
-                if (timestampQueries != null) {
-                    int firstQuery = slotIndex * 2;
-                    VK13.vkCmdResetQueryPool(cmd, timestampQueries.pool(), firstQuery, 2);
-                    VK13.vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                            timestampQueries.pool(), firstQuery);
+                boolean dispatchKernel = true;
+                if (reuseState != null) {
+                    if (!captureReuseInputs(registry, options, params, groupsX, groupsY, groupsZ)) {
+                        reuseState.invalidate();
+                        return -1L;
+                    }
+                    dispatchKernel = reuseState.needsDispatch(reuseValues, reuseResources, reuseInputRevisions);
                 }
-                VK13.vkCmdDispatch(cmd, groupsX, groupsY, groupsZ);
-                if (timestampQueries != null) {
-                    VK13.vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            timestampQueries.pool(), slotIndex * 2 + 1);
+                // Reuse omits only the kernel and its timestamps. Descriptor retirement and the
+                // binary/timeline handoffs still require the ordinary submission on every frame.
+                if (dispatchKernel) {
+                    if (timestampQueries != null) {
+                        int firstQuery = slotIndex * 2;
+                        VK13.vkCmdResetQueryPool(cmd, timestampQueries.pool(), firstQuery, 2);
+                        VK13.vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                timestampQueries.pool(), firstQuery);
+                    }
+                    VK13.vkCmdDispatch(cmd, groupsX, groupsY, groupsZ);
+                    if (timestampQueries != null) {
+                        VK13.vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                timestampQueries.pool(), slotIndex * 2 + 1);
+                    }
                 }
                 recordComputeWriteReleaseBarrier(cmd, stack);
                 VK13.vkEndCommandBuffer(cmd);
@@ -653,7 +690,12 @@ public final class ComputePassRunner implements AutoCloseable {
                     throw new IllegalStateException("vkQueueSubmit failed with VkResult " + result);
                 }
                 pendingGraphicsRelease = reuseTicket;
-                computeTimer.markSubmitted(slotIndex);
+                if (dispatchKernel) computeTimer.markSubmitted(slotIndex);
+                if (reuseState != null) {
+                    reuseState.submitted(dispatchKernel, reuseValues, reuseResources, reuseInputRevisions);
+                    if (dispatchKernel) registry.recordComputeWrite(spec.outputs());
+                    profiler.incrementCounter(dispatchKernel ? dispatchCounterLabel : reuseCounterLabel);
+                }
                 slot.submitted = true;
                 if (graphicsWaitStageMask != 0) {
                     // VulkanDevice returns its persistent encoder. Lighting producers request this
@@ -684,6 +726,26 @@ public final class ComputePassRunner implements AutoCloseable {
             }
         }
         return -1L;
+    }
+
+    private boolean captureReuseInputs(TargetRegistry registry, @Nullable PackOptionsBuffer options,
+                                       PassParams params, int groupsX, int groupsY, int groupsZ) {
+        int index = 0;
+        for (String key : spec.reuseWhenUnchanged().runtime()) {
+            if (options == null) return false;
+            reuseValues[index++] = Float.floatToRawIntBits(options.get(key, Float.NaN));
+        }
+        ComputeReuseState.writeFrameAndPush(spec.reuseWhenUnchanged(), FrameUniformValues.CURRENT,
+                params, groupsX, groupsY, groupsZ, reuseValues);
+        for (int i = 0; i < reuseTargets.size(); i++) {
+            reuseResources[i] = registry.get(reuseTargets.get(i));
+            if (reuseResources[i] == null) return false;
+        }
+        for (int i = 0; i < reuseInputTargets.size(); i++) {
+            reuseInputRevisions[i] = registry.computeContentRevision(reuseInputTargets.get(i));
+            if (reuseInputRevisions[i] == 0) return false;
+        }
+        return true;
     }
 
     boolean hasPendingGraphicsStorageReads() {

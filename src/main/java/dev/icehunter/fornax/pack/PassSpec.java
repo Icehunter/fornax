@@ -33,7 +33,18 @@ public record PassSpec(String name, PassType type, @Nullable GeometrySlot slot, 
                        @Nullable String shader, List<String> inputs, List<String> outputs,
                        @Nullable String target, @Nullable String enabledIf, List<Integer> dispatch,
                        @Nullable List<Integer> localSize, @Nullable String blend,
-                       @Nullable ParticleSpec particles, @Nullable String runtimeEnabledIf) {
+                       @Nullable ParticleSpec particles, @Nullable String runtimeEnabledIf,
+                       @Nullable ComputeReuseSpec reuseWhenUnchanged) {
+    /** Existing declarations dispatch every frame unless they explicitly opt into reuse. */
+    public PassSpec(String name, PassType type, @Nullable GeometrySlot slot, @Nullable String program,
+                    @Nullable String shader, List<String> inputs, List<String> outputs,
+                    @Nullable String target, @Nullable String enabledIf, List<Integer> dispatch,
+                    @Nullable List<Integer> localSize, @Nullable String blend,
+                    @Nullable ParticleSpec particles, @Nullable String runtimeEnabledIf) {
+        this(name, type, slot, program, shader, inputs, outputs, target, enabledIf, dispatch,
+                localSize, blend, particles, runtimeEnabledIf, null);
+    }
+
     /** Without a per-frame gate, so a call site reads as "no gate" rather than trailing a null. */
     public PassSpec(String name, PassType type, @Nullable GeometrySlot slot, @Nullable String program,
                     @Nullable String shader, List<String> inputs, List<String> outputs,

@@ -49,6 +49,32 @@ public final class TargetRegistry implements AutoCloseable {
     private final GraphSpec graph;
     private final Map<String, Integer> compileValues;
     private final Map<String, TargetInstance> targets = new LinkedHashMap<>();
+    private final Map<String, Long> computeContentRevisions = new LinkedHashMap<>();
+    private long nextComputeContentRevision;
+    private final StorageTextureInitialization storageTextureInitialization = new StorageTextureInitialization();
+
+    /** Allocation-only batch completion; call before frame bindings or raw compute are recorded. */
+    void completeStorageTextureInitialization() {
+        storageTextureInitialization.complete(() -> RenderSystem.getDevice().createCommandEncoder());
+    }
+
+    void requireStorageTextureInitializationComplete(String passName) {
+        storageTextureInitialization.requireComplete(passName);
+    }
+
+    /** Successfully submitted reusable kernels; zero means this allocation has no producer result. */
+    long computeContentRevision(String name) {
+        return computeContentRevisions.getOrDefault(name, 0L);
+    }
+
+    void invalidateComputeContent(String name) {
+        computeContentRevisions.remove(name);
+    }
+
+    void recordComputeWrite(List<String> outputs) {
+        long revision = ++nextComputeContentRevision;
+        for (String output : outputs) computeContentRevisions.put(output, revision);
+    }
     private final Map<String, BufferInstance> buffers = new LinkedHashMap<>();
 
     /**
@@ -229,6 +255,7 @@ public final class TargetRegistry implements AutoCloseable {
             if (planned.contains(name)) {
                 return false;
             }
+            invalidateComputeContent(name);
             TargetInstance dropped = targets.get(name);
             retire(dropped::close);
             return true;
@@ -524,6 +551,7 @@ public final class TargetRegistry implements AutoCloseable {
             t.close();
         }
         targets.clear();
+        computeContentRevisions.clear();
 
         if (!buffers.isEmpty()) {
             // Same lock as ensureBufferSize/uploadSlot: a worker-thread upload may still hold a handle
@@ -601,6 +629,8 @@ public final class TargetRegistry implements AutoCloseable {
 
         TargetInstance next = new TargetInstance(name, format, width, height, history, texture, view, historyTexture, historyView);
         TargetInstance old = targets.put(name, next);
+        invalidateComputeContent(name);
+        storageTextureInitialization.allocated(storage);
         if (old != null) {
             // Live per-frame resize path (window resize / SSAA render-scale change): this can run on
             // an already-active registry, with every ComputePassRunner still alive. Retire rather

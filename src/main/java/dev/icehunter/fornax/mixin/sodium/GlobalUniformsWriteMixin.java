@@ -7,6 +7,7 @@ import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
 import dev.icehunter.fornax.pass.taa.CameraJitter;
 import dev.icehunter.fornax.pipeline.CameraMotionState;
+import dev.icehunter.fornax.pipeline.FrameUniformValues;
 import dev.icehunter.fornax.pipeline.DayCrossfadeState;
 import dev.icehunter.fornax.pipeline.PreviousFrameCameraTransform;
 import dev.icehunter.fornax.pipeline.HeldLight;
@@ -178,8 +179,9 @@ public class GlobalUniformsWriteMixin {
         float windClock = (float) (windClockTicks % 1_048_576L) + windClockPartialTick;
         // x = rain level 0..1, y = sun angle (radians), z = clouds did-cancel flag, w = wind clock
         // (see globals.glsl's u_SkyState comment -- both sides must stay in lockstep).
-        builder.putVec4(sky.rainLevel(), sky.sunAngleRadians(),
-                SkyFrameState.cloudsFlag(), windClock);
+        float cloudsFlag = SkyFrameState.cloudsFlag();
+        builder.putVec4(sky.rainLevel(), sky.sunAngleRadians(), cloudsFlag, windClock);
+        FrameUniformValues.CURRENT.skyState(sky.rainLevel(), sky.sunAngleRadians(), cloudsFlag, windClock);
 
         // Water tail (bytes 560..576, Water Round C Task 4): x = 1.0 iff the camera eye is in
         // water THIS frame, computed live right here instead of read from a frame-state holder
@@ -421,8 +423,11 @@ public class GlobalUniformsWriteMixin {
         // savanna beach whenever the player stood on the ocean beside it, and gating in both places
         // would dry a border from either side. The type exists so a pack does not reach for
         // u_CameraSkyLight.y to answer "is it SNOWING here" and make the same mistake one layer up.
-        builder.putVec4(CameraJitter.frameCounter(), cameraBlockLightRaw / 15.0f, thunder,
-                WetnessState.step(sky.rainLevel()));
+        float frameCounter = CameraJitter.frameCounter();
+        float blockLight = cameraBlockLightRaw / 15.0f;
+        float wetness = WetnessState.step(sky.rainLevel());
+        builder.putVec4(frameCounter, blockLight, thunder, wetness);
+        FrameUniformValues.CURRENT.frameState(frameCounter, blockLight, thunder, wetness);
 
         // u_HeldLight (bytes 688..704): the light level of what the player is HOLDING, per hand,
         // normalized 0..1. Vanilla surfaces this nowhere a shader can reach -- the held item is drawn

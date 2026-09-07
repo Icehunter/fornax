@@ -172,7 +172,7 @@ public final class PackTomlLoader {
                 String name = TomlSupport.requireString(p, "name", file);
                 TomlSupport.rejectUnknownKeys(p, Set.of("name", "type", "slot", "program",
                         "shader", "inputs", "outputs", "target", "enabled_if", "runtime_enabled_if",
-                        "dispatch", "local_size",
+                        "dispatch", "local_size", "reuse_when_unchanged",
                         "blend", "vertex_shader", "instances"), file);
                 PassType type = parsePassType(TomlSupport.requireString(p, "type", file), name, file);
                 List<Integer> dispatch = TomlSupport.getIntList(p, "dispatch", file);
@@ -233,10 +233,23 @@ public final class PackTomlLoader {
                         localSize,
                         TomlSupport.getStringOrNull(p, "blend", file),
                         particles,
-                        TomlSupport.getStringOrNull(p, "runtime_enabled_if", file)));
+                        TomlSupport.getStringOrNull(p, "runtime_enabled_if", file),
+                        parseComputeReuse(p, type, name, file)));
             }
         }
         return new GraphSpec(targets, textures, passes);
+    }
+
+    private static ComputeReuseSpec parseComputeReuse(Config pass, PassType type, String name, String file) {
+        if (!pass.contains("reuse_when_unchanged")) return null;
+        String key = "pass." + name + ".reuse_when_unchanged";
+        if (type != PassType.COMPUTE)
+            throw new FornaxPackError(file, key, "reuse is only valid on a compute pass");
+        Config reuse = requireTable(pass.get("reuse_when_unchanged"), key, file);
+        TomlSupport.rejectUnknownKeys(reuse, Set.of("runtime", "globals", "push"), file);
+        return new ComputeReuseSpec(TomlSupport.getStringList(reuse, "runtime", file),
+                TomlSupport.getStringList(reuse, "globals", file),
+                TomlSupport.getStringList(reuse, "push", file));
     }
 
     public static ScreensSpec loadScreens(Reader reader, String file) {
