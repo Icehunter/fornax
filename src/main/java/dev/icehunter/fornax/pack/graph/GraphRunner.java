@@ -135,6 +135,8 @@ public final class GraphRunner {
      * "Cannot wait on a fence for the current submit" and took the whole pass chain down. */
     private static boolean runtimeValuesDirty = false;
     private static Map<String, Integer> compileValues = Map.of();
+    private static java.util.function.BiPredicate<PassSpec, PassSpec> computeGraphicsConflicts =
+            ComputeGraphicsWaits.compile(List.of());
     // Verbatim snapshot of the LAST rebuild()'s own (pre-engine-overlay) arguments -- see
     // ensureRunnersBuilt()'s FX_COMPUTE self-heal for why this is retained (replaying a rebuild once
     // computeAvailable becomes truthfully known, without a second shader-source read from disk).
@@ -736,6 +738,7 @@ public final class GraphRunner {
         long generation = ++rebuildGeneration;
 
         currentPack = pack;
+        computeGraphicsConflicts = ComputeGraphicsWaits.compile(pack.graph().passes());
         // Deferred geometry variants embed the OLD pack's program identifiers, so every one of them
         // is stale the moment the active pack changes. Nothing else clears them, and a stale variant
         // renders the previous pack's shader with no error to say so.
@@ -1239,7 +1242,7 @@ public final class GraphRunner {
             }
             runner.run(r, computeParams(p, width, height), options, globals,
                     computeExtraPushConstants(p, matrices, x, y, z),
-                    computeDispatchOverride(p), false, graphicsWaitStages);
+                    computeDispatchOverride(p), false, graphicsWaitStages, null);
         }
     }
 
@@ -1302,123 +1305,134 @@ public final class GraphRunner {
         SkyReprojection.commit(CameraJitter.currentUnjitteredProjection(), matrices.modelView());
         dev.icehunter.fornax.debug.FullscreenCapture.beginFrame(compileValues);
 
-        for (PassSpec p : pack.graph().passes()) {
-            if (p.type() == PassType.GEOMETRY) {
-                if (timer != null && !geometryDwellClosed) {
-                    timer.bracketEnd(FrameProfiler.LABEL_TERRAIN);
-                    geometryDwellClosed = true;
-                }
-                continue; // Sodium's own opaque draws already ran -- the graph just names this slot.
+        try (ComputeGraphicsWaits graphicsWaits = new ComputeGraphicsWaits(computeGraphicsConflicts, (semaphore, stages) -> {
+            if (computeBackend == null) {
+                throw new IllegalStateException("Fornax graph: pending compute handoff has no backend");
             }
-            if (isPreOpaqueLightingComputePass(p)) {
-                // Submitted from prepare(), before opaque rendering begins, so its final semaphore
-                // wait cannot split the active Apple tile render encoder.
-                continue;
-            }
-            if (!enabledAtCompile(p) || !enabledThisFrame(p)) {
-                continue;
-            }
-            // COMPUTE passes own raw-Vulkan timestamp rings in ComputePassRunner, because a
-            // PassTimer bracket on the graphics encoder cannot observe another queue's dispatch.
-            // Any legacy synchronous dependency wait is published separately as a latest-value
-            // "compute wait <pass>" row rather than contaminating the pass's GPU avg/p95 samples.
-            boolean gpuTimestampBracket = timer != null && p.type() != PassType.COMPUTE;
-            if (gpuTimestampBracket) {
-                timer.bracketBegin(p.name());
-            }
-            switch (p.type()) {
-                case FULLSCREEN -> {
-                    FullscreenPassRunner runner = fullscreenRunners.get(p.name());
-                    if (runner != null) {
-                        runner.run(r, mipchainTargets, globals, options, computeParams(p, width, height));
-                    } else {
-                        logMissingRunnerOnce(p.name());
+            computeBackend.device().createCommandEncoder().waitSemaphore(semaphore, 0L, stages);
+        })) {
+            for (PassSpec p : pack.graph().passes()) {
+                if (p.type() == PassType.GEOMETRY) {
+                    if (timer != null && !geometryDwellClosed) {
+                        timer.bracketEnd(FrameProfiler.LABEL_TERRAIN);
+                        geometryDwellClosed = true;
                     }
+                    continue; // Sodium's own opaque draws already ran -- the graph just names this slot.
                 }
-                case MIPCHAIN -> {
-                    MipchainRunner runner = mipchainRunners.get(p.name());
-                    if (runner != null) {
-                        try {
-                            runner.run(r, mipchainTargets);
-                        } catch (RuntimeException e) {
-                            // A dead device rethrows here rather than joining the ordinary
-                            // per-pass degrade path: this loop would otherwise keep submitting
-                            // every remaining pass to a device that already reported it is gone,
-                            // and logPassRunFailureOnce's once-per-pass-name gate would hide every
-                            // recurrence after the first.
-                            GpuFatalErrors.rethrowIfFatal(e);
-                            logPassRunFailureOnce(p.name(), e);
+                if (isPreOpaqueLightingComputePass(p)) {
+                    // Submitted from prepare(), before opaque rendering begins, so its final semaphore
+                    // wait cannot split the active Apple tile render encoder.
+                    continue;
+                }
+                if (!enabledAtCompile(p) || !enabledThisFrame(p)) {
+                    continue;
+                }
+                graphicsWaits.beforePass(p);
+                // COMPUTE passes own raw-Vulkan timestamp rings in ComputePassRunner, because a
+                // PassTimer bracket on the graphics encoder cannot observe another queue's dispatch.
+                // Any legacy synchronous dependency wait is published separately as a latest-value
+                // "compute wait <pass>" row rather than contaminating the pass's GPU avg/p95 samples.
+                boolean gpuTimestampBracket = timer != null && p.type() != PassType.COMPUTE;
+                if (gpuTimestampBracket) {
+                    timer.bracketBegin(p.name());
+                }
+                switch (p.type()) {
+                    case FULLSCREEN -> {
+                        FullscreenPassRunner runner = fullscreenRunners.get(p.name());
+                        if (runner != null) {
+                            runner.run(r, mipchainTargets, globals, options, computeParams(p, width, height));
+                        } else {
+                            logMissingRunnerOnce(p.name());
                         }
-                    } else {
-                        logMissingRunnerOnce(p.name());
                     }
-                }
-                case CONSOLIDATE -> {
-                    ConsolidateRunner runner = consolidateRunners.get(p.name());
-                    if (runner != null) {
-                        try {
-                            runner.run(r, mipchainTargets);
-                        } catch (RuntimeException e) {
-                            // Same rationale as the MIPCHAIN arm above: a dead device must abort
-                            // this loop rather than keep submitting to a device already gone.
-                            GpuFatalErrors.rethrowIfFatal(e);
-                            logPassRunFailureOnce(p.name(), e);
-                        }
-                    } else {
-                        logMissingRunnerOnce(p.name());
-                    }
-                }
-                case COPY -> {
-                    try {
-                        CopyRunner.run(p, r);
-                    } catch (RuntimeException e) {
-                        GpuFatalErrors.rethrowIfFatal(e);
-                        logPassRunFailureOnce(p.name(), e);
-                    }
-                }
-                case COMPUTE -> {
-                    ComputePassRunner runner = computeRunners.get(p.name());
-                    if (runner != null) {
-                        if (computeBackend != null) {
-                            // Nothing here reads what graphics writes later in the same frame, so
-                            // nothing has to make the host wait on a fence.
-                            boolean synchronousWait = false;
-                            long dependencyWaitNanos = runner.run(r, computeParams(p, width, height), options, globals,
-                                    computeExtraPushConstants(p, matrices, x, y, z),
-                                    computeDispatchOverride(p), synchronousWait,
-                                    graphicsWaitStagesFor(p, pack.graph()));
-                            if (dependencyWaitNanos >= 0L) {
-                                frameProfiler.recordValue("compute wait " + p.name(),
-                                        dependencyWaitNanos / 1_000_000.0);
+                    case MIPCHAIN -> {
+                        MipchainRunner runner = mipchainRunners.get(p.name());
+                        if (runner != null) {
+                            try {
+                                runner.run(r, mipchainTargets);
+                            } catch (RuntimeException e) {
+                                // A dead device rethrows here rather than joining the ordinary
+                                // per-pass degrade path: this loop would otherwise keep submitting
+                                // every remaining pass to a device that already reported it is gone,
+                                // and logPassRunFailureOnce's once-per-pass-name gate would hide every
+                                // recurrence after the first.
+                                GpuFatalErrors.rethrowIfFatal(e);
+                                logPassRunFailureOnce(p.name(), e);
                             }
+                        } else {
+                            logMissingRunnerOnce(p.name());
                         }
-                    } else {
-                        logMissingRunnerOnce(p.name());
+                    }
+                    case CONSOLIDATE -> {
+                        ConsolidateRunner runner = consolidateRunners.get(p.name());
+                        if (runner != null) {
+                            try {
+                                runner.run(r, mipchainTargets);
+                            } catch (RuntimeException e) {
+                                // Same rationale as the MIPCHAIN arm above: a dead device must abort
+                                // this loop rather than keep submitting to a device already gone.
+                                GpuFatalErrors.rethrowIfFatal(e);
+                                logPassRunFailureOnce(p.name(), e);
+                            }
+                        } else {
+                            logMissingRunnerOnce(p.name());
+                        }
+                    }
+                    case COPY -> {
+                        try {
+                            CopyRunner.run(p, r);
+                        } catch (RuntimeException e) {
+                            GpuFatalErrors.rethrowIfFatal(e);
+                            logPassRunFailureOnce(p.name(), e);
+                        }
+                    }
+                    case COMPUTE -> {
+                        ComputePassRunner runner = computeRunners.get(p.name());
+                        if (runner != null) {
+                            if (computeBackend != null) {
+                                // Nothing here reads what graphics writes later in the same frame, so
+                                // nothing has to make the host wait on a fence.
+                                boolean synchronousWait = false;
+                                long dependencyWaitNanos = runner.run(r, computeParams(p, width, height), options, globals,
+                                        computeExtraPushConstants(p, matrices, x, y, z),
+                                        computeDispatchOverride(p), synchronousWait,
+                                        graphicsWaitStagesFor(p, pack.graph()), graphicsWaits);
+                                if (dependencyWaitNanos >= 0L) {
+                                    frameProfiler.recordValue("compute wait " + p.name(),
+                                            dependencyWaitNanos / 1_000_000.0);
+                                }
+                            }
+                        } else {
+                            logMissingRunnerOnce(p.name());
+                        }
+                    }
+                    case PARTICLES -> {
+                        ParticlePassRunner runner = particleRunners.get(p.name());
+                        if (runner != null) {
+                            runner.run(r, mipchainTargets, globals, options, computeParams(p, width, height));
+                        } else {
+                            logMissingRunnerOnce(p.name());
+                        }
+                    }
+                    case TEMPORAL -> {
+                        TemporalPassRunner runner = temporalRunners.get(p.name());
+                        if (runner != null) {
+                            runner.run(r, mipchainTargets, computeParams(p, width, height));
+                        } else {
+                            logMissingRunnerOnce(p.name());
+                        }
+                    }
+                    case GEOMETRY -> {
                     }
                 }
-                case PARTICLES -> {
-                    ParticlePassRunner runner = particleRunners.get(p.name());
-                    if (runner != null) {
-                        runner.run(r, mipchainTargets, globals, options, computeParams(p, width, height));
-                    } else {
-                        logMissingRunnerOnce(p.name());
-                    }
-                }
-                case TEMPORAL -> {
-                    TemporalPassRunner runner = temporalRunners.get(p.name());
-                    if (runner != null) {
-                        runner.run(r, mipchainTargets, computeParams(p, width, height));
-                    } else {
-                        logMissingRunnerOnce(p.name());
-                    }
-                }
-                case GEOMETRY -> {
+                if (gpuTimestampBracket) {
+                    timer.bracketEnd(p.name());
                 }
             }
-            if (gpuTimestampBracket) {
-                timer.bracketEnd(p.name());
-            }
+
         }
+        // Deferred compute waits have been consumed before capture completion, history swaps,
+        // later geometry/debug readers, and any next-frame target retirement or runner reuse.
 
         if (timer != null) {
             if (!geometryDwellClosed) {
@@ -2889,6 +2903,7 @@ public final class GraphRunner {
         pendingOptionsLayout = null;
         pendingRuntimeDefaults = Map.of();
         currentPack = null;
+        computeGraphicsConflicts = ComputeGraphicsWaits.compile(List.of());
         coarsePrecipitationRequired = false;
         coarsePrecipitationReady = true;
         // Same reasoning as rebuild()'s invalidate: on teardown the variants reference a pack that no

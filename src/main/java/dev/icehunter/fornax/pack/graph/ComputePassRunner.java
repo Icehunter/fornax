@@ -481,7 +481,9 @@ public final class ComputePassRunner implements AutoCloseable {
      * dispatch's completion for a legacy bidirectional dependency. {@code graphicsWaitStageMask},
      * when non-zero, signals a binary semaphore and inserts its wait into Blaze3D's pending graphics
      * submission AT THOSE STAGES, providing a device-side compute-write to graphics-read dependency
-     * without blocking the CPU.
+     * without blocking the CPU. When {@code graphicsWaits} is non-null, it takes over this
+     * submission's handoff until the next pass that depends on it, or until it closes. Pre-opaque
+     * calls pass null.
      *
      * <p>A runner whose storage output can also be read on the graphics queue carries the reverse
      * edge independently: its raw submit waits on a per-runner timeline value at
@@ -507,7 +509,8 @@ public final class ComputePassRunner implements AutoCloseable {
     public long run(TargetRegistry registry, PassParams params, @Nullable PackOptionsBuffer options,
                     @Nullable GpuBufferSlice globals, @Nullable ExtraPushConstants extra,
                     @Nullable int[] dispatchOverride,
-                    boolean synchronousWait, long graphicsWaitStageMask) {
+                    boolean synchronousWait, long graphicsWaitStageMask,
+                    @Nullable ComputeGraphicsWaits graphicsWaits) {
         registry.requireStorageTextureInitializationComplete(spec.name());
         if ((globals == null && bindingOrder.contains(ParticlePassRunner.GLOBALS_INPUT))
                 || (reuseState != null && !spec.reuseWhenUnchanged().globals().isEmpty()
@@ -703,8 +706,12 @@ public final class ComputePassRunner implements AutoCloseable {
                     // the command buffer recorded so far cannot split an active Apple tile render
                     // encoder. The semaphore supplies both execution ordering and device-memory
                     // visibility across the separate compute/graphics queues without a host stall.
-                    VulkanCommandEncoder graphics = backend.device().createCommandEncoder();
-                    graphics.waitSemaphore(slot.graphicsSemaphore, 0L, graphicsWaitStageMask);
+                    if (graphicsWaits == null) {
+                        VulkanCommandEncoder graphics = backend.device().createCommandEncoder();
+                        graphics.waitSemaphore(slot.graphicsSemaphore, 0L, graphicsWaitStageMask);
+                    } else {
+                        graphicsWaits.submitted(spec, slot.graphicsSemaphore, graphicsWaitStageMask);
+                    }
                 }
                 if (synchronousWait) {
                     // Legacy host wait for passes with a current-frame graphics -> compute input

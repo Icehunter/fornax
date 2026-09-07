@@ -126,6 +126,19 @@ loop, a pack that declares no depth copy-back pass
 gets a hardcoded fallback copy of G-buffer depth into the main render target's depth texture, so
 translucent draws afterward always see correct depth.
 
+`ComputeGraphicsWaits` leaves the first compute-to-graphics handoff in `finish()` where it always
+ran. Later handoffs can stay open across fullscreen, mipchain, copy and consolidate passes that do
+not touch the same data. A conflict table, built each time the pack rebuilds, checks each pass's
+writes against every other pass's reads and writes, and its reads against every other pass's
+writes; a history buffer and the two shadow-sampler names count as the same resource. The next
+compute dispatch, particles pass, temporal pass or engine output drains any open waits, even one
+whose intended reader turns out to skip. A deferred wait uses `ALL_COMMANDS`, since it must also
+cover a capture's transfer step and its attachment reads and writes, not only its shader. Leaving
+the scope drains every wait still open before history swaps and later geometry run. A cached kernel
+still sends its handoff; the waits before opaque work, and the timeline running the other way
+(graphics to compute, through a storage image), do not change. The result: independent passes can
+overlap where the graph allows it, but the very first handoff still happens where it always did.
+
 The profiler gives each frame one ID number at the start of `GameRenderer.renderLevel`, before
 scale setup and world preparation. `GraphRunner.beginProfileFrame()` opens the Vulkan graphics
 `frame` bracket; `endProfileFrame()` closes it after the AA/history tail. This span covers terrain,
