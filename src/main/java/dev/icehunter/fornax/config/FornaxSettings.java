@@ -53,6 +53,19 @@ public class FornaxSettings {
      */
     public boolean profilerOverlay = false;
 
+    /** Draws the per-pass timing rows. Off leaves the counters and the frame total.
+     * Needs {@link #profilerOverlay}. */
+    public boolean overlayShowPasses = true;
+
+    /** Draws the counter rows: queue depths, harvest and clear counts, compute waits, dropped
+     * timers. Needs {@link #profilerOverlay}. */
+    public boolean overlayShowCounters = true;
+
+    /** Keeps the {@value dev.icehunter.fornax.profile.ProfilerOverlay#TOP_PASS_ROWS} slowest pass
+     * rows, in graph order, so a big graph does not run off the screen. Needs
+     * {@link #profilerOverlay} and {@link #overlayShowPasses}. */
+    public boolean overlayTopPassesOnly = false;
+
     /**
      * The engine's own AA/upscale method selector, engine-owned in place of the pack-owned {@code
      * TAA_ENABLED} compile option -- the single source of truth for whether/how the frame gets a

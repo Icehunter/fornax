@@ -44,6 +44,20 @@ class GraphRunnerSunParamsTest {
     private static final Pattern PASS_PARAMS_BLOCK =
             Pattern.compile("uniform\\s+u_PassParams\\s*\\{[^}]*}", Pattern.DOTALL);
 
+    @Test void voxelSurfaceShadingReceivesTheSameSunAndTerrainDistanceAsResolve() {
+        assertTrue(GraphRunner.wantsSunAndDebugParams("voxel_water_reflection"));
+        assertTrue(GraphRunner.suppliesParam2("voxel_water_reflection"));
+    }
+
+    @Test
+    void glintOcclusionVariantsReceiveTheSameCelestialDirectionAndDistance() {
+        for (String name : new String[]{"glint_occlusion", "glint_occlusion_voxel",
+                "glint_occlusion_refined"}) {
+            assertTrue(GraphRunner.wantsSunAndDebugParams(name), name);
+            assertTrue(GraphRunner.suppliesParam2(name), name);
+        }
+    }
+
     @Test
     void everyPassShaderReadingSunDirectionIsWiredForIt() throws IOException {
         Path plague = locatePlague();

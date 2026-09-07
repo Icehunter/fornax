@@ -5,6 +5,7 @@ import dev.icehunter.fornax.pack.material.AtlasTexelSampler;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModel;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModelPart;
+import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.Direction;
@@ -14,6 +15,7 @@ import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.ToIntFunction;
 
 /**
  * Resolves a block's REAL per-face color by walking its actual baked model quads and averaging real
@@ -32,15 +34,42 @@ public final class FaceColorResolver {
      * {@code face}, or {@code 0} if it has none (a face with no quads at all -- e.g. a model that
      * genuinely draws nothing on that side). */
     public static int resolve(BlockState state, Direction face) {
+        return resolve(state, face, -1);
+    }
+
+    /** Layer-zero biome tint is applied only to quads that request that layer, before averaging. */
+    public static int resolve(BlockState state, Direction face, int tint) {
         BlockStateModel model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
         List<BlockStateModelPart> parts = new ArrayList<>();
         model.collectParts(RandomSource.create(HARVEST_SEED), parts);
 
+        return resolve(parts, face, tint, FaceColorResolver::averageQuadColor);
+    }
+
+    // Leaves and inside faces are unculled, so walk both lists and sort the unculled ones into the
+    // six faces by their baked normal.
+    static int resolve(List<BlockStateModelPart> parts, Direction face, ToIntFunction<BakedQuad> color) {
+        return resolve(parts, face, -1, color);
+    }
+
+    static int resolve(List<BlockStateModelPart> parts, Direction face, int tint,
+                       ToIntFunction<BakedQuad> color) {
         long sumA = 0, weightedSumR = 0, weightedSumG = 0, weightedSumB = 0;
         int quadCount = 0;
         for (BlockStateModelPart part : parts) {
-            for (BakedQuad quad : part.getQuads(face)) {
-                int avg = averageQuadColor(quad);
+            List<BakedQuad> quads = new ArrayList<>(part.getQuads(face));
+            for (BakedQuad quad : part.getQuads(null)) {
+                if (quad.direction() == face) quads.add(quad);
+            }
+            for (BakedQuad quad : quads) {
+                int avg = color.applyAsInt(quad);
+                // The harvest carries layer 0 only. Other layers must not borrow that tint.
+                if (tint != -1 && quad.materialInfo().tintIndex() == 0) {
+                    avg = (avg & 0xFF000000)
+                            | ((((avg >>> 16) & 0xFF) * ((tint >>> 16) & 0xFF) / 255) << 16)
+                            | ((((avg >>> 8) & 0xFF) * ((tint >>> 8) & 0xFF) / 255) << 8)
+                            | ((avg & 0xFF) * (tint & 0xFF) / 255);
+                }
                 int a = (avg >>> 24) & 0xFF;
                 weightedSumR += (long) ((avg >> 16) & 0xFF) * a;
                 weightedSumG += (long) ((avg >> 8) & 0xFF) * a;
@@ -49,14 +78,73 @@ public final class FaceColorResolver {
                 quadCount++;
             }
         }
-        if (quadCount == 0 || sumA == 0) {
-            return 0;
+        if (quadCount == 0 || sumA == 0) return 0;
+        return ((int) (sumA / quadCount) << 24) | ((int) (weightedSumR / sumA) << 16)
+                | ((int) (weightedSumG / sumA) << 8) | (int) (weightedSumB / sumA);
+    }
+
+    record Surface(boolean cutout, boolean cross) { }
+
+    static Surface surface(BlockState state) {
+        BlockStateModel model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
+        List<BlockStateModelPart> parts = new ArrayList<>();
+        model.collectParts(RandomSource.create(HARVEST_SEED), parts);
+        return surface(parts);
+    }
+
+    /** The baked materials say whether a surface is alpha-tested. A cross is accepted only for the
+     * two upright diagonal rectangles the palette can hold, never a loose sheet of leaf quads. */
+    static Surface surface(List<BlockStateModelPart> parts) {
+        boolean cutout = false;
+        boolean hasCulled = false;
+        List<BakedQuad> unculled = new ArrayList<>();
+        for (BlockStateModelPart part : parts) {
+            for (Direction face : Direction.values()) {
+                for (BakedQuad quad : part.getQuads(face)) {
+                    hasCulled = true;
+                    cutout |= quad.materialInfo().layer() == ChunkSectionLayer.CUTOUT;
+                }
+            }
+            for (BakedQuad quad : part.getQuads(null)) {
+                cutout |= quad.materialInfo().layer() == ChunkSectionLayer.CUTOUT;
+                unculled.add(quad);
+            }
         }
-        int avgA = (int) (sumA / quadCount);
-        int avgR = (int) (weightedSumR / sumA);
-        int avgG = (int) (weightedSumG / sumA);
-        int avgB = (int) (weightedSumB / sumA);
-        return (avgA << 24) | (avgR << 16) | (avgG << 8) | avgB;
+        return new Surface(cutout, !hasCulled && isDiagonalCross(unculled));
+    }
+
+    private static boolean isDiagonalCross(List<BakedQuad> quads) {
+        if (quads.isEmpty()) return false;
+        float minX = Float.POSITIVE_INFINITY, minY = minX, minZ = minX;
+        float maxX = Float.NEGATIVE_INFINITY, maxY = maxX, maxZ = maxX;
+        for (BakedQuad quad : quads) {
+            if (quad.materialInfo().layer() != ChunkSectionLayer.CUTOUT) return false;
+            for (int i = 0; i < BakedQuad.VERTEX_COUNT; i++) {
+                var p = quad.position(i);
+                minX = Math.min(minX, p.x()); maxX = Math.max(maxX, p.x());
+                minY = Math.min(minY, p.y()); maxY = Math.max(maxY, p.y());
+                minZ = Math.min(minZ, p.z()); maxZ = Math.max(maxZ, p.z());
+            }
+        }
+        if (!(maxX > minX && maxY > minY && maxZ > minZ)) return false;
+        int planes = 0;
+        for (BakedQuad quad : quads) {
+            int plane = -1, corners = 0;
+            for (int i = 0; i < BakedQuad.VERTEX_COUNT; i++) {
+                var p = quad.position(i);
+                // The baked coordinates must match exactly. No guessed slack.
+                if ((p.x() != minX && p.x() != maxX) || (p.y() != minY && p.y() != maxY)
+                        || (p.z() != minZ && p.z() != maxZ)) return false;
+                int x = p.x() == maxX ? 1 : 0, y = p.y() == maxY ? 1 : 0;
+                int diagonal = x ^ (p.z() == maxZ ? 1 : 0);
+                if (plane != -1 && plane != diagonal) return false;
+                plane = diagonal;
+                corners |= 1 << (x + 2 * y);
+            }
+            if (corners != 15) return false; // all four corners of a rectangle
+            planes |= 1 << plane;
+        }
+        return planes == 3; // both diagonal planes, allowing reverse-winding duplicates
     }
 
     /**

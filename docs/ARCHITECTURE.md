@@ -139,7 +139,11 @@ few frames late. `ProfilerOverlay` (a `HudElement` registered via `HudElementReg
 `FornaxSettings.profilerOverlay`) refreshes its own cached copy of `snapshot()` at roughly 4 Hz and
 renders that cache every frame; `snapshot()` itself allocates and sorts, so the HUD never calls it
 per frame. An empty cache (nothing ever recorded, whether from an unsupported backend or no pack
-loaded) renders a single "timestamps unavailable" line instead of an empty or garbled panel. A
+loaded) renders a single "timestamps unavailable" line instead of an empty or garbled panel. Three
+filters trim a big graph's panel: `FornaxSettings.overlayShowPasses` drops the pass rows,
+`overlayShowCounters` the counter rows, and `overlayTopPassesOnly` keeps the ten slowest passes in
+graph order (`ProfilerOverlay.visiblePasses`). All three grey out while `profilerOverlay` is off,
+and the frame total and frame-generation line always draw, so the panel is never empty. A
 second keybind (`ProfilerOverlay.dumpToLog()`) logs a full breakdown table via
 `ProfilerLogDump.format()` at INFO, taking a fresh snapshot on demand. The pre-HUD throttled summary
 line (one per roughly 900 frames) still exists for headless diagnosis but now logs at DEBUG, since
@@ -975,6 +979,11 @@ block is not a channel a pack-authored pass can rely on for per-frame state. Tha
 (the alternative is a general per-pass parameter syntax nothing has needed) and it is why the
 reserved `globals` input exists on the two raw-Vulkan pass types.
 
+Every pass whose name starts with `glint_occlusion` gets the shared sun and debug parameters, so an
+extra one such as `glint_occlusion_voxel` matches `water_composite` on sun direction, true sun
+height and `u_Param2` terrain distance. A name the engine does not know reads reset defaults, with
+no error.
+
 ### The reserved `globals` input (`compute` and `particles`)
 
 `compute` and `particles` passes build their own descriptor sets by hand, so neither gets
@@ -1100,6 +1109,7 @@ be restated here.
 |---|---|---|---|
 | `BlockRendererMaterialIdMixin` | `BlockRenderer` | Set/clear the per-thread material ID around each block's model meshing call | Inject (HEAD/RETURN) |
 | `ChunkVertexFactsMixin` | `ChunkVertexEncoder.Vertex` | Stamp each copied vertex with its block's packed facts (`VertexFacts`) so quads split by translucent sorting keep them past the context clear | Inject |
+| `ClientChunkCacheVoxelLightMixin` | `ClientChunkCache.onLightUpdate` | Queue a voxel world-light refresh for light-only changes, whether or not the section is meshed or visible; does nothing with no pack active | Inject |
 | `ChunkBuilderMeshingTaskMixin` | `ChunkBuilderMeshingTask` | Harvest each section's block data for the voxel grid the moment Sodium (re)builds it, piggybacking on Sodium's own change detection (background worker thread, per rebuild, never per frame) | Inject |
 | `FluidRendererMaterialIdMixin` | `DefaultFluidRenderer` | Set/clear the per-thread material ID around each block's fluid-surface meshing call (the `renderModel`-parallel path for water/lava quads) | Inject (HEAD/RETURN) |
 | `CompactChunkVertexMixin` | `ChunkMeshFormats` | Substitute the engine's own vertex format for the stock compact format | Redirect |
@@ -1961,6 +1971,30 @@ every fullscreen pass uses (see §6); the resolve pass alone receives the curren
 as one of its two generic per-pass scalars, decoded shader-side into an integer branch. There is no
 dedicated debug-view uniform; it is one value of a mechanism built for something else entirely.
 
+### One-shot raw fullscreen pass captures
+
+The Readback Dump key also arms a capture when `config/fornax-capture.json` exists in the game
+directory, holding `{"passes":["first_pass","second_pass"]}` or `{"pass":"first_pass"}`. One request
+takes up to four fullscreen passes from a single `GraphRunner.finish` call and never repeats. A pass
+that is missing, switched off or throws is recorded as a failure. With no such file, rendering is
+untouched.
+
+`debug.FullscreenCapture` writes `fornax-captures/<timestamp>-<uuid>/manifest.json` and raw `.bin`
+files. Each chosen pass copies the textures it reads before the draw and what it wrote after, in
+graph order into their own readback buffers, so a target reused later cannot change bytes already
+taken. A copy counts only once its callback comes back. Each input records its slot, name, sampler,
+size, GPU format, base mip and byte count. Files hold raw native-order values, base mip only, with
+no conversion and no vertical flip; D32_FLOAT depth stays reversed-Z. The opaque-depth copy declares
+COPY_SRC so this can read it.
+
+A request may copy 1 GiB of texture, checked before each pass, and one texture at most 512 MiB. Each
+texture must be single-layer, stencil-free and copyable; a pass with a buffer input is turned down.
+A failed capture is recorded and the pass still renders. The manifest also holds the compile values
+and the bytes written to the per-pass parameter buffer. The globals and pack-options buffers have no
+safe way to read back, so they are marked unavailable and `replayComplete` is false;
+`textureCaptureComplete` can be true while the status is `incomplete`. This is evidence of what went
+in and came out, not a replay. Whether allocation and callbacks behave needs a live game session.
+
 ## 12. Known laws
 
 - **The sprite-bounds grid's resolution is not fixed.** The engine sizes it to the pack, since the
@@ -2258,3 +2292,82 @@ dedicated debug-view uniform; it is one value of a mechanism built for something
   to reset `WaterSurfaceTracker` on exactly this discontinuity; both accumulators' resets are called
   from that same guard so a portal trip or rejoining a world doesn't read as 20 seconds of drying
   out or a slow mist fade from yesterday's value.
+
+### When a voxel section counts as known
+
+A new or resized brick-summary buffer starts at `SUMMARY_PENDING`, through the optional fill word on
+`TargetRegistry.ensureBufferSize`; a buffer that keeps its size keeps its data, and other buffers
+start at zero. Harvest writes the occupancy and emitter bits over pending, so zero then means
+harvested and empty. Direct section reads ask for `ChunkStatus.FULL` with `create=false`, so a chunk
+the client has not got stays pending rather than coming back as an empty stand-in.
+
+GPU storage and the record of which section owns each slot live and die together.
+`VoxelWindow.initializeStorage` drops the owner, data and population records before it allocates or
+resizes, and detaching or swapping the registry drops them too. Allocation is keyed by registry and
+diameter, so asking for the same storage again keeps it. A queued resync task carries the storage
+generation it was submitted under, and both the bookkeeping and the upload turn down an old
+generation under the shared upload lock. So a reload at the same camera spot cannot leave fresh
+pending buffers under stale owners, and a late harvest cannot write into new storage.
+
+### Voxel model material coverage
+
+Harvest reads whether a surface is alpha-tested off each baked quad's material layer, so it works
+with no `blocks.toml` tag; a tag also counts. A block is read as a cross only when its unculled
+cutout quads make both upright diagonal rectangles over the same bounds, so any other cloud of
+unculled quads stays a full-cell cutout. Face colours average the unculled quads too, sorted into
+the six faces by their baked normal. The layer-zero biome tint multiplies only the quads asking for
+layer zero, before the average; other faces keep their atlas colours. Bootstrap reads hand in the
+client world's tint view and the section corner, so they colour like a mesh-driven harvest. These
+are average colours and rough shapes, not lit surfaces and not the model's triangles.
+
+### Optional voxel face texture mapping
+
+A pack that declares and enables the `voxelFaceTexture` buffer gets exact atlas UVs beside the
+16-word palette; left out or switched off, nothing is allocated. Only tier zero fills it, with the
+same wrap-around slot and 96-entry addressing as `voxelPalette`:
+`(slot * 96 + entry) * 48 + face * 8`, faces in DOWN, UP, NORTH, SOUTH, WEST, EAST order. Each face
+holds flags (bit 0 usable, bit 1 alpha-tested), the biome tint as ARGB, then six floats
+`u0,v0,du/ds,dv/ds,du/dt,dv/dt`. Local `(s,t)` is `(y,z)` on X faces, `(x,z)` on Y faces and `(x,y)`
+on Z faces, so a turned or mirrored baked UV still comes out right. A face is usable only when one
+opaque or alpha-tested quad covers the whole cell face with UVs running straight across it.
+See-through materials, stacked faces, part cells, crosses, loose leaf quads and higher tint layers
+mark it unusable, and a reader must fall back on the average face colour.
+
+The buffer costs 18,432 bytes per slot: about 12.8 MiB at diameter 9, 86.4 MiB at 17. A new one is
+zeroed. Both uploads write it before the summary word in the same submission, so pending ownership
+still guards stale data. `VoxelWindow.initializeStorage` drops the old owners and queued harvest
+generations, so fresh face data goes up before any summary reads valid again.
+
+
+### Optional per-cell voxel world light
+
+A pack that enables the engine-sized `voxelLightmap` buffer gets tier-zero sky and block light,
+apart from the material palette. Each slot is 4096 bytes (1024 uints), one byte per cell in
+`(y << 8) | (z << 4) | x` order, four cells to a word: low four bits block light, high four sky,
+Minecraft's 0..15. A shader reads word `slot * 1024 + (cell >> 2)`, shifts by `(cell & 3) * 8` and
+masks the byte. This is light arriving from the world, not what a block gives off itself, which
+palette word 15 holds. About 61 MiB at diameter 25.
+
+The harvester copies the levels out of its world view. The mesh harvest runs after
+`BlockRenderCache.init`, because at the head of `execute` the reused slice still holds the previous
+section, too early for both the tint and the light; bootstrap reads use the client world's light
+view. Both upload paths write the whole light range with the geometry and before the summary word,
+in one transfer. A new buffer is zeroed and a missing world view gives darkness. Slot ownership, the
+pending summary, the storage generation and the buffer bounds still say whether a cell is safe to
+read. This is one value per block, not the smooth per-vertex light the mesh carries.
+
+`ClientChunkCacheVoxelLightMixin` watches for light-only changes. The next active voxel frame queues
+one refresh onto the resync worker, which takes the whole gathered list when it starts, camera still
+and section off screen included. It reads fresh world light and republishes each slot still owned,
+keeping its geometry; a mesh published after a light change queues another refresh. The work is
+capped at the uploader's starting batch size and can queue behind geometry resync. Changing storage
+clears the pending list, and the generation and owner checks throw out writes to retired slots. Only
+one refresh worker is pending per generation, and a worker from an old generation cannot release the
+new one's slot.
+
+A section above or below build height has no geometry but still reads the world's light layers:
+empty must not turn open sky into no sky light.
+
+The `voxel_water_reflection` fullscreen pass gets the same sun and debug PassParams as `resolve`:
+real sun/moon direction, true sun height, and `u_Param2` holding terrain render distance in blocks.
+Not the render-fog end point, and not the default pass sun height.

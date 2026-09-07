@@ -1241,6 +1241,7 @@ public final class GraphRunner {
         // Publish this frame's NDC-to-previous-NDC map before the graph's first temporal consumer.
         // The unjittered projection keeps sky motion in the same jitter-free basis as gMotion.
         SkyReprojection.commit(CameraJitter.currentUnjitteredProjection(), matrices.modelView());
+        dev.icehunter.fornax.debug.FullscreenCapture.beginFrame(compileValues);
 
         for (PassSpec p : pack.graph().passes()) {
             if (p.type() == PassType.GEOMETRY) {
@@ -1320,10 +1321,9 @@ public final class GraphRunner {
                     ComputePassRunner runner = computeRunners.get(p.name());
                     if (runner != null) {
                         if (computeBackend != null) {
-                            // Lighting compute is submitted from prepare(), before opaque rendering.
-                            // The only compute pass left in this graph position with a current-frame
-                            // graphics dependency is voxel_water_refl, which keeps its legacy host wait.
-                            boolean synchronousWait = isVoxelWaterReflPass(p);
+                            // Nothing here reads what graphics writes later in the same frame, so
+                            // nothing has to make the host wait on a fence.
+                            boolean synchronousWait = false;
                             long dependencyWaitNanos = runner.run(r, computeParams(p, width, height), options, globals,
                                     computeExtraPushConstants(p, matrices, x, y, z),
                                     computeDispatchOverride(p), synchronousWait,
@@ -1368,6 +1368,8 @@ public final class GraphRunner {
             timer.bracketEnd(FrameProfiler.LABEL_FRAME);
             timer.endFrame();
         }
+
+        dev.icehunter.fornax.debug.FullscreenCapture.endFrame();
 
         // Finish-opaque capture of the engine-owned builtin.depth_opaque copy -- see OpaqueDepth's own
         // doc for why this must be a copy (the live G-buffer depth is bound for depth-testing during
@@ -2138,10 +2140,9 @@ public final class GraphRunner {
      * from {@code u_SkyCelestial}, because the silver lining belongs on the sun's side of the sky
      * even after the moon has taken over lighting.
      *
-     * <p>{@code glint_occlusion} is a screen-space raymarch pass for the water glitter's sun/moon
-     * occlusion. Deriving its own light direction from {@code u_SkyCelestial} by assuming the moon
-     * sits exactly antipodal to the sun would be wrong for the moon (sun glitter works, moon glitter
-     * never appears even fully unobstructed), so it instead reads the same real
+     * <p>Every {@code glint_occlusion} pass, base or refinement, gets the same live sun and moon
+     * values. Treating the moon as sitting exactly opposite the sun is wrong (sun glitter works,
+     * moon glitter never appears), so it reads the same real
      * {@code u_SunDirection.xyz} every other glitter-relevant site uses, same as
      * {@code water_composite}.
      *
@@ -2153,11 +2154,12 @@ public final class GraphRunner {
     static boolean wantsSunAndDebugParams(String name) {
         return name.equals("resolve") || name.startsWith("resolve_hdr")
                 || name.equals("tonemap") || name.equals("water_composite")
+                || name.equals("voxel_water_reflection")
                 || name.startsWith("water_volume_march")
                 || name.equals("water_volume_scatter_history")
                 || name.equals("ssr_water_fill") || name.equals("direct_light_analytic")
                 || name.startsWith("clouds_march") || name.equals("cloud_shadow_mask")
-                || name.equals("glint_occlusion");
+                || name.startsWith("glint_occlusion");
     }
 
     /**
@@ -2222,6 +2224,8 @@ public final class GraphRunner {
             // the same screen distance the surrounding opaque terrain's fog does -- a different
             // anchor here would show as a border-fog seam at the water's edge. u_SunDirection feeds
             // its light-normal specular lobe. u_Param3 (debug-view id) is harmless-unused for it.
+            // voxel_water_reflection lights real world hits, so it needs the same sun and terrain
+            // distance. A zero u_Param2 or an overhead sun would drift from the terrain.
             // ssr_water_fill needs the exact same u_Param2 anchor as water_composite, for the same
             // reason: its own per-voxel-hit aerial fog border term must dissolve at the identical
             // screen distance, or the voxel fill would show a border-fog seam where render distance
@@ -2402,13 +2406,20 @@ public final class GraphRunner {
         return p.type() == PassType.COMPUTE
                 && (isEmitterLightPass(p)
                 || p.name().equals("light_list_reset")
-                || isLightListBuildPass(p));
+                || isLightListBuildPass(p)
+                || isVoxelWaterReflPass(p));
     }
 
-    /** The voxel water reflection compute pass, recognized by name (the isEmitterLightPass
-     * name-keying precedent): its dispatch is engine-computed from the live render resolution (a
-     * screen-space domain, unlike the emitter passes' voxel-window domain) and its submit is
-     * synchronously fence-waited before the same-frame debug/composite pass reads the SSBO back. */
+    /**
+     * The voxel water reflection compute pass, known by name like isEmitterLightPass. Its dispatch
+     * comes from the live render size, not the voxel window.
+     *
+     * <p>It runs with the pre-opaque producers because it reads the water surface a pack kept from
+     * the PREVIOUS frame. The live one is written after {@code prepare()}, so binding it here
+     * throws; a host fence costs 20.6 ms for 2.7 ms of work and orders the wrong pair; a semaphore
+     * needs the encoder closed mid-frame, which splits an Apple tile pass. A frame-old surface is
+     * invisible, a split tile pass is not.
+     */
     private static boolean isVoxelWaterReflPass(PassSpec p) {
         return p.name().equals("voxel_water_refl");
     }

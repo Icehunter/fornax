@@ -173,6 +173,8 @@ public final class VoxelDebugRaymarchPass {
     // --- Per-frame streaming state (render thread) ---
     private static boolean active;
     private static int currentDiameter = -1;
+    @Nullable
+    private static TargetRegistry allocatedRegistry;
     private static long lastCameraSection = Long.MIN_VALUE; // packed section coord, sentinel = never centered
     private static boolean cameraCaptured;
 
@@ -275,6 +277,7 @@ public final class VoxelDebugRaymarchPass {
             lastCameraSection = sectionKey;
         }
 
+        if (level != null) VoxelWindow.refreshLightmaps(level);
         publishVoxelTelemetry();
 
         // Capture this frame's camera for presentIfEnabled: invViewProj maps NDC -> camera-relative
@@ -372,8 +375,9 @@ public final class VoxelDebugRaymarchPass {
     public static void ensureGridAllocated(TargetRegistry registry) {
         int diameter = 2 * currentRadius() + 1;
         // (Re)allocate the brick-grid buffers only on first enable or a radius change -- not per frame.
-        if (!active || diameter != currentDiameter) {
-            BrickGridUpload.ensureAllocated(registry, diameter);
+        if (registry != allocatedRegistry || diameter != currentDiameter) {
+            VoxelWindow.initializeStorage(registry, diameter);
+            allocatedRegistry = registry;
             currentDiameter = diameter;
             lastCameraSection = Long.MIN_VALUE; // force a recenter+resync at the new size
         }
@@ -427,6 +431,7 @@ public final class VoxelDebugRaymarchPass {
         }
         active = false;
         currentDiameter = -1;
+        allocatedRegistry = null;
         lastCameraSection = Long.MIN_VALUE;
         cameraCaptured = false;
         VoxelWindow.attachRegistry(null);

@@ -69,6 +69,22 @@ reconstruction filter. A look (a tonemap curve, a colour grade, a sky model) bel
 GLSL constants follow `.claude/rules/clean-room.md`: physically derived constants cite their paper;
 authored constants say why they are what they are.
 
+## Which GLSL version a shader gets
+
+Raster passes are `#version 330`, compute passes `#version 450`. 330 has no compute shaders, no
+SSBOs, no `std430`, no writable storage images, no atomics, no `shared` memory and no real memory
+barriers, so anything touching a buffer or talking between invocations has to be 450. Descriptor
+sets, explicit bindings, push constants, specialization constants and subpass inputs are Vulkan
+GLSL only, in neither version.
+
+A higher version is a different language, not a superset: nothing rewrites new syntax into old, and
+450 buys no speed. Do not raise a raster pass to reach one function. Ask for the function instead:
+`#extension GL_ARB_shading_language_packing : require` turns on `unpackHalf2x16` and nothing else,
+which is how `ssr_trace_water.fsh` reads the half-packed voxel reflection buffer.
+
+A shared include stays 330-safe unless only compute reads it. A 450-only feature in a shared include
+breaks every raster file that reads it, and the error names that file, not the include.
+
 ## Frames in flight
 
 Per-pass GPU timing (`profile.PassTimer`) is ring-buffered across frames in flight; anything that
@@ -77,6 +93,7 @@ reads a GPU result the frame it was written is wrong. The profiler grades agains
 
 ## Checklist
 
+- [ ] Raster pass is `#version 330`, compute is `450`; no version raised just to reach one function
 - [ ] No scalar added after a vec3 in any std140 block
 - [ ] Uniform block byte-size assertion updated alongside the layout
 - [ ] Depth code written for reversed-Z

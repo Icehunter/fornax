@@ -162,6 +162,13 @@ public final class TargetRegistry implements AutoCloseable {
         return spec == null ? TargetFilter.NEAREST : spec.filter();
     }
 
+    /** Whether an optional engine-owned buffer was declared and enabled by this graph. */
+    public boolean isEnabledBufferTarget(String name) {
+        TargetSpec spec = graph.targets().get(name);
+        return spec != null && spec.kind() == TargetKind.BUFFER
+                && (spec.enabledIf() == null || EnabledIfExpr.parse(spec.enabledIf()).evaluate(compileValues));
+    }
+
     /** True only for a graph-owned texture explicitly declared storage-capable. */
     public boolean isStorageTexture(String name) {
         if (name.endsWith(".history")) {
@@ -345,6 +352,12 @@ public final class TargetRegistry implements AutoCloseable {
      * {@code VK_WHOLE_SIZE}) per the Vulkan spec -- callers must pass a 4-byte-aligned size.
      */
     public void ensureBufferSize(String name, long sizeBytes) {
+        ensureBufferSize(name, sizeBytes, 0);
+    }
+
+    /** Fills a new buffer with this 32-bit word before the handle is published. A buffer that
+     * keeps its size keeps its data: the word is written only on allocation or resize. */
+    public void ensureBufferSize(String name, long sizeBytes, int initialWord) {
         if (sizeBytes <= 0L) {
             throw new IllegalArgumentException("buffer size must be positive; use releaseBuffer() to free '" + name + "'");
         }
@@ -437,7 +450,7 @@ public final class TargetRegistry implements AutoCloseable {
                 }
                 long vkBuffer = bufferOut.get(0);
                 long vmaAllocation = allocationOut.get(0);
-                clearBuffer(backend, vkBuffer, sizeBytes);
+                clearBuffer(backend, vkBuffer, sizeBytes, initialWord);
 
                 if (existing != null) {
                     // Retire the OLD buffer instead of destroying it here -- see #retiring's own doc.
@@ -471,15 +484,15 @@ public final class TargetRegistry implements AutoCloseable {
     }
 
     /**
-     * Zero-fills a freshly (re)allocated buffer -- MoltenVK does not zero-fill new VRAM, the same
+     * Fills a just-(re)allocated buffer. MoltenVK does not zero-fill new VRAM, the same
      * law {@link #clear(GpuDevice, GpuTextureView)} already enforces for every texture target.
      */
-    private static void clearBuffer(VulkanComputeBackend backend, long vkBuffer, long sizeBytes) {
+    private static void clearBuffer(VulkanComputeBackend backend, long vkBuffer, long sizeBytes, int initialWord) {
         VkCommandBuffer cmd = backend.commandPool().allocateBuffer();
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack).sType$Default();
             VK13.vkBeginCommandBuffer(cmd, beginInfo);
-            VK13.vkCmdFillBuffer(cmd, vkBuffer, 0, sizeBytes, 0);
+            VK13.vkCmdFillBuffer(cmd, vkBuffer, 0, sizeBytes, initialWord);
             VK13.vkEndCommandBuffer(cmd);
         }
         try (var submission = backend.computeQueue().beginSubmit()) {

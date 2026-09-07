@@ -2,6 +2,7 @@ package dev.icehunter.fornax.profile;
 
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.config.FornaxConfig;
+import dev.icehunter.fornax.config.FornaxSettings;
 import dev.icehunter.fornax.pack.graph.GraphRunner;
 import dev.icehunter.fornax.pass.FrameGenPresenter;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElement;
@@ -13,9 +14,11 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Top-left corner HUD: per-pass avg/p95 GPU timings graded against {@link ProfilerLogDump#BUDGET_MS},
@@ -41,8 +44,12 @@ public final class ProfilerOverlay implements HudElement {
     private static final int RED = 0xFFE06666;
     private static final int LABEL_COLOR = 0xFFE0E0E0;
     private static final String UNAVAILABLE_LINE = "timestamps unavailable";
+    /** How many pass rows survive {@code FornaxSettings#overlayTopPassesOnly}. */
+    public static final int TOP_PASS_ROWS = 10;
 
     private boolean hasCached;
+    /** True when the profiler holds no pass timings at all, as opposed to the player hiding them. */
+    private boolean cachedUnavailable;
     private long lastRefreshNanos;
     private List<FrameProfiler.Stat> cachedPasses = List.of();
     private List<FrameProfiler.ValueStat> cachedValues = List.of();
@@ -81,7 +88,7 @@ public final class ProfilerOverlay implements HudElement {
         refreshIfDue();
 
         Font font = Minecraft.getInstance().font;
-        int lineCount = cachedPasses.isEmpty()
+        int lineCount = cachedUnavailable
                 ? 1
                 : cachedPasses.size() + cachedValues.size() + 1 + (cachedFrameGenLine != null ? 1 : 0);
         int x = 4;
@@ -92,7 +99,7 @@ public final class ProfilerOverlay implements HudElement {
         g.fill(x, y, x + width, y + height, PANEL_COLOR);
         int textY = y + PAD;
 
-        if (cachedPasses.isEmpty()) {
+        if (cachedUnavailable) {
             g.text(font, UNAVAILABLE_LINE, x + PAD, textY, LABEL_COLOR);
             return;
         }
@@ -128,8 +135,11 @@ public final class ProfilerOverlay implements HudElement {
         lastRefreshNanos = now;
 
         FrameProfiler profiler = GraphRunner.frameProfiler();
-        cachedPasses = passesOnly(profiler.snapshot());
-        cachedValues = profiler.valueSnapshot();
+        FornaxSettings settings = FornaxConfig.get();
+        List<FrameProfiler.Stat> passes = passesOnly(profiler.snapshot());
+        cachedUnavailable = passes.isEmpty();
+        cachedPasses = visiblePasses(passes, settings.overlayShowPasses, settings.overlayTopPassesOnly);
+        cachedValues = settings.overlayShowCounters ? profiler.valueSnapshot() : List.of();
         cachedFrameTotalMs = profiler.frameTotalMs();
         cachedFrameGenLine = FrameGenPresenter.overlayLine();
 
@@ -146,6 +156,25 @@ public final class ProfilerOverlay implements HudElement {
             widest = Math.max(widest, font.width(cachedFrameGenLine));
         }
         cachedWidth = widest + PAD * 2;
+    }
+
+    /**
+     * {@code showPasses} off drops every pass row. {@code topOnly} keeps the {@link #TOP_PASS_ROWS}
+     * slowest, in graph order, so a row does not jump around as timings move.
+     */
+    static List<FrameProfiler.Stat> visiblePasses(List<FrameProfiler.Stat> passes, boolean showPasses, boolean topOnly) {
+        if (!showPasses) {
+            return List.of();
+        }
+        if (!topOnly || passes.size() <= TOP_PASS_ROWS) {
+            return passes;
+        }
+        List<FrameProfiler.Stat> slowest = passes.stream()
+                .sorted(Comparator.comparingDouble(FrameProfiler.Stat::avgMs).reversed())
+                .limit(TOP_PASS_ROWS)
+                .toList();
+        Set<String> keep = slowest.stream().map(FrameProfiler.Stat::label).collect(Collectors.toSet());
+        return passes.stream().filter(stat -> keep.contains(stat.label())).toList();
     }
 
     /**

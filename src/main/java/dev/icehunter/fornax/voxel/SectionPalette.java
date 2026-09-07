@@ -31,8 +31,9 @@ public final class SectionPalette {
      * faceColors} when it is zero.
      *
      * <p>{@code cutout} (cutout/cross milestone) marks a voxel whose real appearance is alpha-tested
-     * rather than fully opaque -- {@code MaterialScalars.isCutout(categoryId)}, propagated verbatim
-     * from blocks.toml. Only ever {@code true} when {@code shapeKind} is {@code FULL} (a real cube
+     * rather than fully opaque. It is read from the baked quad material layers, or from a
+     * {@code MaterialScalars.isCutout(categoryId)} tag. Only ever {@code true} when
+     * {@code shapeKind} is {@code FULL} (a real cube
      * with an alpha-cutout texture, e.g. leaves) or {@code CROSS} (billboard geometry, e.g. grass);
      * SectionHarvester never sets it for {@code PARTIAL}/{@code EMPTY} shapes (no meaningful UV rect
      * to alpha-test against for those). {@code uvRect} is the block's real atlas sprite rect ({@code
@@ -61,8 +62,11 @@ public final class SectionPalette {
     public record Entry(VoxelShapeKind shapeKind, List<VoxelShapeClassifier.PackedBox> boxes,
                          int[] faceColors, double emissiveStrength, boolean lightTransmissive,
                          int emissionColor, boolean cutout, float[] uvRect, float extinction,
-                         int faceSealMask) {
+                         int faceSealMask, int[] faceTextureWords) {
         public Entry {
+            if (faceTextureWords.length != VoxelFaceTexture.ENTRY_WORDS) {
+                throw new IllegalArgumentException("faceTextureWords must contain 48 words");
+            }
             if (faceColors.length != 6) {
                 throw new IllegalArgumentException("faceColors must have exactly 6 entries, got " + faceColors.length);
             }
@@ -72,6 +76,13 @@ public final class SectionPalette {
             if ((faceSealMask & ~FaceSealResolver.ALL) != 0) {
                 throw new IllegalArgumentException("faceSealMask contains bits outside the six faces: " + faceSealMask);
             }
+        }
+
+        public Entry(VoxelShapeKind shapeKind, List<VoxelShapeClassifier.PackedBox> boxes,
+                     int[] faceColors, double emissiveStrength, boolean lightTransmissive,
+                     int emissionColor, boolean cutout, float[] uvRect, float extinction, int faceSealMask) {
+            this(shapeKind, boxes, faceColors, emissiveStrength, lightTransmissive, emissionColor,
+                    cutout, uvRect, extinction, faceSealMask, new int[VoxelFaceTexture.ENTRY_WORDS]);
         }
 
         public Entry(VoxelShapeKind shapeKind, List<VoxelShapeClassifier.PackedBox> boxes,

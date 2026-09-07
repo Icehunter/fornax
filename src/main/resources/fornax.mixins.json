@@ -3,6 +3,7 @@
   "package": "dev.icehunter.fornax.mixin",
   "compatibilityLevel": "JAVA_25",
   "client": [
+    "vanilla.ClientChunkCacheVoxelLightMixin",
     "sodium.BlockRendererMaterialIdMixin",
     "sodium.ChunkBuilderMeshingTaskMixin",
     "sodium.ChunkVertexFactsMixin",

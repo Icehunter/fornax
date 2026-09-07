@@ -23,7 +23,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * Harvests each section's real block data for the voxel grid the moment Sodium (re)builds it --
  * reusing Sodium's own change-detection (a block edit already triggers a rebuild; this just piggybacks
  * on that event) rather than building a second one. Runs on Sodium's background chunk-build worker
- * thread, once per section (re)build -- never per-frame.
+ * thread, once per section (re)build, never per frame. It sits just after BlockRenderCache.init:
+ * at the head of execute the slice still holds the previous task, and the tint and light need this
+ * one.
  *
  * <p><b>Injection target note:</b> this method exists twice in the compiled class due to generic
  * erasure -- the real method returning {@code ChunkBuildOutput}, and a compiler-generated bridge
@@ -44,7 +46,9 @@ public abstract class ChunkBuilderMeshingTaskMixin {
     @Inject(method = "execute(Lnet/caffeinemc/mods/sodium/client/render/chunk/compile/ChunkBuildContext;"
             + "Lnet/caffeinemc/mods/sodium/client/util/task/CancellationToken;)"
             + "Lnet/caffeinemc/mods/sodium/client/render/chunk/compile/ChunkBuildOutput;",
-            at = @At("HEAD"))
+            at = @At(value = "INVOKE", target = "Lnet/caffeinemc/mods/sodium/client/render/chunk/compile/pipeline/"
+                    + "BlockRenderCache;init(Lnet/caffeinemc/mods/sodium/client/world/cloned/ChunkRenderContext;)V",
+                    shift = At.Shift.AFTER))
     private void fornax$harvestSection(ChunkBuildContext buildContext, CancellationToken cancellationToken,
                                         CallbackInfoReturnable<ChunkBuildOutput> cir) {
         SectionPos origin = this.renderContext.getOrigin();
@@ -55,25 +59,16 @@ public abstract class ChunkBuilderMeshingTaskMixin {
         }
 
         PalettedContainerRO<BlockState> blockData = center.getBlockData();
-        // Never let a harvest failure abort Sodium's real mesh build (livefix, cave/edge-shimmer
-        // regression, 2026-07-19): this hook is injected at HEAD of Sodium's own execute(), so an
-        // uncaught exception here propagates exactly as if thrown from the start of that method --
-        // Sodium's own real chunk-mesh-building body never runs, and that section's real terrain
-        // silently never gets drawn (depth reads 0/"nothing here" for its whole screen footprint,
-        // same as open sky). SectionHarvester.harvest walks every distinct block state's REAL baked
-        // model (FaceColorResolver.resolveCrossGeometry/resolveCutoutRect, new this session) via
-        // Minecraft's own model-manager APIs -- exactly the kind of call that can throw for an
-        // edge-case block state this codebase hasn't seen yet. The `findCenter == null` check just
-        // above already states the governing principle ("never throw from a mixin hook"); this
-        // extends it to the much larger, less-audited harvest call. A caught failure here means that
-        // ONE section's voxel occupancy/shadow data is stale/missing until the next successful
-        // rebuild -- a small, contained gap -- instead of a whole missing render mesh masquerading
-        // as open sky (which explained a real, live-reported bug: a bright procedural-sky disc and
-        // sun-direction-correlated shimmer on cave walls, identical in every debug view including
-        // ones that run before any fog/lighting code, because no terrain was drawn there at all).
+        // Never throw from this hook. It runs inside Sodium's own execute(), so a throw leaves the
+        // section undrawn and its depth reads 0, like open sky. harvest() walks real baked models
+        // through Minecraft's model APIs and can throw on a block state this code has not seen; a
+        // caught failure costs one section's voxel data until the next rebuild.
         try {
+            // Sodium's own world slice. Without it grass, leaves and vines are stored atlas-grey.
             SectionHarvester.Result result = SectionHarvester.harvest(blockData,
-                    MaterialScalarsHolder.current());
+                    MaterialScalarsHolder.current(),
+                    buildContext.cache.getWorldSlice(),
+                    origin.minBlockX(), origin.minBlockY(), origin.minBlockZ());
             VoxelWindow.onSectionHarvested(origin, result);
         } catch (Throwable t) {
             FornaxMod.LOGGER.error("Voxel harvest failed for section {} -- Sodium's own mesh build "

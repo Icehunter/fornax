@@ -57,7 +57,8 @@ public final class OpaqueDepth {
             return;
         }
 
-        int usage = GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST
+        // COPY_SRC so a raw pass capture can read this copy. Depth drawing does not use it.
+        int usage = GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC
                 | GpuTexture.USAGE_RENDER_ATTACHMENT;
         // Hoisted so a failure creating the view or clearing doesn't orphan whatever already
         // succeeded, with no reference left anywhere to close it.

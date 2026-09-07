@@ -3,9 +3,14 @@ package dev.icehunter.fornax.voxel;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.pack.material.BlockMaterials;
 import dev.icehunter.fornax.pack.material.MaterialScalars;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.color.block.BlockTintSource;
+import net.minecraft.client.renderer.block.BlockAndTintGetter;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainerRO;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -47,13 +52,35 @@ public final class SectionHarvester {
     /** Distinct states already reported by the cutout-drop diagnostic below, so a chunk-load storm logs each once. */
     private static final java.util.Set<String> CUTOUT_DROP_LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    public record Result(byte[] paletteIndices, SectionPalette palette) {
+    public record Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap) {
+        public Result {
+            if (lightmap.length != VoxelLightmap.BYTES_PER_SLOT)
+                throw new IllegalArgumentException("voxel lightmap must contain one byte per section cell");
+        }
+        public Result(byte[] paletteIndices, SectionPalette palette) {
+            this(paletteIndices, palette, new byte[VoxelLightmap.BYTES_PER_SLOT]);
+        }
     }
 
     private SectionHarvester() {
     }
 
+    /** No tint: grass, leaves, vines and water come back atlas-grey. Pass a tint if you have one. */
     public static Result harvest(PalettedContainerRO<BlockState> blockData, MaterialScalars materialScalars) {
+        return harvest(blockData, materialScalars, null, 0, 0, 0);
+    }
+
+    /**
+     * @param tintSource a thread-safe world view, or null for no tint. On Sodium's build thread this
+     *                   is its own {@code LevelSlice}, the view it tints its terrain through.
+     * @param originX    section corner in world blocks. The tint is read once at the middle: the
+     *                   palette is per-section and biome colour moves slower than 16 blocks.
+     */
+    public static Result harvest(PalettedContainerRO<BlockState> blockData, MaterialScalars materialScalars,
+                                 @Nullable BlockAndTintGetter tintSource,
+                                 int originX, int originY, int originZ) {
+        BlockPos tintAt = tintSource == null
+                ? null : new BlockPos(originX + 8, originY + 8, originZ + 8);
         Map<BlockState, Integer> indexByState = new IdentityHashMap<>();
         List<SectionPalette.Entry> entries = new ArrayList<>();
         boolean[] overflowLogged = {false};
@@ -74,7 +101,7 @@ public final class SectionHarvester {
                 return;
             }
             indexByState.put(state, entries.size());
-            entries.add(buildEntry(state, materialScalars));
+            entries.add(buildEntry(state, materialScalars, biomeTint(state, tintSource, tintAt)));
         });
 
         byte[] paletteIndices = new byte[16 * 16 * 16];
@@ -99,35 +126,44 @@ public final class SectionHarvester {
         // happens to have EXACTLY MAX_PALETTE_ENTRIES distinct states with no overflow would also report).
         PaletteSizeHistogram.record(entries.size(), overflowLogged[0]);
 
-        return new Result(paletteIndices, new SectionPalette(entries));
+        return new Result(paletteIndices, new SectionPalette(entries),
+                VoxelLightmap.capture(tintSource, originX, originY, originZ));
     }
 
-    private static SectionPalette.Entry buildEntry(BlockState state, MaterialScalars materialScalars) {
+    /**
+     * The biome colour as 0x00RRGGBB, or -1 (white, which multiplies to nothing) when the state has
+     * no tint. Vanilla answers -1 for every untinted block, so no list of tinted blocks is needed.
+     *
+     * <p>Never throws: a tint is worth less than the mesh build this hook sits in.
+     */
+    private static int biomeTint(BlockState state, @Nullable BlockAndTintGetter tintSource,
+                                 @Nullable BlockPos tintAt) {
+        if (tintSource == null || tintAt == null) {
+            return -1;
+        }
+        try {
+            // MC 26.2 answers with a per-layer tint source, not one getColor call. Layer 0 is the
+            // one grass, leaves, vines and water carry; no source means no tint.
+            BlockTintSource source = Minecraft.getInstance().getBlockColors().getTintSource(state, 0);
+            if (source == null) {
+                return -1;
+            }
+            return source.colorInWorld(state, tintSource, tintAt) | 0xFF000000;
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private static SectionPalette.Entry buildEntry(BlockState state, MaterialScalars materialScalars,
+                                                   int tint) {
         VoxelShapeClassifier.ClassifiedShape shape = VoxelShapeClassifier.classify(state);
         int categoryId = BlockMaterials.idForState(state);
 
-        // Cutout/cross milestone: blocks.toml's id-only cutout/cross flags (MaterialScalars.isCutout/
-        // isCross, mirroring CategorySpec.cutout()/cross()) reclassify a harvested voxel's occlusion
-        // shape and capture the real atlas UV rect celestial_shadow.fsh needs for a per-texel alpha
-        // test, INSTEAD OF trusting VoxelShapeClassifier's vanilla getShape()-derived kind for these
-        // two categories specifically. This runs BEFORE the shape.kind()-gated face-color loop below
-        // so effectiveKind can override which branch that loop takes.
-        //
-        // CROSS: vanilla's real getShape() for a plant like short_grass returns a small, non-empty
-        // selection box (used for the outline/hit-test reticle), which VoxelShapeClassifier classifies
-        // PARTIAL -- that box is what the pre-cutout-milestone code marched a ray against, giving grass
-        // a tiny, per-frame-jitter-unstable box occluder (the exact "warping shadow blocks" bug this
-        // milestone fixes). A cross-tagged category overrides shapeKind to CROSS unconditionally when
-        // FaceColorResolver finds real unculled cross-quad geometry, discarding VoxelShapeClassifier's
-        // small-box classification for these blocks entirely (the CROSS kind exists in VoxelShapeKind
-        // specifically for this -- see that enum's own doc comment, "assigned later, in per-face color
-        // resolution, which already has to walk the block's real model quads").
-        //
-        // CUTOUT-only (leaves): shapeKind stays whatever VoxelShapeClassifier resolved (real leaves are
-        // FULL, a genuine solid cube) -- only the UV rect + cutout flag are added, so a leaf voxel keeps
-        // its normal six real face colors AND gains a per-texel alpha test on top.
-        boolean cutoutTag = materialScalars.isCutout(categoryId);
-        boolean crossTag = materialScalars.isCross(categoryId);
+        // The material layer and quad shape come from the model; a pack tag also counts.
+        FaceColorResolver.Surface surface = shape.kind() == VoxelShapeKind.EMPTY
+                ? new FaceColorResolver.Surface(false, false) : FaceColorResolver.surface(state);
+        boolean cutoutTag = surface.cutout() || materialScalars.isCutout(categoryId);
+        boolean crossTag = surface.cross() || materialScalars.isCross(categoryId);
         VoxelShapeKind effectiveKind = shape.kind();
         List<VoxelShapeClassifier.PackedBox> effectiveBoxes = shape.boxes();
         float[] uvRect = SectionPalette.NO_UV_RECT;
@@ -157,14 +193,14 @@ public final class SectionHarvester {
                 extinction = FoliageDensityResolver.resolveExtinction(state);
             }
         }
-        // DIAGNOSTIC (2026-07-20): a block blocks.toml TAGGED cutout that nonetheless harvests as a solid
+        // DIAGNOSTIC: a block classified as cutout that nonetheless harvests as a solid
         // occluder is invisible from the outside -- the shadow shader just treats it as an opaque cube, so
         // every foliage-transmission setting looks identical and the canopy self-shadows with no clue why.
         // Logged once per distinct state (this runs per palette entry, i.e. once per state per section, so
         // the set keeps a busy chunk-load from spamming). Remove once the leaf path is confirmed.
         if ((cutoutTag || crossTag) && !cutout && CUTOUT_DROP_LOGGED.add(state.toString())) {
             FornaxMod.LOGGER.warn(
-                    "[Fornax] {} is tagged cutout/cross in blocks.toml but harvested as a SOLID occluder "
+                    "[Fornax] {} has cutout/cross geometry or tags but harvested as a SOLID occluder "
                             + "(shape={}, crossTag={}, cutoutTag={}) -- no UV rect could be resolved from its "
                             + "baked model, so foliage light transmission will not apply to it",
                     state, effectiveKind, crossTag, cutoutTag);
@@ -200,7 +236,8 @@ public final class SectionHarvester {
                 // oversight: resolving a face that turns out to be buried is wasted work, but resolving
                 // it costs nothing MORE than what FaceColorResolver already does once per distinct
                 // state, which is already the cheap path (palette-sized, not voxel-sized).
-                faceColors[dir.get3DDataValue()] = FaceColorResolver.resolve(state, dir);
+                // One tint per entry; the per-quad tint index picks which quads take it.
+                faceColors[dir.get3DDataValue()] = FaceColorResolver.resolve(state, dir, tint);
             }
         }
 
@@ -217,7 +254,9 @@ public final class SectionHarvester {
                 && state.getLightDampening() < net.minecraft.world.level.lighting.LightEngine.MAX_LEVEL;
 
         return new SectionPalette.Entry(effectiveKind, effectiveBoxes, faceColors, emissiveStrength,
-                lightTransmissive, emissionColor, cutout, uvRect, extinction);
+                lightTransmissive, emissionColor, cutout, uvRect, extinction,
+                FaceSealResolver.resolve(effectiveKind, effectiveBoxes),
+                VoxelFaceTexture.resolve(state, effectiveKind, tint));
     }
 
     /** See the call site above -- extracted pure so the tagged/untagged/off-lamp matrix is directly

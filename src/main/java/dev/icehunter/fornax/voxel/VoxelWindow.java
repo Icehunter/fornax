@@ -1,6 +1,7 @@
 package dev.icehunter.fornax.voxel;
 
 import dev.icehunter.fornax.pack.graph.TargetRegistry;
+import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.Level;
 import org.jspecify.annotations.Nullable;
@@ -28,26 +29,10 @@ import java.util.function.LongConsumer;
  * new window cube minus the old one), falling back to a full-window scan only when the move is too
  * large to overlap the old window or the radius changed (see {@link #enumerateResyncShell}).
  *
- * <p>{@code slotOwner}/{@code slotData} are {@link ConcurrentHashMap} rather than plain {@code
- * HashMap} because {@link #onSectionHarvested} is invoked from background threads: Sodium's
- * multi-threaded chunk-build worker pool (confirmed via {@code javap} on {@code ChunkBuilder.class}
- * -- multiple concurrent background threads, not one), AND this class's own single-threaded {@link
- * #RESYNC_EXECUTOR} which runs the DEFERRED tail of the shell harvest+upload that {@link
- * #recenterAndResync} dispatches off the render thread. {@link #recenter} itself, and the
- * render-thread portion of {@link #recenterAndResync} (the geometry publish, the occupancy clear, the
- * bounded {@link #SYNC_BUDGET} synchronous harvest, and the {@code execute} submission for the
- * remainder), still run on the main/render thread -- the synchronous harvest and {@link
- * #RESYNC_EXECUTOR}'s deferred tail both run through {@link #harvestAndUploadBatch}, which calls the
- * same {@link #recordHarvest} bookkeeping {@link #onSectionHarvested} itself uses (batching only the
- * GPU write via {@link BrickGridUpload#uploadSlots}, see that method's own doc), serialized against
- * Sodium's workers the same way (see {@code VulkanComputeBackend.SHARED_QUEUE_LOCK}, already taken
- * from the render thread elsewhere in this flow by {@link BrickGridUpload#clearOccupancySlots}), so
- * no new synchronization was introduced. A plain {@code HashMap} under concurrent writes can corrupt
- * its internal bucket structure (lost entries, infinite loops on resize); {@code ConcurrentHashMap}
- * makes every individual {@code get}/{@code put} thread-safe. No compound check-then-act spans both
- * maps here -- {@code recordHarvest} writes both maps independently for the same slot key, and readers
- * (`slotFor`/`hasValidData`) only need eventually-consistent state, not atomicity between the two
- * maps -- so per-map thread safety is sufficient without a stronger lock.
+ * <p>The owner and data maps are concurrent because read-only checks run beside harvesting.
+ * Publishing a slot and swapping the GPU storage both take {@code
+ * VulkanComputeBackend.SHARED_QUEUE_LOCK}, and queued work carries the storage generation it was
+ * submitted under, so a task from old storage cannot touch the new buffers.
  *
  * <p>The window's geometry ({@code centerX}/{@code centerY}/{@code centerZ}/{@code radius}/{@code
  * diameter}) is subject to the same cross-thread access: {@link #recenter} writes it from the main
@@ -77,6 +62,29 @@ public final class VoxelWindow {
      * clamps radius to at least 1), so the first {@link #recenterAndResync} sees a radius change and
      * takes the full-window-scan path, correctly populating the whole initial window. */
     private static volatile WindowState state = WindowState.of(0, 0, 0, 0);
+
+    // Take the upload lock so a checked batch cannot meet a resize before it writes.
+    private static volatile long storageGeneration;
+    private static final VoxelLightUpdates lightUpdates = new VoxelLightUpdates();
+
+    private static void invalidateStorage() {
+        storageGeneration++;
+        lightUpdates.clear();
+        state = WindowState.of(0, 0, 0, 0);
+        slotOwner.clear();
+        slotData.clear();
+        populatedSlots.clear();
+    }
+
+    /** Swaps or resizes the storage and its ownership in one go, before any worker can publish. */
+    public static void initializeStorage(TargetRegistry newRegistry, int diameter) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            invalidateStorage();
+            registry = null;
+            BrickGridUpload.ensureAllocated(newRegistry, diameter);
+            registry = newRegistry;
+        }
+    }
 
     /** The window's current geometry snapshot -- one volatile read, safe to call from any thread
      * (mirrors every other reader here, see the class javadoc). Used by {@code GraphRunner} to size a
@@ -236,7 +244,12 @@ public final class VoxelWindow {
      * threads, reach the same registry instance without this class owning or constructing one itself.
      * Pass {@code null} to detach (e.g. on pack unload). */
     public static void attachRegistry(@Nullable TargetRegistry newRegistry) {
-        registry = newRegistry;
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            if (registry != newRegistry) {
+                invalidateStorage();
+                registry = newRegistry;
+            }
+        }
     }
 
     /** The registry currently attached (the one {@link #onSectionHarvested} uploads into), or {@code
@@ -290,28 +303,95 @@ public final class VoxelWindow {
     }
 
     public static void onSectionHarvested(SectionPos position, SectionHarvester.Result result) {
-        int slot = slotFor(position.x(), position.y(), position.z());
-        if (slot < 0) {
-            return; // harvested a section outside the current window -- discard, it'll be re-harvested if it enters the window later
-        }
-        // Bookkeeping (map/telemetry updates) is shared with the batched harvest paths -- see
-        // recordHarvest's own doc. Sodium's worker threads call this method directly (naturally paced
-        // by chunk (re)builds, not a burst), so it keeps its original one-slot-per-GPU-call shape
-        // rather than routing through the batch accumulator harvestAndUploadBatch uses.
-        boolean clearLight = recordHarvest(slot, position, result);
-
-        TargetRegistry r = registry;
-        if (r != null) {
-            // A slot claimed by a NEW section (recenter shell, or a section first entering the
-            // window) inherits the previous owner's propagated light -- zero it so light never
-            // ghosts across the window boundary. Same-section re-harvests (block edits) keep their
-            // light for fast re-convergence; the propagation automaton's per-iteration decay
-            // handles the edited geometry. See BrickGridUpload.clearLightSlot.
-            if (clearLight) {
-                BrickGridUpload.clearLightSlot(r, slot);
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            if (registry == null || state.radius() == 0) {
+                return; // no storage mapping exists until the first real camera recenter
             }
-            BrickGridUpload.uploadSlot(r, slot, result);
+            int slot = slotFor(position.x(), position.y(), position.z());
+            if (slot < 0) {
+                return; // outside the window: drop it, it comes back if the window reaches it
+            }
+            // Same bookkeeping as the batched paths, see recordHarvest. Sodium's workers arrive one
+            // at a time, so this writes one slot per GPU call instead of batching.
+            boolean clearLight = recordHarvest(slot, position, result);
+
+            TargetRegistry r = registry;
+            if (r != null) {
+                // A slot claimed by a NEW section still holds the last owner's spread light, so
+                // zero it. Re-harvesting the SAME section keeps its light so it settles fast.
+                if (clearLight) {
+                    BrickGridUpload.clearLightSlot(r, slot);
+                }
+                BrickGridUpload.uploadSlot(r, slot, result);
+            }
         }
+    }
+
+    /** Light changes with no mesh rebuild and off screen. Gathered until the next frame. */
+    public static void onSectionLightChanged(SectionPos position) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            if (registry != null && registry.isEnabledBufferTarget(VoxelLightmap.TARGET)
+                    && slotFor(position.x(), position.y(), position.z()) >= 0)
+                lightUpdates.changed(position);
+        }
+    }
+
+    /** Called every active voxel frame, even with the camera still. Runs on the resync worker, so
+     * the render thread never waits, and can queue behind resync work. */
+    public static void refreshLightmaps(Level level) {
+        final long generation;
+        final TargetRegistry capturedRegistry;
+        final Object worker;
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            capturedRegistry = registry;
+            if (capturedRegistry == null || !capturedRegistry.isEnabledBufferTarget(VoxelLightmap.TARGET)) return;
+            generation = storageGeneration;
+            worker = lightUpdates.beginWork();
+        }
+        if (worker == null) return;
+        RESYNC_EXECUTOR.execute(() -> {
+            try {
+                final List<SectionPos> positions;
+                synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+                    if (generation != storageGeneration || capturedRegistry != registry) return;
+                    // Take the list when the worker starts, so a busy resync queues one worker.
+                    positions = new ArrayList<>(lightUpdates.drain(p -> slotFor(p.x(), p.y(), p.z()) >= 0));
+                }
+                // The geometry uploader's starting batch size, rather than a second rule.
+                for (int start=0; start<positions.size(); start+=BatchSizeController.INITIAL_TARGET) {
+                    var sampled = new java.util.LinkedHashMap<SectionPos, byte[]>();
+                    int end = Math.min(positions.size(), start+BatchSizeController.INITIAL_TARGET);
+                    for (SectionPos position : positions.subList(start,end)) {
+                        if (generation != storageGeneration || capturedRegistry != registry) return;
+                        if (!hasValidData(position.x(),position.y(),position.z())) continue;
+                        try {
+                            sampled.put(position, VoxelLightmap.capture(level,
+                                    position.minBlockX(),position.minBlockY(),position.minBlockZ()));
+                        } catch (RuntimeException error) {
+                            onSectionLightChanged(position);
+                            dev.icehunter.fornax.FornaxMod.LOGGER.error("Voxel world-light refresh failed for {}", position, error);
+                        }
+                    }
+                    synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+                        if (generation != storageGeneration || capturedRegistry != registry) return;
+                        List<BrickGridUpload.SlotUpload> uploads = new ArrayList<>();
+                        for (var sample : sampled.entrySet()) {
+                            SectionPos position = sample.getKey();
+                            int slot = slotFor(position.x(),position.y(),position.z());
+                            if (slot < 0 || !position.equals(slotOwner.get(slot))) continue;
+                            SectionHarvester.Result previous = slotData.get(slot);
+                            if (previous == null) continue;
+                            var updated = new SectionHarvester.Result(previous.paletteIndices(), previous.palette(), sample.getValue());
+                            slotData.put(slot, updated);
+                            uploads.add(new BrickGridUpload.SlotUpload(slot,updated,false));
+                        }
+                        BrickGridUpload.uploadSlots(capturedRegistry,uploads);
+                    }
+                }
+            } finally {
+                lightUpdates.endWork(worker);
+            }
+        });
     }
 
     /** Recenters the window and dispatches harvest of the slots that the move newly exposed -- the
@@ -396,6 +476,7 @@ public final class VoxelWindow {
      * gracefully to nearest-first-only ordering ({@link #isFront} treats a zero dot product as front). */
     public static void recenterAndResync(int newCenterX, int newCenterY, int newCenterZ, int newRadius, Level level,
                                           float forwardX, float forwardY, float forwardZ) {
+        long generation = storageGeneration;
         WindowState previous = state;                                       // OLD geometry, captured BEFORE the overwrite (render thread)
         recenter(newCenterX, newCenterY, newCenterZ, newRadius);           // atomic volatile publish of the NEW geometry (render thread)
         WindowState next = state;                                          // the snapshot recenter() just published
@@ -435,7 +516,7 @@ public final class VoxelWindow {
         shell.sort(priorityComparator(newCenterX, newCenterY, newCenterZ, forwardX, forwardY, forwardZ));
         int syncCount = Math.min(SYNC_BUDGET, shell.size());
         if (syncCount > 0) {
-            harvestAndUploadBatch(level, shell.subList(0, syncCount), syncHarvestedTotal::addAndGet, null);
+            harvestAndUploadBatch(level, shell.subList(0, syncCount), syncHarvestedTotal::addAndGet, null, generation);
         }
         if (syncCount < shell.size()) {
             // Copy the deferred tail into its own list: `shell` is local to this call and safe to let
@@ -445,7 +526,7 @@ public final class VoxelWindow {
             List<SectionPos> deferred = new ArrayList<>(shell.subList(syncCount, shell.size()));
             pendingSlots.addAndGet(deferred.size());
             RESYNC_EXECUTOR.execute(() ->
-                    harvestAndUploadBatch(level, deferred, asyncHarvestedTotal::addAndGet, pendingSlots::decrementAndGet));
+                    harvestAndUploadBatch(level, deferred, asyncHarvestedTotal::addAndGet, pendingSlots::decrementAndGet, generation));
         }
     }
 
@@ -524,6 +605,7 @@ public final class VoxelWindow {
      * BrickGridUpload#clearLightSlot}'s own doc) -- leaving the actual GPU write to the caller's batch
      * entry ({@link BrickGridUpload.SlotUpload#clearLight()}). */
     private static boolean recordHarvest(int slot, SectionPos position, SectionHarvester.Result result) {
+        lightUpdates.meshPublished(position);
         SectionPos previousOwner = slotOwner.put(slot, position);
         slotData.put(slot, result);
         populatedSlots.add(slot); // harvest publish -- see the field's own doc
@@ -536,14 +618,8 @@ public final class VoxelWindow {
      * doc). For each position: skips it if already valid (mirrors the old {@code resyncPosition}'s
      * semantics exactly -- an in-window, correctly-owned slot needs no work), else attempts a {@link
      * DirectSectionReader#read} bootstrap; a real harvest runs {@link #recordHarvest} (bookkeeping,
-     * independent of whether a registry is attached, matching {@link #onSectionHarvested}'s own
-     * unconditional bookkeeping) and queues a {@link BrickGridUpload.SlotUpload} into the current
-     * batch. The batch flushes -- via {@link #flushBatch}, one {@link BrickGridUpload#uploadSlots} call
-     * -- whenever it reaches the current {@link BatchSizeController} target, and once more at the end
-     * for any partial remainder; a {@code null} registry skips the actual GPU call (matching {@link
-     * #onSectionHarvested}'s no-op-without-a-registry behavior) but still periodically clears the
-     * accumulator so an unattached-registry caller (rare -- no pack active) cannot let the batch list
-     * grow without limit across a huge {@code positions}.
+     * only while its captured storage generation is current) and queues a slot upload. New storage
+     * stops that task publishing or reading, though its processed count still drains.
      *
      * <p>{@code onHarvestedBatch} is invoked once per flush (sync or "clear-only" no-GPU flush alike)
      * with the count of REAL harvests that flush contained, and once more after the loop for any
@@ -555,21 +631,23 @@ public final class VoxelWindow {
      * tail-drain to decrement {@link #pendingSlots} per position exactly as the old {@code
      * resyncPosition} call site did. */
     private static void harvestAndUploadBatch(Level level, List<SectionPos> positions,
-                                               LongConsumer onHarvestedBatch, @Nullable Runnable onProcessed) {
+                                               LongConsumer onHarvestedBatch, @Nullable Runnable onProcessed, long generation) {
         TargetRegistry r = registry;
         List<BrickGridUpload.SlotUpload> batch = new ArrayList<>();
         BatchSizeController controller = new BatchSizeController();
         long batchHarvestCount = 0; // real harvests accumulated in the CURRENT unflushed batch
 
         for (SectionPos pos : positions) {
-            if (!hasValidData(pos.x(), pos.y(), pos.z())) {
+            if (generation == storageGeneration && !hasValidData(pos.x(), pos.y(), pos.z())) {
                 SectionHarvester.Result result = DirectSectionReader.read(level, pos);
                 if (result != null) {
-                    int slot = slotFor(pos.x(), pos.y(), pos.z());
-                    if (slot >= 0) {
-                        boolean clearLight = recordHarvest(slot, pos, result);
-                        batch.add(new BrickGridUpload.SlotUpload(slot, result, clearLight));
-                        batchHarvestCount++;
+                    synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+                        int slot = slotFor(pos.x(), pos.y(), pos.z());
+                        if (generation == storageGeneration && r == registry && slot >= 0) {
+                            boolean clearLight = recordHarvest(slot, pos, result);
+                            batch.add(new BrickGridUpload.SlotUpload(slot, result, clearLight));
+                            batchHarvestCount++;
+                        }
                     }
                 }
             }
@@ -578,7 +656,7 @@ public final class VoxelWindow {
             }
             if (batch.size() >= controller.currentTargetSize()) {
                 if (r != null) {
-                    flushBatch(r, batch, controller);
+                    flushBatch(r, batch, controller, generation);
                 } else {
                     batch.clear();
                 }
@@ -590,7 +668,7 @@ public final class VoxelWindow {
         }
         if (!batch.isEmpty()) {
             if (r != null) {
-                flushBatch(r, batch, controller);
+                flushBatch(r, batch, controller, generation);
             } else {
                 batch.clear();
             }
@@ -610,9 +688,13 @@ public final class VoxelWindow {
      * fence-waited dispatch. Clears {@code batch} afterward so the caller's accumulator is empty for
      * the next round regardless of size. */
     private static void flushBatch(TargetRegistry registry, List<BrickGridUpload.SlotUpload> batch,
-                                    BatchSizeController controller) {
+                                    BatchSizeController controller, long generation) {
         long start = System.nanoTime();
-        BrickGridUpload.uploadSlots(registry, batch);
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            if (generation == storageGeneration && registry == VoxelWindow.registry) {
+                BrickGridUpload.uploadSlots(registry, batch);
+            }
+        }
         long elapsedNanos = System.nanoTime() - start;
         controller.recordBatch(batch.size(), elapsedNanos);
         batch.clear();

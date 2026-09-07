@@ -26,6 +26,7 @@ import net.minecraft.network.chat.Component;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -130,6 +131,9 @@ public final class FornaxSettingsScreen {
         copy.taauRatio = source.taauRatio;
         copy.sidecarMapResolution = source.sidecarMapResolution;
         copy.profilerOverlay = source.profilerOverlay;
+        copy.overlayShowPasses = source.overlayShowPasses;
+        copy.overlayShowCounters = source.overlayShowCounters;
+        copy.overlayTopPassesOnly = source.overlayTopPassesOnly;
         copy.debugView = source.debugView;
         copy.frameGenMode = source.frameGenMode;
         copy.metalHud = source.metalHud;
@@ -341,6 +345,17 @@ public final class FornaxSettingsScreen {
                 .controller(opt -> BooleanControllerBuilder.create(opt).coloured(true).onOffFormatter())
                 .build();
 
+        Option<Boolean> overlayShowPasses = overlayRowOption("overlay_show_passes", true,
+                () -> FornaxConfig.get().overlayShowPasses, v -> FornaxConfig.get().overlayShowPasses = v);
+        Option<Boolean> overlayShowCounters = overlayRowOption("overlay_show_counters", true,
+                () -> FornaxConfig.get().overlayShowCounters, v -> FornaxConfig.get().overlayShowCounters = v);
+        Option<Boolean> overlayTopPassesOnly = overlayRowOption("overlay_top_passes_only", false,
+                () -> FornaxConfig.get().overlayTopPassesOnly, v -> FornaxConfig.get().overlayTopPassesOnly = v);
+        List<Option<Boolean>> overlayRows = List.of(overlayShowPasses, overlayShowCounters, overlayTopPassesOnly);
+        // The panel's own toggle greys these out. YACL calls the listener once at build time, so
+        // they start in the right state.
+        profilerOverlay.addListener((opt, on) -> overlayRows.forEach(row -> row.setAvailable(on)));
+
         Option<GBufferDebugView> debugView = Option.<GBufferDebugView>createBuilder()
                 .name(Component.translatable("gui.fornax.option.debug_view"))
                 .description(OptionDescription.of(Component.translatable("gui.fornax.option.debug_view.tooltip")))
@@ -389,12 +404,26 @@ public final class FornaxSettingsScreen {
         OptionGroup.Builder group = OptionGroup.createBuilder()
                 .name(Component.translatable("gui.fornax.group.debug"))
                 .option(profilerOverlay)
+                .option(overlayShowPasses)
+                .option(overlayShowCounters)
+                .option(overlayTopPassesOnly)
                 .option(debugView)
                 .option(voxelReachIgnoresRenderDistance);
         if (metalHud != null) {
             group.option(metalHud);
         }
         return group.build();
+    }
+
+    /** One profiler-overlay row filter. All three share a shape, so they share a builder. */
+    private static Option<Boolean> overlayRowOption(String key, boolean defaultValue,
+                                                    Supplier<Boolean> get, Consumer<Boolean> set) {
+        return Option.<Boolean>createBuilder()
+                .name(Component.translatable("gui.fornax.option." + key))
+                .description(OptionDescription.of(Component.translatable("gui.fornax.option." + key + ".tooltip")))
+                .binding(defaultValue, get::get, set::accept)
+                .controller(opt -> BooleanControllerBuilder.create(opt).coloured(true).onOffFormatter())
+                .build();
     }
 
     private static Option<Boolean> buildMetalHudOption() {

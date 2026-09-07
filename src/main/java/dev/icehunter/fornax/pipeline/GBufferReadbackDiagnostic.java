@@ -57,6 +57,7 @@ public final class GBufferReadbackDiagnostic {
      * {@link FornaxConfig#get()}{@code .profilerOverlay} -- the on-demand path F10 drives. */
     public static void requestDump() {
         dumpRequested = true;
+        dev.icehunter.fornax.debug.FullscreenCapture.request();
     }
 
     /**

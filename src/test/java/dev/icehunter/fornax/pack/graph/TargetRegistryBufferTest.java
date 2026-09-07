@@ -43,6 +43,22 @@ class TargetRegistryBufferTest {
     }
 
     @Test
+    void nonzeroInitializationNoOpsGracefullyWithNoComputeBackend() {
+        TargetRegistry registry = newRegistry();
+        assertDoesNotThrow(() -> registry.ensureBufferSize("voxelBrickSummary", 4096L,
+                dev.icehunter.fornax.voxel.BrickGridUpload.SUMMARY_PENDING));
+        assertNull(registry.getBuffer("voxelBrickSummary"));
+    }
+
+    @Test
+    void nonzeroInitializationRejectsUnalignedSizes() {
+        TargetRegistry registry = newRegistry();
+        assertThrows(IllegalArgumentException.class,
+                () -> registry.ensureBufferSize("voxelBrickSummary", 3L,
+                        dev.icehunter.fornax.voxel.BrickGridUpload.SUMMARY_PENDING));
+    }
+
+    @Test
     void zeroSizeIsRejectedInsteadOfReachingVulkan() {
         TargetRegistry registry = newRegistry();
         assertThrows(IllegalArgumentException.class,

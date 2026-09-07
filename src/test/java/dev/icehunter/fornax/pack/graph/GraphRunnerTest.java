@@ -67,13 +67,18 @@ class GraphRunnerTest {
                 writer, graph, Map.of("ADVANCED_EFFECTS", 1)));
     }
 
+    /**
+     * A pass belongs here only if it never reads what graphics writes later in the same frame: the
+     * shared semaphore is signalled before opaque terrain. {@code voxel_water_refl} qualifies
+     * because it reads the previous frame's water surface.
+     */
     @Test
     void preOpaqueLightingComputeIncludesOnlyIndependentLightingProducers() {
         assertTrue(GraphRunner.isPreOpaqueLightingComputePass(computePass("light_inject")));
         assertTrue(GraphRunner.isPreOpaqueLightingComputePass(computePass("light_propagate")));
         assertTrue(GraphRunner.isPreOpaqueLightingComputePass(computePass("light_list_reset")));
         assertTrue(GraphRunner.isPreOpaqueLightingComputePass(computePass("light_list_build")));
-        assertFalse(GraphRunner.isPreOpaqueLightingComputePass(computePass("voxel_water_refl")));
+        assertTrue(GraphRunner.isPreOpaqueLightingComputePass(computePass("voxel_water_refl")));
         assertFalse(GraphRunner.isPreOpaqueLightingComputePass(computePass("unrelated_compute")));
         assertFalse(GraphRunner.isPreOpaqueLightingComputePass(fullscreenPass("light_list_build")));
     }

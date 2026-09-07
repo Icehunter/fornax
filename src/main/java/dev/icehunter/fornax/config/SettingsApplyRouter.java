@@ -106,6 +106,9 @@ public final class SettingsApplyRouter {
                 || before.ssaaPreset != after.ssaaPreset
                 || before.taauRatio != after.taauRatio;
         boolean plainSaveNeeded = before.profilerOverlay != after.profilerOverlay
+                || before.overlayShowPasses != after.overlayShowPasses
+                || before.overlayShowCounters != after.overlayShowCounters
+                || before.overlayTopPassesOnly != after.overlayTopPassesOnly
                 || before.debugView != after.debugView
                 || before.frameGenMode != after.frameGenMode
                 || before.metalHud != after.metalHud

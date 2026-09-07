@@ -2,9 +2,11 @@ package dev.icehunter.fornax.voxel;
 
 import dev.icehunter.fornax.pack.material.MaterialScalarsHolder;
 import net.minecraft.core.SectionPos;
+import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import org.jspecify.annotations.Nullable;
 
 import java.util.List;
@@ -49,12 +51,19 @@ public final class DirectSectionReader {
             new SectionPalette(List.of(new SectionPalette.Entry(
                     VoxelShapeKind.EMPTY, List.of(), new int[6], 0.0, false, 0))));
 
+    /** No geometry outside build height, but the sky light there is not always zero. */
+    static SectionHarvester.Result emptyResultWithLight(byte[] lightmap) {
+        return new SectionHarvester.Result(EMPTY_RESULT.paletteIndices(), EMPTY_RESULT.palette(), lightmap);
+    }
+
     private DirectSectionReader() {
     }
 
     public static SectionHarvester.@Nullable Result read(Level level, SectionPos position) {
-        LevelChunk chunk = level.getChunk(position.x(), position.z());
-        if (chunk == null) {
+        // create=false keeps missing data null. The client's empty stand-in would publish an
+        // unharvested section as known empty.
+        var candidate = level.getChunk(position.x(), position.z(), ChunkStatus.FULL, false);
+        if (!(candidate instanceof LevelChunk chunk)) {
             return null; // not loaded -- caller retries later, not an error
         }
         int sectionIndex = chunk.getSectionIndexFromSectionY(position.y());
@@ -62,9 +71,13 @@ public final class DirectSectionReader {
             // Structurally out of the world's real height range -- never becomes available, so treat
             // it as a definite, permanent EMPTY harvest rather than leaving the slot stale forever
             // (see EMPTY_RESULT's doc comment).
-            return EMPTY_RESULT;
+            return emptyResultWithLight(VoxelLightmap.capture(level,
+                    position.minBlockX(), position.minBlockY(), position.minBlockZ()));
         }
         LevelChunkSection section = chunk.getSection(sectionIndex);
-        return SectionHarvester.harvest(section.getStates(), MaterialScalarsHolder.current());
+        // A bootstrap read and a mesh-driven harvest must come out the same colour.
+        return SectionHarvester.harvest(section.getStates(), MaterialScalarsHolder.current(),
+                level instanceof BlockAndTintGetter tint ? tint : null,
+                position.minBlockX(), position.minBlockY(), position.minBlockZ());
     }
 }

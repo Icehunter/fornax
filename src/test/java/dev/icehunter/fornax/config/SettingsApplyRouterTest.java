@@ -87,6 +87,23 @@ class SettingsApplyRouterTest {
     }
 
     @Test
+    void overlayRowFilterChangeRoutesSaveOnly() {
+        FornaxSettings before = new FornaxSettings();
+        FornaxSettings after = new FornaxSettings();
+        after.overlayShowPasses = !before.overlayShowPasses;
+
+        assertEquals(Set.of(Action.SAVE_ONLY), SettingsApplyRouter.route(before, after));
+
+        after = new FornaxSettings();
+        after.overlayShowCounters = !before.overlayShowCounters;
+        assertEquals(Set.of(Action.SAVE_ONLY), SettingsApplyRouter.route(before, after));
+
+        after = new FornaxSettings();
+        after.overlayTopPassesOnly = !before.overlayTopPassesOnly;
+        assertEquals(Set.of(Action.SAVE_ONLY), SettingsApplyRouter.route(before, after));
+    }
+
+    @Test
     void debugViewChangeRoutesSaveOnly() {
         FornaxSettings before = new FornaxSettings();
         before.debugView = GBufferDebugView.OFF;

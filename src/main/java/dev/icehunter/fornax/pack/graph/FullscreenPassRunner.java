@@ -18,6 +18,8 @@ import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.icehunter.fornax.FornaxMod;
+import dev.icehunter.fornax.debug.FullscreenCapture;
+import java.util.ArrayList;
 import dev.icehunter.fornax.pack.PassSpec;
 import dev.icehunter.fornax.pack.layout.PackOptionsBuffer;
 import dev.icehunter.fornax.pack.layout.RuntimeShaderPack;
@@ -185,6 +187,7 @@ public final class FullscreenPassRunner implements AutoCloseable {
             runFrame(registry, mipchainTargets, globals, packOptions, params);
             consecutiveFailures = 0;
         } catch (RuntimeException e) {
+            FullscreenCapture.failed(spec.name(), e.toString());
             // Defense in depth against an input/output resolving to no allocated target -- most
             // commonly a buffer-kind input whose build()-time classification
             // (registry.getBuffer(name) != null, a live-registry SNAPSHOT -- see build()'s own doc)
@@ -235,6 +238,20 @@ public final class FullscreenPassRunner implements AutoCloseable {
         String outputRef = spec.outputs().get(0);
         GpuTextureView outputView = GraphInputResolver.resolveView(outputRef, registry, mipchainTargets);
 
+        List<GpuTextureView> resolvedInputs = null;
+        FullscreenCapture.Capture capture = null;
+        if (FullscreenCapture.isSelected(spec.name())) {
+            resolvedInputs = new ArrayList<>();
+            List<String> captureSamplers = new ArrayList<>();
+            PackTextureRegistry captureTextures = GraphRunner.packTextureRegistry();
+            for (int i = 0; i < spec.inputs().size(); i++) {
+                String ref = spec.inputs().get(i);
+                resolvedInputs.add(bufferInputs[i] ? null : GraphInputResolver.resolveView(ref, registry, mipchainTargets));
+                captureSamplers.add(samplerKindFor(ref, captureTextures != null && captureTextures.isDeclared(ref),
+                        ref.equals("builtin.noise"), registry.filterFor(ref)).name());
+            }
+            capture = FullscreenCapture.before(spec, bufferInputs, resolvedInputs, captureSamplers, outputView);
+        }
         CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
         try (RenderPass pass = encoder.createRenderPass(() -> "Fornax " + spec.name(), outputView, Optional.empty())) {
             try {
@@ -246,6 +263,7 @@ public final class FullscreenPassRunner implements AutoCloseable {
                 // propagates straight up through GraphRunner.finish() and crashes the game; caught
                 // here, the pass just stops rendering, exactly like a missing runner already does.
                 invalid = true;
+                FullscreenCapture.failed(spec.name(), e.toString());
                 FornaxMod.LOGGER.error("[Fornax] FullscreenPassRunner: pass '{}' failed to bind its "
                         + "pipeline (shader/bind-group mismatch) -- skipping it for the rest of this "
                         + "runner's lifetime; deferred output will be incomplete until the next "
@@ -272,6 +290,7 @@ public final class FullscreenPassRunner implements AutoCloseable {
                         .putVec4(sunRect[0], sunRect[1], sunRect[2], sunRect[3])
                         .putVec4(moonRect[0], moonRect[1], moonRect[2], moonRect[3])
                         .get();
+                if (capture != null) capture.uniform("u_PassParams", data.data().duplicate().clear());
             }
             pass.setUniform("u_PassParams", passParamsData.currentBuffer());
 
@@ -310,7 +329,8 @@ public final class FullscreenPassRunner implements AutoCloseable {
                     pass.setUniform(inputSamplerName(i), texelWrappers[i]);
                     logTexelBufferBindOnce(buf);
                 } else {
-                    GpuTextureView inputView = GraphInputResolver.resolveView(inputs.get(i), registry, mipchainTargets);
+                    GpuTextureView inputView = resolvedInputs != null ? resolvedInputs.get(i)
+                            : GraphInputResolver.resolveView(inputs.get(i), registry, mipchainTargets);
                     boolean builtinNoise = inputs.get(i).equals("builtin.noise");
                     boolean packTexture = packTextures != null && packTextures.isDeclared(inputs.get(i));
                     InputSamplerKind kind = samplerKindFor(inputs.get(i), packTexture, builtinNoise,
@@ -329,12 +349,16 @@ public final class FullscreenPassRunner implements AutoCloseable {
                         case LINEAR_CLAMP -> linearSampler;
                         case NEAREST_CLAMP -> sampler;
                     };
+                    if (capture != null) capture.sampler(i,
+                            kind == InputSamplerKind.SHADOW_COMPARISON && inputSampler == sampler
+                                    ? InputSamplerKind.NEAREST_CLAMP.name() : kind.name());
                     pass.bindTexture(inputSamplerName(i), inputView, inputSampler);
                 }
             }
 
             pass.draw(3, 1, 0, 0);
         }
+        if (capture != null) capture.afterDraw();
     }
 
     /** {@code null} (opaque, the pre-existing default) or one of the three values {@code
