@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
 
 /**
  * Top-left corner HUD: per-pass avg/p95 GPU timings graded against {@link ProfilerLogDump#BUDGET_MS},
- * plus the frame total. Toggled by {@code FornaxSettings#profilerOverlay} (keybind or Engine-page
+ * plus the world graphics span. Toggled by {@code FornaxSettings#profilerOverlay} (keybind or Engine-page
  * row); a second keybind ({@link #dumpToLog()}) writes a full breakdown table to the log via {@link
  * ProfilerLogDump}.
  *
@@ -76,8 +76,11 @@ public final class ProfilerOverlay implements HudElement {
      */
     public static void dumpToLog() {
         FrameProfiler profiler = GraphRunner.frameProfiler();
-        List<FrameProfiler.Stat> passes = passesOnly(profiler.snapshot());
-        FornaxMod.LOGGER.info(ProfilerLogDump.format(passes, profiler.frameTotalMs()));
+        FornaxMod.LOGGER.info(ProfilerLogDump.format(profiler,
+                "AA=" + FornaxConfig.get().aaMethod + " frameGen=" + FornaxConfig.get().frameGenMode
+                        + " renderDistance=" + Minecraft.getInstance().options.renderDistance().get()
+                        + " vsync=" + Minecraft.getInstance().options.enableVsync().get()
+                        + " " + GraphRunner.profileMetadata()));
     }
 
     @Override
@@ -193,7 +196,8 @@ public final class ProfilerOverlay implements HudElement {
         Set<String> active = GraphRunner.activePassNames();
         return stats.stream()
                 .filter(stat -> !FrameProfiler.LABEL_FRAME.equals(stat.label()))
-                .filter(stat -> FrameProfiler.LABEL_TERRAIN.equals(stat.label()) || active.contains(stat.label()))
+                .filter(stat -> FrameProfiler.LABEL_TERRAIN.equals(stat.label())
+                        || FrameProfiler.LABEL_GRAPH.equals(stat.label()) || active.contains(stat.label()))
                 .toList();
     }
 

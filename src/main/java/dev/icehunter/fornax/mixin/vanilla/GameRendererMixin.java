@@ -144,6 +144,7 @@ public class GameRendererMixin {
 
     @Inject(method = "renderLevel", at = @At("HEAD"))
     private void fornax$ssaaBeginFrame(CallbackInfo ci) {
+        GraphRunner.beginProfileFrame();
         SsaaManager.applyCurrentScale();
 
         // getWidth()/getHeight() return the real physical framebuffer size here, not
@@ -240,6 +241,7 @@ public class GameRendererMixin {
         // frame's offset instead of the one just baked into this frame's projection matrix, a
         // one-frame mismatch that would corrupt motion-vector correction.
         CameraJitter.advanceFrame();
+        GraphRunner.endProfileFrame();
     }
 
     /**

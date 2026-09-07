@@ -11,8 +11,8 @@ import java.util.OptionalLong;
 /**
  * GPU per-pass timing: owns a ring of timestamp query pools so readback never stalls the render
  * thread waiting on the GPU. Frames-in-flight are handled by round-robining {@link #FRAMES_IN_FLIGHT}
- * pools -- by the time a pool comes back around to being "current" again, the GPU has long since
- * resolved the queries its previous occupant wrote, so a non-blocking read reliably has an answer.
+ * pools. A slot is reused only once every earlier query has an answer; if any are still pending,
+ * this frame goes untimed and the slot is left alone until it comes around again.
  * Converted durations land in the supplied {@link FrameProfiler} {@link #FRAMES_IN_FLIGHT} frames
  * late -- this is a profiler, not a fence.
  *
@@ -44,6 +44,8 @@ public final class PassTimer {
 
     private final FrameProfiler profiler;
     private boolean enabled;
+    private boolean frameWritable;
+    private final long[] resolvedTicks = new long[MAX_BRACKETS * 2];
     private boolean loggedDisabled;
     private boolean loggedMismatch;
     private boolean loggedOverrun;
@@ -59,6 +61,7 @@ public final class PassTimer {
     private final int[][] slotBeginIndex = new int[FRAMES_IN_FLIGHT][MAX_ENTRIES];
     private final int[][] slotEndIndex = new int[FRAMES_IN_FLIGHT][MAX_ENTRIES];
     private final int[] slotCount = new int[FRAMES_IN_FLIGHT];
+    private final long[] slotFrameIds = new long[FRAMES_IN_FLIGHT];
     // How many of this slot's entries actually consumed a query-pool index (i.e. were NOT phantoms).
     // slotCount - slotTimedCount is this frame's drop count, published via FrameProfiler.recordValue.
     private final int[] slotTimedCount = new int[FRAMES_IN_FLIGHT];
@@ -123,11 +126,21 @@ public final class PassTimer {
      * silently (ring still warming up, or an exceptionally long frame in flight).
      */
     public void beginFrame() {
+        beginFrame(profiler.beginRenderFrame());
+    }
+
+    /** The frame ID belongs to when the work was sent, not to when the result comes back. */
+    public void beginFrame(long frameId) {
         if (!enabled) {
             return;
         }
         slot = (slot + 1) % FRAMES_IN_FLIGHT;
-        drainSlot(slot);
+        frameWritable = drainSlot(slot);
+        if (!frameWritable) {
+            profiler.incrementCounter("timer pending frames");
+            return; // Keep this slot intact; its GPU writes are still outstanding.
+        }
+        slotFrameIds[slot] = frameId;
 
         slotCount[slot] = 0;
         slotTimedCount[slot] = 0;
@@ -137,7 +150,7 @@ public final class PassTimer {
     }
 
     public void bracketBegin(String label) {
-        if (!enabled || frameCorrupt) {
+        if (!enabled || !frameWritable || frameCorrupt) {
             return;
         }
         int count = slotCount[slot];
@@ -179,7 +192,7 @@ public final class PassTimer {
     }
 
     public void bracketEnd(String label) {
-        if (!enabled || frameCorrupt) {
+        if (!enabled || !frameWritable || frameCorrupt) {
             return;
         }
         if (openDepth == 0 || !label.equals(slotLabels[slot][openStack[openDepth - 1]])) {
@@ -209,7 +222,7 @@ public final class PassTimer {
      * validates that every bracket was closed, dropping the frame's data if not.
      */
     public void endFrame() {
-        if (!enabled) {
+        if (!enabled || !frameWritable) {
             return;
         }
         if (frameCorrupt || openDepth != 0) {
@@ -241,20 +254,24 @@ public final class PassTimer {
         FornaxMod.LOGGER.debug("[Fornax] GPU pass timing ms avg/p95: {}", line);
     }
 
-    private void drainSlot(int s) {
+    private boolean drainSlot(int s) {
         TimestampPool pool = pools[s];
+        // A host reset must wait for every query sent, including ones from a discarded frame.
+        for (int query = 0; query < slotNextQueryIndex[s]; query++) {
+            OptionalLong value = pool.tryRead(query);
+            if (value.isEmpty()) return false;
+            resolvedTicks[query] = value.getAsLong();
+        }
         for (int i = 0; i < slotCount[s]; i++) {
             int endIndex = slotEndIndex[s][i];
-            if (endIndex < 0) {
-                continue;
-            }
-            OptionalLong begin = pool.tryRead(slotBeginIndex[s][i]);
-            OptionalLong end = pool.tryRead(endIndex);
-            if (begin.isEmpty() || end.isEmpty()) {
-                continue; // not resolved yet -- results land frames late, this is a profiler not a fence
-            }
-            profiler.record(slotLabels[s][i], ticksToMs(begin.getAsLong(), end.getAsLong(), timestampPeriodNs));
+            if (endIndex < 0) continue;
+            long begin = resolvedTicks[slotBeginIndex[s][i]];
+            long end = resolvedTicks[endIndex];
+            // Blaze3D gives the period but not the hardware counter width: 0 means unknown.
+            profiler.recordGpu(slotLabels[s][i], slotFrameIds[s], "Vulkan graphics",
+                    begin, end, timestampPeriodNs, 0, ticksToMs(begin, end, timestampPeriodNs));
         }
+        return true;
     }
 
     public void close() {

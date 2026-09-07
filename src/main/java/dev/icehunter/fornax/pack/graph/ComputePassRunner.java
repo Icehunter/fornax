@@ -147,6 +147,11 @@ public final class ComputePassRunner implements AutoCloseable {
     @Nullable
     private final RawTimestampQueries timestampQueries;
     private final ComputePassTimer computeTimer;
+    private final FrameProfiler profiler;
+    private final String recycleTimingLabel;
+    private final String lockTimingLabel;
+    private final String submitTimingLabel;
+    private final String dependencyTimingLabel;
     private final RingSlot[] ring = new RingSlot[FRAMES_IN_FLIGHT];
     private long descriptorPool;
     private final long[] descriptorSets = new long[FRAMES_IN_FLIGHT];
@@ -165,6 +170,11 @@ public final class ComputePassRunner implements AutoCloseable {
                                int extraPushConstantBytes, boolean graphicsCompletionBeforeStorageWrite,
                                FrameProfiler profiler) {
         this.spec = spec;
+        this.profiler = profiler;
+        this.recycleTimingLabel = "compute recycle CPU " + spec.name();
+        this.lockTimingLabel = "compute lock CPU " + spec.name();
+        this.submitTimingLabel = "compute submit CPU " + spec.name();
+        this.dependencyTimingLabel = "compute dependency CPU " + spec.name();
         this.backend = backend;
         this.pipeline = pipeline;
         this.bindingOrder = bindingOrder;
@@ -495,7 +505,9 @@ public final class ComputePassRunner implements AutoCloseable {
         frameIndex++;
 
         if (slot.submitted && slot.fence != 0) {
+            long recycleStart = System.nanoTime();
             int waitResult = VK13.vkWaitForFences(backend.device().vkDevice(), slot.fence, true, FENCE_WAIT_TIMEOUT);
+            profiler.record(recycleTimingLabel, (System.nanoTime() - recycleStart) / 1_000_000.0);
             if (!fenceWaitSucceeded(waitResult, "ring-slot recycle in '" + spec.name() + "'")) {
                 // The fence never signalled, so this slot's prior buffer may still be in flight.
                 // Resetting the pool now would be a use-after-free of a live command buffer; skip
@@ -511,7 +523,9 @@ public final class ComputePassRunner implements AutoCloseable {
             pool.reset(); // this slot's prior buffer was drained by the checked fence wait above
         }
 
+        long lockStart = System.nanoTime();
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            profiler.record(lockTimingLabel, (System.nanoTime() - lockStart) / 1_000_000.0);
             VkCommandBuffer cmd = pool != null ? pool.allocateBuffer() : null;
             if (cmd == null) {
                 return -1L;
@@ -623,7 +637,9 @@ public final class ComputePassRunner implements AutoCloseable {
                 }
                 int result;
                 try {
+                    long submitStart = System.nanoTime();
                     result = VK13.vkQueueSubmit(backend.computeQueue().vkQueue(), submitInfo, slot.fence);
+                    profiler.record(submitTimingLabel, (System.nanoTime() - submitStart) / 1_000_000.0);
                 } catch (RuntimeException | Error e) {
                     if (reuseTicket != null) {
                         imageReuseSequence.cancel(reuseTicket);
@@ -654,6 +670,7 @@ public final class ComputePassRunner implements AutoCloseable {
                     long waitStart = System.nanoTime();
                     int waitResult = VK13.vkWaitForFences(backend.device().vkDevice(), slot.fence, true, FENCE_WAIT_TIMEOUT);
                     long dependencyWaitNanos = System.nanoTime() - waitStart;
+                    profiler.record(dependencyTimingLabel, dependencyWaitNanos / 1_000_000.0);
                     if (fenceWaitSucceeded(waitResult, "synchronous wait in '" + spec.name() + "'")) {
                         computeTimer.drainCompleted(slotIndex);
                         VK13.vkResetFences(backend.device().vkDevice(), slot.fence);

@@ -7,6 +7,7 @@ import com.mojang.blaze3d.systems.GpuSurface;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.metalfx.FrameGenPass;
+import dev.icehunter.fornax.pack.graph.GraphRunner;
 import dev.icehunter.fornax.pass.ssaa.SsaaManager;
 import dev.icehunter.fornax.pipeline.FrameGenPacer;
 import dev.icehunter.fornax.util.GpuFatalErrors;
@@ -388,6 +389,9 @@ public final class FrameGenPresenter {
             return;
         }
 
+        // This only watches the existing CPU calls; it adds no GPU timing queries, waits, or
+        // submits. A call that returns counts as finished, not as proof the frame reached the screen.
+        long presentStarted = System.nanoTime();
         try {
             surface.present();
         } catch (Throwable t) {
@@ -397,10 +401,17 @@ public final class FrameGenPresenter {
             stagingPrepared = false;
             return;
         }
+        GraphRunner.frameProfiler().recordPresentation(true);
+        // System.nanoTime gives nanoseconds; 1e-6 turns that into milliseconds.
+        GraphRunner.frameProfiler().record("surface present CPU (generated)",
+                (System.nanoTime() - presentStarted) * 1e-6);
         recordPresented();
 
         try {
+            long acquireStarted = System.nanoTime();
             surface.acquireNextTexture();
+            GraphRunner.frameProfiler().record("surface acquire CPU (generated)",
+                    (System.nanoTime() - acquireStarted) * 1e-6);
         } catch (Throwable t) {
             // Rethrown when fatal: a failed reacquire here means vanilla's own blitFromTexture/
             // present for the real frame, which runs immediately after this injection point with

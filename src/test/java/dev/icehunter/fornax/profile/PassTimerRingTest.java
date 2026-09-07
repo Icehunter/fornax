@@ -23,6 +23,7 @@ class PassTimerRingTest {
         private final Long[] resolved = new Long[POOL_SIZE];
         private final Long[] pending = new Long[POOL_SIZE];
         private final TickSource ticks;
+        private int writes;
 
         FakePool(TickSource ticks) {
             this.ticks = ticks;
@@ -30,6 +31,7 @@ class PassTimerRingTest {
 
         @Override
         public void write(int index) {
+            writes++;
             resolved[index] = null; // host reset: any unread value at this index is lost NOW
             pending[index] = ticks.next();
         }
@@ -296,4 +298,72 @@ class PassTimerRingTest {
         assertEquals(FrameProfiler.LABEL_FRAME, frameStat.label());
         assertEquals(3.0e-4, frameStat.avgMs(), 1e-12); // only healthy frames contributed
     }
+    @Test
+    void delayedGraphicsResultsKeepTheirOriginatingRenderFrame() {
+        FrameProfiler profiler = new FrameProfiler();
+        FakePool[] ring = newRing(new TickSource());
+        PassTimer timer = new PassTimer(profiler, ring, 1.0f);
+        long origin = profiler.beginRenderFrame();
+        timer.beginFrame(origin);
+        timer.bracketBegin("resolve");
+        timer.bracketEnd("resolve");
+        timer.endFrame();
+        for (FakePool pool : ring) pool.resolve();
+        for (int i = 0; i < PassTimer.FRAMES_IN_FLIGHT; i++) {
+            timer.beginFrame(profiler.beginRenderFrame());
+            timer.endFrame();
+        }
+        FrameProfiler.GpuTiming sample = profiler.snapshotGpuTimings().getFirst();
+        assertEquals(origin, sample.frameId());
+        assertEquals("Vulkan graphics", sample.queue());
+        assertEquals(100L, sample.beginTicks()); // fake timestamps advance by 100 ticks per write
+        assertEquals(200L, sample.endTicks());
+    }
+
+    @Test
+    void pendingSlotIsNeverHostResetAndCanBeDrainedOnALaterRotation() {
+        FrameProfiler profiler = new FrameProfiler();
+        FakePool[] ring = newRing(new TickSource());
+        PassTimer timer = new PassTimer(profiler, ring, 1.0f);
+        runFrame(timer, "origin");
+        // Rotate back without any GPU completions: reusing slot 0 would host-reset live queries.
+        for (int frame = 0; frame < PassTimer.FRAMES_IN_FLIGHT; frame++) runFrame(timer, "later");
+        assertEquals(4, ring[0].writes, "the pending frame's four query writes must survive");
+        for (FakePool pool : ring) pool.resolve();
+        for (int frame = 0; frame < PassTimer.FRAMES_IN_FLIGHT; frame++) runFrame(timer, "later");
+        FrameProfiler.GpuTiming origin = profiler.snapshotGpuTimings().stream()
+                .filter(sample -> sample.label().equals("origin")).findFirst().orElseThrow();
+        assertEquals(1L, origin.frameId());
+    }
+
+    @Test
+    void poisonedFrameQueriesMustAlsoCompleteBeforeHostReset() {
+        FrameProfiler profiler = new FrameProfiler();
+        FakePool[] ring = newRing(new TickSource());
+        PassTimer timer = new PassTimer(profiler, ring, 1.0f);
+        timer.beginFrame();
+        timer.bracketBegin("unclosed");
+        timer.endFrame();
+        for (int frame = 0; frame < PassTimer.FRAMES_IN_FLIGHT; frame++) runFrame(timer, "later");
+        assertEquals(1, ring[0].writes, "discarding rows does not cancel the GPU timestamp write");
+        for (FakePool pool : ring) pool.resolve();
+        for (int frame = 0; frame < PassTimer.FRAMES_IN_FLIGHT; frame++) runFrame(timer, "later");
+        assertTrue(profiler.snapshot().stream().noneMatch(stat -> stat.label().equals("unclosed")));
+        assertTrue(ring[0].writes > 1, "the resolved slot becomes reusable");
+    }
+
+    @Test
+    void pendingFrameCounterResetsWithTheMeasurementWindow() {
+        FrameProfiler profiler = new FrameProfiler();
+        FakePool[] ring = newRing(new TickSource());
+        PassTimer timer = new PassTimer(profiler, ring, 1.0f);
+        for (int frame = 0; frame <= PassTimer.FRAMES_IN_FLIGHT; frame++) runFrame(timer, "pending");
+        profiler.reset();
+        runFrame(timer, "still pending");
+        double count = profiler.valueSnapshot().stream()
+                .filter(value -> value.label().equals("timer pending frames"))
+                .findFirst().orElseThrow().value();
+        assertEquals(1.0, count, "only the one pending frame since reset belongs in this window");
+    }
+
 }

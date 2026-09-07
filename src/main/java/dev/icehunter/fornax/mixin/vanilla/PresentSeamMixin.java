@@ -1,8 +1,11 @@
 package dev.icehunter.fornax.mixin.vanilla;
 
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.GpuSurface;
 import com.mojang.blaze3d.systems.RenderSystem;
+import dev.icehunter.fornax.pack.graph.GraphRunner;
 import dev.icehunter.fornax.pass.FrameGenPresenter;
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Final;
@@ -68,12 +71,47 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * unambiguous within this method) rather than a fixed bytecode offset, so this stays correct across
  * the surrounding conditionals: this injection only ever runs on the same path vanilla's own blit
  * would have run on anyway.
+ *
+ * <p>The separate acquire and present wrappers time vanilla's own calls while a pack is active.
+ * Each one calls the original exactly once and lets exceptions through unchanged. A present call
+ * that returns adds to the real-present count; that only means the call finished, not that the
+ * frame reached the screen. With no pack active, both wrappers just call the original and do
+ * nothing else.
  */
 @Mixin(Minecraft.class)
 public abstract class PresentSeamMixin {
     @Shadow
     @Final
     private GpuSurface windowSurface;
+
+    @WrapOperation(
+            method = "renderFrame",
+            at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/systems/GpuSurface;acquireNextTexture()V")
+    )
+    private void fornax$measureRealAcquire(GpuSurface surface, Operation<Void> original) {
+        boolean active = GraphRunner.isActive();
+        long started = active ? System.nanoTime() : 0L;
+        original.call(surface);
+        if (active) {
+            // System.nanoTime gives nanoseconds; 1e-6 turns that into milliseconds.
+            GraphRunner.frameProfiler().record("surface acquire CPU (real)", (System.nanoTime() - started) * 1e-6);
+        }
+    }
+
+    @WrapOperation(
+            method = "renderFrame",
+            at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/systems/GpuSurface;present()V")
+    )
+    private void fornax$measureRealPresent(GpuSurface surface, Operation<Void> original) {
+        boolean active = GraphRunner.isActive();
+        long started = active ? System.nanoTime() : 0L;
+        original.call(surface);
+        if (active) {
+            GraphRunner.frameProfiler().recordPresentation(false);
+            // How long the call took, including any wait inside present; nanoseconds turned into milliseconds.
+            GraphRunner.frameProfiler().record("surface present CPU (real)", (System.nanoTime() - started) * 1e-6);
+        }
+    }
 
     @Inject(
             method = "renderFrame",

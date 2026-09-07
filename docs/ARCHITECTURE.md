@@ -125,53 +125,68 @@ loop, a pack that declares no depth copy-back pass
 gets a hardcoded fallback copy of G-buffer depth into the main render target's depth texture, so
 translucent draws afterward always see correct depth.
 
-If a `PassTimer` was built (lazily, once a device exists; see `ensureRunnersBuilt()`), the pass loop
-is bracketed with GPU timestamp writes. One bracket spans the whole loop (`"frame"`); one spans up
-to the loop's first geometry-slot iteration (`"geometry dwell"`, named that and not "terrain" on
-purpose: Sodium's terrain draw already finished before `finish()` runs, so this measures only
-GraphRunner's own dwell in that slot); and one wraps each dispatched pass by name. Results ride a
-ring of query pools sized to `FramePacing.FRAMES_IN_FLIGHT` (3), the same shared constant used by
-`ComputePassRunner`'s command/fence/descriptor ring, and are drained at the start of the next
-`beginFrame()` that rotates onto a slot, before any of that frame's own writes, because the
-backend's `writeTimestamp` host-resets the query index immediately (Vulkan `vkResetQueryPool`),
-destroying any still-unread value there. Drained durations land in `GraphRunner.frameProfiler()` a
-few frames late. `ProfilerOverlay` (a `HudElement` registered via `HudElementRegistry`, toggled by
-`FornaxSettings.profilerOverlay`) refreshes its own cached copy of `snapshot()` at roughly 4 Hz and
-renders that cache every frame; `snapshot()` itself allocates and sorts, so the HUD never calls it
-per frame. An empty cache (nothing ever recorded, whether from an unsupported backend or no pack
-loaded) renders a single "timestamps unavailable" line instead of an empty or garbled panel. Three
-filters trim a big graph's panel: `FornaxSettings.overlayShowPasses` drops the pass rows,
-`overlayShowCounters` the counter rows, and `overlayTopPassesOnly` keeps the ten slowest passes in
-graph order (`ProfilerOverlay.visiblePasses`). All three grey out while `profilerOverlay` is off,
-and the frame total and frame-generation line always draw, so the panel is never empty. A
-second keybind (`ProfilerOverlay.dumpToLog()`) logs a full breakdown table via
-`ProfilerLogDump.format()` at INFO, taking a fresh snapshot on demand. The pre-HUD throttled summary
-line (one per roughly 900 frames) still exists for headless diagnosis but now logs at DEBUG, since
-the HUD is the normal observable path. Mispaired brackets poison and drop that frame's timings
-(logged once) rather than ever pairing timestamps across labels. A backend reporting no usable
-timestamp period degrades `PassTimer` to a one-time-logged no-op; the pass loop's own behaviour and
-ordering are unaffected either way.
+The profiler gives each frame one ID number at the start of `GameRenderer.renderLevel`, before
+scale setup and world preparation. `GraphRunner.beginProfileFrame()` opens the Vulkan graphics
+`frame` bracket; `endProfileFrame()` closes it after the AA/history tail. This span covers terrain,
+shadows, the graph, and translucent/hand work, but not the HUD or presentation. It is how much time
+passes on the GPU: that can include idle time and waits, not only the time spent doing work.
+`graph graphics` is a separate bracket around just the graph loop. `geometry dwell` names only the
+graph loop's geometry slot; each graphics pass still gets its own row.
 
-Raw `ComputePassRunner` submissions cannot be enclosed by `PassTimer`, because they are recorded
-into their own command buffers and submitted directly to the compute queue. Each compute runner
-therefore owns one raw Vulkan timestamp pool with two queries per `FramePacing.FRAMES_IN_FLIGHT`
-slot. The slot command buffer resets its own pair, writes a start timestamp immediately before
-`vkCmdDispatch`, and writes the end immediately after it, before the release barrier. A pair is
-published to `ComputePassTimer` only after `vkQueueSubmit` succeeds; when that same slot's fence
-later succeeds, its pair is read before the command pool is reset. The runner queries the selected
-compute queue family's `timestampValidBits` from the physical device before creating the pool:
-zero bits disables timing, while a partial-width counter masks both samples and computes elapsed
-ticks modulo that width (including wrap; 64 bits uses subtraction's native modulo behavior).
-Unsupported timestamp periods, query-allocation failures, and unexpectedly unavailable results all
-degrade to untimed compute without changing dispatch or synchronization. Resolved GPU duration uses
-the pass name. A legacy
-host-side dependency fence wait is separately published as latest-value telemetry under
-`compute wait <pass>`, so it cannot be mistaken for rolling GPU avg/p95 execution time.
+Graphics query pools take turns across `FramePacing.FRAMES_IN_FLIGHT` (3) slots. A slot is reused
+only once every earlier query it holds has an answer, including queries from a frame whose brackets
+did not nest correctly. If any are still pending, the current frame goes untimed and the slot is
+left alone until its next turn. The profiler never waits on a fence. Stored results are read out
+before new writes happen, because Blaze3D's write path resets each query slot on the host as soon
+as it writes to it. Each late-arriving query carries its frame's ID with it. A bracket pair that
+does not match drops that frame's rows; a device that cannot report timestamps turns off collection
+without changing what gets rendered.
 
-The graphics `"frame"` bracket is not a sum of every row in the profiler. Raw compute work runs on
-a potentially separate queue and may overlap the graphics bracket; its rows are independent GPU
-intervals useful for finding expensive dispatches, not children that can be arithmetically added to
-the graphics frame duration.
+`FrameProfiler` keeps 240 samples per label, plus a GPU history of up to 240 frames capped at 256
+intervals per frame. Reset clears every measurement and never reuses frame IDs, so old results
+still coming back from a query ring in flight are turned away. Counters track how many intervals
+were dropped or turned away. `ProfilerOverlay` refreshes its cached copy about 4 times a second;
+its filters only change what the HUD shows. The **Dump Frame Profile to Log** key, which has no
+default keybind, writes out real AVG/P95/sample counts, the pack's current option values, screen
+sizes, CPU numbers, counters, and up to 30 frame IDs that have results. Coverage is never complete:
+some queries may still be waiting on an answer. Two timer groups can share one real GPU queue, and
+their clocks are not lined up, so never assume their times overlap or add their percentiles
+together. The graphics counter width is unknown (reported as 0) through Blaze3D; compute reports
+the width it actually queried. Metal's own GPU time, and the moment a frame reaches the screen, are
+both left unmeasured.
+
+CPU rows measure time spent recording the world, the gap between one frame's start and the next
+(cadence), waiting for an old compute slot to free up, taking a lock, submitting work, and waiting
+on a dependency, plus the real and generated surface acquire/present calls. Cadence includes any
+pacing delay and other engine work in between, so it is not the same as GPU execution time or the
+FPS shown or generated. Presentation counters count present calls that returned successfully; that
+is not proof the frame reached the screen. Collecting these numbers never adds a submit, a flush,
+or a wait of its own. Writing a dump builds a string and writes to the log, so let that frame's
+numbers age out of the window before measuring again.
+
+Periodic G-buffer readbacks need `-Dfornax.debug.gbufferReadback=true`; the profiler overlay being
+on or off makes no difference. F10 is still the separate on-demand attachment capture. Neither
+readback mode belongs in a timing baseline.
+
+`PassTimer` cannot wrap raw `ComputePassRunner` submissions, because those are recorded into their
+own command buffers and sent straight to the compute queue. So each compute runner owns its own
+raw Vulkan timestamp pool, with two queries for each `FramePacing.FRAMES_IN_FLIGHT` slot. The
+slot's command buffer resets its own pair of queries, writes a start timestamp right before
+`vkCmdDispatch`, and writes the end timestamp right after it, before the release barrier. A pair is
+only reported to `ComputePassTimer` once `vkQueueSubmit` succeeds; once that slot's fence later
+succeeds, its pair is read before the command pool resets. Before making the pool, the runner asks
+the physical device for the chosen compute queue family's `timestampValidBits`: zero bits turns off
+timing, and a counter with only some bits masks the readings and works out elapsed ticks modulo
+that width (wrap included; 64 bits uses plain subtraction's own modulo behavior). An unsupported
+timestamp period, a failed query allocation, or a result that never becomes available all fall back
+to untimed compute without changing what gets dispatched or how it stays in sync. The measured GPU
+duration is filed under the pass's own name. A separate, older CPU-side wait for a dependency fence
+is reported on its own as a latest-value number under `compute wait <pass>`, so it can't be mixed
+up with the rolling GPU AVG/P95 numbers.
+
+The graphics span and the raw compute intervals are separate measurements and stay that way.
+Compute rows are useful for ranking how costly each dispatch is; adding them to the graphics span
+does not tell you the true critical path.
 
 Then, in order, at the very end of `finish`:
 

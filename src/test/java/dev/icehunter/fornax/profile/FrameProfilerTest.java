@@ -5,8 +5,113 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FrameProfilerTest {
+    @Test
+    void presentationCountsDistinguishRealAndGeneratedCallsAndReset() {
+        FrameProfiler p = new FrameProfiler();
+        p.recordPresentation(false);
+        p.recordPresentation(true);
+        p.recordPresentation(false);
+        assertEquals(List.of(new FrameProfiler.ValueStat("real present calls", 2.0),
+                new FrameProfiler.ValueStat("generated present calls", 1.0)), p.valueSnapshot());
+        p.reset();
+        assertTrue(p.valueSnapshot().isEmpty());
+        p.recordPresentation(true);
+        assertEquals(List.of(new FrameProfiler.ValueStat("generated present calls", 1.0)), p.valueSnapshot());
+    }
+
+
+    @Test
+    void gpuTimingsKeepSourceFramesWhenResultsArriveOutOfOrder() {
+        FrameProfiler p = new FrameProfiler();
+        long first = p.beginRenderFrame();
+        long second = p.beginRenderFrame();
+        p.recordGpu("clouds", second, "Vulkan compute", 90, 120, 2.0, 36, 0.000060);
+        p.recordGpu("resolve", first, "Vulkan graphics", 20, 40, 1.0, 64, 0.000020);
+        p.recordGpu("clouds", first, "Vulkan compute", 10, 19, 2.0, 36, 0.000018);
+
+        List<FrameProfiler.GpuTiming> snapshot = p.snapshotGpuTimings();
+        assertEquals(List.of(first, first, second), snapshot.stream().map(FrameProfiler.GpuTiming::frameId).toList());
+        assertEquals(List.of("clouds", "resolve", "clouds"), snapshot.stream().map(FrameProfiler.GpuTiming::label).toList());
+        FrameProfiler.GpuTiming timing = snapshot.getFirst();
+        assertEquals("Vulkan compute", timing.queue());
+        assertEquals(10, timing.beginTicks());
+        assertEquals(19, timing.endTicks());
+        assertEquals(2.0, timing.timestampPeriodNs());
+        assertEquals(36, timing.timestampValidBits());
+        assertEquals(0.000018, timing.elapsedMs());
+        assertEquals(2, p.snapshot().getFirst().samples(), "GPU samples must still feed the rolling statistics");
+        assertThrows(UnsupportedOperationException.class, snapshot::clear);
+        p.beginRenderFrame();
+        assertEquals(3, snapshot.size(), "an exported snapshot must not track later mutations");
+    }
+
+    @Test
+    void gpuTimelineRetainsRenderFramesInsteadOfReadbackArrivalFrames() {
+        FrameProfiler p = new FrameProfiler();
+        long first = p.beginRenderFrame();
+        p.recordGpu("first", first, "Vulkan compute", 1, 2, 1.0, 64, 1.0);
+        for (int i = 1; i < FrameProfiler.WINDOW; i++) {
+            p.beginRenderFrame();
+        }
+        assertEquals(1, p.snapshotGpuTimings().size());
+        p.beginRenderFrame();
+        assertTrue(p.snapshotGpuTimings().isEmpty());
+        p.recordGpu("late", first, "Vulkan compute", 1, 2, 1.0, 64, 1.0);
+        assertTrue(p.snapshotGpuTimings().isEmpty());
+        assertTrue(p.snapshot().stream().noneMatch(stat -> stat.label().equals("late")));
+        long current = p.currentRenderFrameId();
+        p.recordGpu("current", current, "Vulkan graphics", 3, 4, 1.0, 64, 1.0);
+        assertEquals(current, p.snapshotGpuTimings().getFirst().frameId());
+    }
+
+    @Test
+    void resetDoesNotReuseFrameIdsOrAdmitOldPendingResults() {
+        FrameProfiler p = new FrameProfiler();
+        assertEquals(0, p.currentRenderFrameId());
+        long before = p.beginRenderFrame();
+        p.recordGpu("frame", before, "Vulkan graphics", 1, 2, 1.0, 64, 1.0);
+        p.reset();
+        assertEquals(0, p.currentRenderFrameId());
+        assertTrue(p.snapshotGpuTimings().isEmpty());
+        long after = p.beginRenderFrame();
+        assertTrue(after > before, "outstanding timer rings must never alias a new frame after reset");
+        p.recordGpu("old", before, "Vulkan graphics", 1, 2, 1.0, 64, 1.0);
+        p.recordGpu("future", after + 1, "Vulkan compute", 1, 2, 1.0, 64, 1.0);
+        assertTrue(p.snapshotGpuTimings().isEmpty());
+        assertTrue(p.snapshot().isEmpty());
+        p.recordGpu("new", after, "Vulkan graphics", 3, 4, 1.0, 64, 1.0);
+        assertEquals("new", p.snapshotGpuTimings().getFirst().label());
+    }
+
+    @Test
+    void rawWrappedTicksArePreservedWithTheirCounterWidth() {
+        FrameProfiler p = new FrameProfiler();
+        long frame = p.beginRenderFrame();
+        // The timer already decoded the eight-bit counter's wrap: (3 - 250) mod 256 = 9 ticks.
+        p.recordGpu("wrapped", frame, "Vulkan compute", 250, 3, 1.0, 8, 0.000009);
+        FrameProfiler.GpuTiming timing = p.snapshotGpuTimings().getFirst();
+        assertEquals(250, timing.beginTicks());
+        assertEquals(3, timing.endTicks());
+        assertEquals(8, timing.timestampValidBits());
+        assertEquals(0.000009, timing.elapsedMs());
+    }
+
+    @Test
+    void gpuTimelineHasAFinitePerFrameCapacity() {
+        FrameProfiler p = new FrameProfiler();
+        long frame = p.beginRenderFrame();
+        for (int i = 0; i <= FrameProfiler.MAX_GPU_TIMINGS_PER_FRAME; i++) {
+            p.recordGpu("pass", frame, "Vulkan graphics", i, i + 1, 1.0, 64, 1.0);
+        }
+        assertEquals(FrameProfiler.MAX_GPU_TIMINGS_PER_FRAME, p.snapshotGpuTimings().size());
+        assertEquals(1.0, p.valueSnapshot().stream().filter(value -> value.label().equals("gpu timeline drops"))
+                .findFirst().orElseThrow().value());
+    }
+
     @Test
     void avgAndP95AndSampleCount() {
         FrameProfiler p = new FrameProfiler();

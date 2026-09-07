@@ -188,6 +188,11 @@ public final class GraphRunner {
     @Nullable
     private static PassTimer passTimer;
     @Nullable
+    private static PassTimer profileFrameTimer;
+    private static long profileFrameId;
+    private static long profileFrameStartNanos;
+    private static long previousProfileStartNanos;
+    @Nullable
     private static VulkanComputeBackend computeBackend;
 
     // Engine-owned, sampleable D32 copy of the opaque G-buffer depth (see OpaqueDepth's own doc).
@@ -940,6 +945,57 @@ public final class GraphRunner {
         return sourcesVisible;
     }
 
+    /** Metadata for an on-demand dump, read from the pack's current values, not its defaults. */
+    public static String profileMetadata() {
+        GBuffer gbuffer = GBufferManager.getInstance();
+        return "generation=" + rebuildGeneration + " active=" + isActive()
+                + " render=" + (gbuffer == null ? "unavailable" : gbuffer.getWidth() + "x" + gbuffer.getHeight())
+                + " output=" + SsaaManager.nativeWidth() + "x" + SsaaManager.nativeHeight()
+                + " compile=" + new java.util.TreeMap<>(compileValues)
+                + " runtime=" + new java.util.TreeMap<>(pendingRuntimeDefaults)
+                + " runtimePending=" + runtimeValuesDirty;
+    }
+
+    /** Covers world preparation, opaque/graph/translucent draws and the AA/history tail. */
+    public static void beginProfileFrame() {
+        profileFrameTimer = null;
+        profileFrameId = 0;
+        if (!isActive()) {
+            previousProfileStartNanos = 0;
+            return;
+        }
+        long now = System.nanoTime();
+        // A pack rebuild resets the measurement window: never count its loading pause as frame time.
+        if (frameProfiler.currentRenderFrameId() == 0) previousProfileStartNanos = 0;
+        profileFrameId = frameProfiler.beginRenderFrame();
+        if (previousProfileStartNanos != 0) {
+            frameProfiler.record("render cadence CPU", (now - previousProfileStartNanos) / 1_000_000.0);
+        }
+        previousProfileStartNanos = now;
+        profileFrameStartNanos = now;
+        if (passTimer == null && RenderSystem.tryGetDevice() != null) {
+            passTimer = new PassTimer(frameProfiler);
+        }
+        profileFrameTimer = passTimer;
+        if (profileFrameTimer != null) {
+            profileFrameTimer.beginFrame(profileFrameId);
+            profileFrameTimer.bracketBegin(FrameProfiler.LABEL_FRAME);
+        }
+    }
+
+    /** Ends before HUD and presentation. This GPU time span includes waits, not only shader work. */
+    public static void endProfileFrame() {
+        if (profileFrameTimer != null) {
+            profileFrameTimer.bracketEnd(FrameProfiler.LABEL_FRAME);
+            profileFrameTimer.endFrame();
+            profileFrameTimer = null;
+        }
+        if (profileFrameId != 0 && profileFrameId == frameProfiler.currentRenderFrameId()) {
+            frameProfiler.record("world recording CPU", (System.nanoTime() - profileFrameStartNanos) / 1_000_000.0);
+        }
+        profileFrameId = 0;
+    }
+
     /** Mirrors {@code FramePipeline.prepareGBufferForOpaquePass()}. */
     public static void prepare(ChunkRenderMatrices matrices, double x, double y, double z) {
         // One log line every 5s, no per-frame cost. Sampled BEFORE the isActive() gate so a session
@@ -1207,8 +1263,7 @@ public final class GraphRunner {
         // loader structurally cannot answer this, and why the weather pass was inert for its whole
         // life while validating perfectly.
         SlotReachabilityCensus.onFrame(pack);
-        // VRAM-to-CPU ground truth for the AO/albedo/normal attachments, gated on the profiler
-        // overlay so it costs nothing in normal play -- see its own doc comment.
+        // This can block, and it must be turned on by hand; the profiler overlay does not turn it on.
         GBufferReadbackDiagnostic.maybeLog(gbuffer);
         // One-shot crosshair readback of sceneHdr, valid only with ENV_SPEC_RATIO selected -- see
         // EnvSpecularRatioReadback's own doc comment for why this reads a named pack target via
@@ -1222,10 +1277,9 @@ public final class GraphRunner {
         int width = gbuffer.getWidth();
         int height = gbuffer.getHeight();
 
-        PassTimer timer = passTimer;
+        PassTimer timer = profileFrameTimer;
         if (timer != null) {
-            timer.beginFrame();
-            timer.bracketBegin(FrameProfiler.LABEL_FRAME);
+            timer.bracketBegin(FrameProfiler.LABEL_GRAPH);
             // Sodium's terrain draws already completed before finish() was ever called, so this bracket
             // does NOT measure terrain rendering itself -- it measures GraphRunner's own dwell in the
             // graph's geometry slot (the loop iteration that recognizes and skips the geometry pass),
@@ -1365,8 +1419,7 @@ public final class GraphRunner {
             if (!geometryDwellClosed) {
                 timer.bracketEnd(FrameProfiler.LABEL_TERRAIN); // graph declared no geometry slot
             }
-            timer.bracketEnd(FrameProfiler.LABEL_FRAME);
-            timer.endFrame();
+            timer.bracketEnd(FrameProfiler.LABEL_GRAPH);
         }
 
         dev.icehunter.fornax.debug.FullscreenCapture.endFrame();

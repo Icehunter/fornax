@@ -31,6 +31,7 @@ public final class ComputePassTimer implements AutoCloseable {
     private final float timestampPeriodNs;
     private final int timestampValidBits;
     private final boolean[] submitted = new boolean[FramePacing.FRAMES_IN_FLIGHT];
+    private final long[] frameIds = new long[FramePacing.FRAMES_IN_FLIGHT];
 
     /** A null source, non-positive period, or zero valid-bit width creates a no-op timer. */
     public ComputePassTimer(FrameProfiler profiler, String label,
@@ -56,6 +57,7 @@ public final class ComputePassTimer implements AutoCloseable {
         checkSlot(slot);
         if (isEnabled()) {
             submitted[slot] = true;
+            frameIds[slot] = profiler.currentRenderFrameId();
         }
     }
 
@@ -80,8 +82,9 @@ public final class ComputePassTimer implements AutoCloseable {
         if (start.isEmpty() || end.isEmpty()) {
             return;
         }
-        profiler.record(label, ticksToMs(start.getAsLong(), end.getAsLong(),
-                timestampPeriodNs, timestampValidBits));
+        profiler.recordGpu(label, frameIds[slot], "Vulkan compute", start.getAsLong(),
+                end.getAsLong(), timestampPeriodNs, timestampValidBits,
+                ticksToMs(start.getAsLong(), end.getAsLong(), timestampPeriodNs, timestampValidBits));
     }
 
     @Override

@@ -32,6 +32,7 @@ class ComputePassTimerTest {
     @Test
     void matchingCompletedSlotRecordsElapsedMilliseconds() {
         FrameProfiler profiler = new FrameProfiler();
+        profiler.beginRenderFrame();
         FakeQueries queries = new FakeQueries();
         ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 2.0f, 64);
 
@@ -48,6 +49,7 @@ class ComputePassTimerTest {
     @Test
     void slotIsNotReadBeforeItsMatchingSubmissionCompletes() {
         FrameProfiler profiler = new FrameProfiler();
+        profiler.beginRenderFrame();
         FakeQueries queries = new FakeQueries();
         ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 1.0f, 64);
 
@@ -61,6 +63,7 @@ class ComputePassTimerTest {
     @Test
     void unresolvedCompletedQueriesRecordNothing() {
         FrameProfiler profiler = new FrameProfiler();
+        profiler.beginRenderFrame();
         FakeQueries queries = new FakeQueries();
         ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 1.0f, 64);
 
@@ -73,6 +76,7 @@ class ComputePassTimerTest {
     @Test
     void allThreeFrameSlotsUseIndependentQueryPairs() {
         FrameProfiler profiler = new FrameProfiler();
+        profiler.beginRenderFrame();
         FakeQueries queries = new FakeQueries();
         ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 1_000.0f, 64);
 
@@ -93,6 +97,7 @@ class ComputePassTimerTest {
     @Test
     void gpuDurationAndCpuDependencyWaitRemainSeparateRows() {
         FrameProfiler profiler = new FrameProfiler();
+        profiler.beginRenderFrame();
         FakeQueries queries = new FakeQueries();
         ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 1_000_000.0f, 64);
 
@@ -120,6 +125,7 @@ class ComputePassTimerTest {
     @Test
     void zeroValidBitsDisablesTimingWithoutReadingQueries() {
         FrameProfiler profiler = new FrameProfiler();
+        profiler.beginRenderFrame();
         FakeQueries queries = new FakeQueries();
         ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 1.0f, 0);
 
@@ -133,6 +139,7 @@ class ComputePassTimerTest {
     @Test
     void partialWidthMasksUndefinedHighBits() {
         FrameProfiler profiler = new FrameProfiler();
+        profiler.beginRenderFrame();
         FakeQueries queries = new FakeQueries();
         ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 1_000.0f, 8);
 
@@ -147,6 +154,7 @@ class ComputePassTimerTest {
     @Test
     void partialWidthCounterWrapUsesModuloDifference() {
         FrameProfiler profiler = new FrameProfiler();
+        profiler.beginRenderFrame();
         FakeQueries queries = new FakeQueries();
         ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 1_000.0f, 8);
 
@@ -161,6 +169,7 @@ class ComputePassTimerTest {
     @Test
     void sixtyFourBitCounterWrapAvoidsShiftBySixtyFour() {
         FrameProfiler profiler = new FrameProfiler();
+        profiler.beginRenderFrame();
         FakeQueries queries = new FakeQueries();
         ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 1_000.0f, 64);
 
@@ -171,4 +180,39 @@ class ComputePassTimerTest {
         // Unsigned 64-bit modulo distance across the sign boundary is 5 ticks = 0.005 ms.
         assertEquals(0.005, profiler.snapshot().getFirst().avgMs(), 1e-12);
     }
+    @Test
+    void delayedComputeResultsKeepSubmissionFrameAcrossLaterFrames() {
+        FrameProfiler profiler = new FrameProfiler();
+        long origin = profiler.beginRenderFrame();
+        FakeQueries queries = new FakeQueries();
+        ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 1.0f, 8);
+        timer.markSubmitted(0);
+        profiler.beginRenderFrame();
+        queries.resolve(0, 250L, 5L);
+        timer.drainCompleted(0);
+        FrameProfiler.GpuTiming sample = profiler.snapshotGpuTimings().getFirst();
+        assertEquals(origin, sample.frameId());
+        assertEquals("Vulkan compute", sample.queue());
+        assertEquals(8, sample.timestampValidBits());
+        assertEquals(0.000011, sample.elapsedMs(), 1e-12); // eleven ticks across 8-bit wrap
+    }
+
+    @Test
+    void resetRejectsAnOlderComputeSubmissionWithoutLosingNewSamples() {
+        FrameProfiler profiler = new FrameProfiler();
+        profiler.beginRenderFrame();
+        FakeQueries queries = new FakeQueries();
+        ComputePassTimer timer = new ComputePassTimer(profiler, "clouds", queries, 1.0f, 64);
+        timer.markSubmitted(0);
+        profiler.reset();
+        profiler.beginRenderFrame();
+        queries.resolve(0, 10L, 20L);
+        timer.drainCompleted(0);
+        assertTrue(profiler.snapshot().isEmpty());
+        timer.markSubmitted(1);
+        queries.resolve(1, 20L, 30L);
+        timer.drainCompleted(1);
+        assertEquals(1, profiler.snapshot().getFirst().samples());
+    }
+
 }

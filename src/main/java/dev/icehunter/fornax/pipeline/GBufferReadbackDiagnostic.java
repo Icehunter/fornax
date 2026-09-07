@@ -7,41 +7,35 @@ import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTexture;
 import dev.icehunter.fornax.FornaxMod;
-import dev.icehunter.fornax.config.FornaxConfig;
 
 import java.nio.ByteOrder;
 
 /**
- * ecv2 diagnostic instrument: once every {@link #INTERVAL_FRAMES} frames, while the profiler
- * overlay is enabled, reads the center 2x2 pixels of the AO/albedo/normal G-buffer attachments
- * straight from VRAM to CPU (bypassing every display/debug-view path) and logs the raw component
- * values -- ground truth for "does the TEXTURE actually contain nonzero bytes" questions that a
- * days-long "channel reads black on screen" investigation otherwise can't answer on its own (see
- * the ecv2 saga in {@code .superpowers/sdd/progress.md}: the AO attachment now packs baked AO in
- * {@code .r} and raw unlit albedo in {@code .gba} -- {@code .r} is proven live; {@code .gba} is the
- * one this instrument exists to verify). Costs nothing while the overlay is off; the {@link
- * FornaxConfig#get()}{@code .profilerOverlay} gate is the same one {@code ProfilerOverlay} itself
- * reads, so this instrument is only ever live alongside a HUD the player deliberately turned on.
+ * Reads the middle 2x2 pixels of the AO, albedo and normal G-buffer attachments straight from
+ * VRAM to CPU and logs their raw values. Periodic reads need
+ * {@code -Dfornax.debug.gbufferReadback=true}; they run on the first frame after that flag is set
+ * and every {@link #INTERVAL_FRAMES} frames after. Turning on timing stats does not turn on these
+ * reads, so measuring performance never causes this diagnostic's render-thread stalls.
  *
- * <p>{@link #requestDump()} is the on-demand counterpart (wired to the F10 debug keybind, see
- * {@code dev.icehunter.fornax.debug.FornaxDebugKeys}): a one-shot dump of ALL FIVE G-buffer
- * attachments, serviced by the very next {@link #maybeLog} call regardless of the profiler-overlay
- * gate -- the live-iteration path that replaced the diagnosis round's unconditional logging (see
- * that gate's own comment below).
+ * <p>{@link #requestDump()} is a separate on-demand path, wired to F10 in
+ * {@code dev.icehunter.fornax.debug.FornaxDebugKeys}. It dumps all five G-buffer attachments once,
+ * on the next {@link #maybeLog} call, even when periodic reads are off.
  *
- * <p>The readback sequence -- a {@code USAGE_MAP_READ}{@code |}{@code USAGE_COPY_DST} buffer, a
- * region {@link CommandEncoder#copyTextureToBuffer}, and a callback that maps/reads/closes -- is a
- * direct mirror of {@code net.minecraft.client.Screenshot#takeScreenshot}'s own texture-readback
- * shape (bytecode- and decompile-verified against the real MC 26.2 client jar via {@code javap}/
- * {@code cfr}): vanilla's own proof that this exact sequence runs synchronously start-to-finish
- * on this Blaze3D/MoltenVK stack (the callback's {@code buffer.close()} is the last statement
- * inside the very {@link Runnable} passed to {@code copyTextureToBuffer}, and vanilla never
- * separately submits or fences around it), so no extra {@code submit()}/{@code GpuFence} dance is
- * needed here either -- this call is allowed to (and does) stall the render thread until the
- * copied bytes are readable, which is fine for a profiler-gated diagnostic.
+ * <p>The read itself is a {@code USAGE_MAP_READ}{@code |}{@code USAGE_COPY_DST} buffer, a region
+ * copy through {@link CommandEncoder#copyTextureToBuffer}, and a callback that maps, reads and
+ * closes the buffer. That matches how {@code net.minecraft.client.Screenshot#takeScreenshot} reads
+ * a texture back (checked against the real MC 26.2 client jar with {@code javap} and {@code cfr}).
+ * That match shows vanilla runs this exact sequence start to finish on one thread on this
+ * Blaze3D/MoltenVK stack: the callback's {@code buffer.close()} is the last line inside the very
+ * {@link Runnable} passed to {@code copyTextureToBuffer}, and vanilla never submits or fences
+ * around it on its own. So no extra {@code submit()}/{@code GpuFence} step is needed here either:
+ * this call is free to stall the render thread until the copied bytes can be read, which is fine
+ * only because someone has to turn this diagnostic on by hand.
  */
 public final class GBufferReadbackDiagnostic {
-    private static final int INTERVAL_FRAMES = 120;
+    // Keep the old first-frame/every-30-frames cadence once this is turned on by hand.
+    private static final int INTERVAL_FRAMES = 30;
+    private static final boolean PERIODIC_READBACK = Boolean.getBoolean("fornax.debug.gbufferReadback");
 
     private static long frameCounter;
 
@@ -53,8 +47,8 @@ public final class GBufferReadbackDiagnostic {
     private GBufferReadbackDiagnostic() {
     }
 
-    /** Requests a one-shot full-attachment dump on the next {@link #maybeLog} call, independent of
-     * {@link FornaxConfig#get()}{@code .profilerOverlay} -- the on-demand path F10 drives. */
+    /** Requests a one-shot full-attachment dump on the next {@link #maybeLog} call, on its own path
+     * even when periodic reads are off. This is the path F10 drives. */
     public static void requestDump() {
         dumpRequested = true;
         dev.icehunter.fornax.debug.FullscreenCapture.request();
@@ -62,9 +56,9 @@ public final class GBufferReadbackDiagnostic {
 
     /**
      * Call once per frame from {@code GraphRunner.finish} after terrain has drawn into {@code
-     * gbuffer} -- services a pending {@link #requestDump()} unconditionally, then internally gates
-     * the automatic periodic log on {@link FornaxConfig#get()}{@code .profilerOverlay} and a
-     * frame-counter cadence, so most calls are a single cheap field read and return.
+     * gbuffer}. Always services a pending {@link #requestDump()} first, then checks the JVM flag
+     * and a frame count before the periodic log. With periodic reads off, this just checks two
+     * booleans and returns.
      */
     public static void maybeLog(GBuffer gbuffer) {
         if (dumpRequested) {
@@ -72,13 +66,13 @@ public final class GBufferReadbackDiagnostic {
             dumpAll(gbuffer);
         }
 
-        // Gated behind profilerOverlay; requestDump()/F10 is the on-demand path.
-        if (!FornaxConfig.get().profilerOverlay) {
+        // Periodic reads only turn on by hand; F10 was serviced above this check.
+        if (!PERIODIC_READBACK) {
             return;
         }
         frameCounter++;
         // Fire on the very first frame too (diagnosis rounds are short) and every 30 thereafter.
-        if (frameCounter != 1 && frameCounter % 30 != 0) {
+        if (frameCounter != 1 && frameCounter % INTERVAL_FRAMES != 0) {
             return;
         }
 
@@ -115,8 +109,8 @@ public final class GBufferReadbackDiagnostic {
      * On-demand full-attachment dump serviced by {@link #maybeLog} for a pending {@link
      * #requestDump()} -- reads the center 2x2 of all FIVE G-buffer attachments (normal, albedo,
      * material, ao, motion; see {@code GBufferManager}'s allocation for each one's {@code
-     * GpuFormat}) plus the current G-buffer's size/instance, independent of the periodic log's
-     * {@code profilerOverlay} gate.
+     * GpuFormat}) plus the current G-buffer's size and instance. Runs whether or not the periodic
+     * log's JVM flag is set.
      */
     private static void dumpAll(GBuffer gbuffer) {
         GpuTexture normalTexture = gbuffer.getNormalTexture();
