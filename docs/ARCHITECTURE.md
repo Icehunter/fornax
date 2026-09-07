@@ -87,7 +87,8 @@ Nothing runs for the translucent layer group.
 
 **`GraphRunner.prepare()`** does nothing immediately unless a pack is active (the latched render
 state, not live config; see §9). Otherwise it reads the current `mainRenderTarget` size, ensures
-the G-buffer and every graph target are sized for it, lazily builds the GPU-backed pass runners
+the G-buffer and every graph target are sized for it, and finishes any pending storage texture
+setup before frame bindings or compute work. It then lazily builds the GPU-backed pass runners
 and options buffer once a device exists (pack activation itself runs before any device is
 guaranteed to exist), sizes any mip-chain targets, and clears the G-buffer depth attachment to the
 reversed-Z far value. It then submits the independent voxel-light producer chain
@@ -427,13 +428,24 @@ input is this frame's write target from a moment ago, with no extra copy pass.
 Reconciliation (`TargetRegistry.ensureSize`) is idempotent: a target already at the right size,
 format, and history-ness is left alone; a mismatch tears down and rebuilds it; a target whose
 `enabled_if` now evaluates false is freed rather than left allocated. Every freshly allocated
-texture, and its history twin if any, is cleared to transparent zero before it is ever installed,
-unconditionally, as a target-model-level guarantee rather than something left to whichever pass
-happens to write it first. This exists because at least one supported Vulkan backend (MoltenVK,
-which translates Vulkan calls to Metal) does not zero-fill newly allocated VRAM: a target built and
+texture, and its history twin if any, gets a transparent-zero clear recorded before it is
+installed, unconditionally, as a target-model-level guarantee rather than something left to
+whichever pass happens to write it first. This exists because at least one supported Vulkan
+backend (MoltenVK, which translates Vulkan calls to Metal) does not zero-fill newly allocated
+VRAM: a target built and
 sampled before its first real write reads back whatever was previously resident in that memory.
 Making the clear structural for every target, rather than an ad-hoc responsibility of individual
 passes, removes an entire class of "why is there garbage on screen for one frame" bugs.
+
+A new or reallocated storage texture marks the registry's init batch as pending. Right after
+registry sizing in `prepare()`, before frame bindings, runner setup, or pre-opaque compute, the
+engine makes a graphics fence, submits the recorded batch, and waits for the fence to complete.
+This makes sure the layout change and clear finish before raw compute writes the texture. All
+storage allocations from one sizing pass share a single wait; a frame with no new allocations, or
+only ordinary raster allocations, submits and waits on nothing. The rare startup or resize frame
+can stall the CPU until graphics finishes. A timeout is fatal, and the pending flag only clears
+once the fence completes. Every compute runner also refuses to run while initialization is
+pending, instead of trying to flush mid-frame.
 
 ### Buffer targets (`kind = "buffer"`), and who sizes them
 
@@ -631,6 +643,42 @@ density data.
 Vulkan pass runners. Pack sources arrive with their complete import graph flattened; optimizing at
 this boundary removes dead helpers and folds the native module before a backend translates it into
 a compute function, without moving any visual policy out of the pack.
+
+### Reusing deterministic compute kernels
+
+A compute pass can declare `reuse_when_unchanged = { runtime = ["u_TestValue"],
+globals = ["u_SkyState.x", "u_FrameState.z"] }`. This says the listed scalars are the only
+runtime/global values that change its output. Leave the declaration out and the pass runs every
+frame as before. Runtime names must be declared runtime options, and the pass needs the
+`packOptions` input to read them. The global choices are single `x/y/z/w` fields of `u_SkyState`
+and `u_FrameState`, and the pass needs the `globals` input to read them. An optional `push` list
+can name `u_Param2`, `u_Param3`, or `u_SunDirection.x/y/z`; an empty list (the default) says the
+kernel reads no push fields. An unknown or repeated name fails pack loading.
+
+`FrameUniformValues` holds a copy of the exact floats written to those fields, and is cleared in
+`prepare()` before terrain writes the next frame's values. The reuse key compares those raw bits,
+the chosen `PackOptionsBuffer` values, the chosen push lanes, texel size, dispatch group counts,
+which target allocations are bound, and each input's content revision. The compare is exact: no
+rounding, no tolerance, no hashing. A kernel that runs successfully saves this key and bumps the
+revision of everything it wrote; a failed run saves nothing. A new runner starts with no saved key
+after a shader reload, and swapping in a new target clears both its allocation identity and its
+content revision.
+
+Only plain compute passes qualify: no per-frame gate, and every output must be a storage image
+that pass alone writes and that has no history copy. Inputs can be globals, options, or storage
+images written by an earlier reusable compute pass. Mutable builtins, buffers, history targets,
+in-place writes, shared writers, and the engine's own pre-opaque dispatches are all rejected. If
+an input's producer has a compile gate, the consuming pass must carry that exact same gate, or the
+producer must have none.
+
+On a cache hit, only the kernel dispatch and its timestamp writes are skipped. Descriptor
+updates, ring recycling, the release barrier, queue submission, and the binary/timeline syncing
+all still happen. This keeps the descriptor-retirement rules true, and still lets graphics read
+the result on every reused frame before the next real compute run. Two counters,
+`compute dispatches <pass>` and `compute reuses <pass>`, track real runs versus reuses; a skipped
+kernel does not add a fake zero-time sample. A kernel that reuses often will simply have fewer
+timing samples than the rolling window holds. This saves the kernel's own GPU work, not the cost
+of submitting it.
 
 ### Geometry-pass inputs (`u_GeomInput0..7`) and `builtin.depth_opaque`
 
@@ -2058,6 +2106,11 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
 - **Some Vulkan backends do not zero-fill new VRAM.** A freshly allocated texture can contain
   arbitrary previously-resident memory rather than zeros; every engine-managed target is cleared
   explicitly at allocation rather than relying on any backend's allocator behaviour.
+- **Recording a clear does not finish it.** A storage image's layout change and clear must
+  actually finish on the GPU before the first raw compute dispatch touches it. A clear that runs
+  late can wipe out a valid cached kernel result even though its reuse key still matches.
+  `prepare()` finishes the allocation batch before frame bindings; a compute pass that still has
+  pending initialization at that point is a fatal error.
 - **A pipeline builder that creates several GPU handles in sequence must free whatever succeeded
   on a mid-sequence failure.** Several pass runners retry a failed build every frame
   (`GraphRunner.ensureRunnersBuilt`), so an unguarded builder leaks again each retry, not once.
