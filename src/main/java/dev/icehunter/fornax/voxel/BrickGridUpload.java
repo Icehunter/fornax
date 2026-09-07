@@ -182,8 +182,8 @@ public final class BrickGridUpload {
         return (long) lightWordsPerSlot() * Integer.BYTES; // 8192 Standard, 65536 High
     }
 
-    private static final int VOXELS_PER_SECTION = 16 * 16 * 16;
-    private static final long OCCUPANCY_BYTES_PER_SLOT = VOXELS_PER_SECTION / 8; // 512
+    static final int VOXELS_PER_SECTION = 16 * 16 * 16;
+    static final long OCCUPANCY_BYTES_PER_SLOT = VOXELS_PER_SECTION / 8; // 512
     public static final long FACE_SEAL_BYTES_PER_SLOT = VOXELS_PER_SECTION;
     public static final long PAYLOAD_BYTES_PER_SLOT = VOXELS_PER_SECTION + OCCUPANCY_BYTES_PER_SLOT;
     /** One little-endian uint per slot -- see {@link #BRICK_SUMMARY_TARGET}'s own doc for why a whole
@@ -809,108 +809,51 @@ public final class BrickGridUpload {
     public record SlotUpload(int slot, SectionHarvester.Result result, boolean clearLight) {
     }
 
-    /**
-     * Batched sibling of {@link #uploadSlot}/{@link #clearLightSlot}: packs and records every entry
-     * in {@code uploads} into ONE command buffer, then does exactly ONE fenced {@code
-     * vkQueueSubmit}/{@code vkWaitForFences} round trip for the WHOLE batch, instead of one fenced
-     * round trip per slot. Exists because the batch-upload-throughput fix's own telemetry showed the
-     * async resync tail draining at only ~8 slots/frame against an 11,927-slot initial-fill queue --
-     * not because the per-slot GPU work is expensive (each slot copies at most ~21KB of already-
-     * packed bytes, trivial for a discrete or integrated GPU), but because the FIXED overhead of one
-     * fenced round trip (vkCreateFence + vkQueueSubmit + vkWaitForFences + vkDestroyFence, plus
-     * {@link VulkanComputeBackend#tryCreate()}/{@code close()}) is paid once PER SLOT -- roughly
-     * ~0.2ms each, the same fence-overhead figure {@link
-     * dev.icehunter.fornax.voxel.VoxelWindow}'s {@code SYNC_BUDGET} doc already derives. Folding N
-     * slots into one submit pays that fixed cost once for the whole batch; the marginal cost per
-     * additional slot is just a few more {@code vkCmdUpdateBuffer} calls recorded into the same
-     * command buffer (each still governed by its own 65536-byte inline-data limit and 4-byte
-     * alignment requirement -- see {@link #uploadLocked}'s own doc -- both satisfied per-slot exactly
-     * as before; there is no aggregate limit on how many such calls one command buffer may contain).
-     *
-     * <p>Reuses five scratch buffers across every entry in the batch (occupancy, payload, palette,
-     * summary, light-zero) rather than allocating fresh native memory per slot: {@code
-     * vkCmdUpdateBuffer} copies its source bytes into the command buffer's own storage at RECORD time
-     * (proven by this class's own pre-existing {@link #clearOccupancySlotsLocked}, which already
-     * reuses one 512-byte {@code zeros} buffer across every slot in its own batched clear), so a
-     * scratch buffer is safe to overwrite for the next slot the instant its {@code
-     * vkCmdUpdateBuffer} call returns -- no per-slot native allocation churn even for a batch of
-     * thousands.
-     *
-     * <p>No-op (returns immediately) for an empty {@code uploads}, or when any of the four mandatory
-     * brick-grid buffers (occupancy/payload/palette/summary) is not yet allocated -- callers must
-     * {@link #ensureAllocated} first, same contract as {@link #uploadSlot}. The light-volume buffer
-     * may be absent (emitter lighting never activated for the current pack); entries with {@code
-     * clearLight() == true} are simply skipped for the light write in that case, matching {@link
-     * #clearLightSlot}'s own no-op-when-unallocated behavior. */
+    /** Packs every slot into one submission and waits for it to finish. The registry keeps the
+     * scratch space, command pool and fence between batches; vkCmdUpdateBuffer copies scratch bytes
+     * at record time. Destination handles and per-slot sizes are read fresh under SHARED_QUEUE_LOCK
+     * on every call, so a resize never reuses an old buffer handle. Does nothing for an empty batch
+     * or one where a buffer is not yet allocated. */
     public static void uploadSlots(TargetRegistry registry, List<SlotUpload> uploads) {
         if (uploads.isEmpty()) {
             return;
         }
-        ByteBuffer occupancyScratch = MemoryUtil.memAlloc((int) OCCUPANCY_BYTES_PER_SLOT);
-        ByteBuffer payloadScratch = MemoryUtil.memAlloc(VOXELS_PER_SECTION);
-        ByteBuffer faceSealScratch = MemoryUtil.memAlloc(VOXELS_PER_SECTION);
-        ByteBuffer paletteScratch = MemoryUtil.memAlloc((int) PALETTE_BYTES_PER_SLOT);
-        ByteBuffer summaryScratch = MemoryUtil.memAlloc((int) BRICK_SUMMARY_BYTES_PER_SLOT);
-        ByteBuffer faceTextureScratch = MemoryUtil.memAlloc(VoxelFaceTexture.BYTES_PER_SLOT);
-        ByteBuffer lightmapScratch = MemoryUtil.memAlloc(VoxelLightmap.BYTES_PER_SLOT);
-        ByteBuffer lightZeroScratch = MemoryUtil.memCalloc((int) lightVolumeBytesPerSlot());
-        try {
-            synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
-                BufferInstance occupancy = registry.getBuffer(OCCUPANCY_TARGET);
-                BufferInstance payload = registry.getBuffer(PAYLOAD_TARGET);
-                BufferInstance palette = registry.getBuffer(PALETTE_TARGET);
-                BufferInstance faceTexture = registry.getBuffer(VoxelFaceTexture.TARGET);
-                BufferInstance lightmap = registry.getBuffer(VoxelLightmap.TARGET);
-                BufferInstance faceSeal = registry.getBuffer(FACE_SEAL_TARGET);
-                BufferInstance summary = registry.getBuffer(BRICK_SUMMARY_TARGET);
-                if (occupancy == null || payload == null || palette == null || faceSeal == null || summary == null) {
-                    return; // not allocated yet (or torn down) -- caller must ensureAllocated() first
-                }
-                BufferInstance lightVolume = registry.getBuffer(LIGHT_VOLUME_TARGET); // may legitimately be null
-                VulkanComputeBackend backend = VulkanComputeBackend.tryCreate();
-                if (backend == null) {
-                    return;
-                }
-                try {
-                    // Buffer sizes are threaded through alongside the raw handles so uploadBatchLocked
-                    // can re-validate EACH item against the LIVE capacity (fitsInBuffer) right before
-                    // its own vkCmdUpdateBuffer calls -- see that method's own doc for why this is
-                    // per-item rather than the whole-batch skip uploadSlot uses above.
-                    uploadBatchLocked(backend,
-                            occupancy.vkBuffer(), occupancy.sizeBytes(),
-                            payload.vkBuffer(), payload.sizeBytes(),
-                            faceSeal.vkBuffer(), faceSeal.sizeBytes(),
-                            palette.vkBuffer(), palette.sizeBytes(),
-                            faceTexture == null ? -1L : faceTexture.vkBuffer(),
-                            faceTexture == null ? 0L : faceTexture.sizeBytes(),
-                            lightmap == null ? -1L : lightmap.vkBuffer(),
-                            lightmap == null ? 0L : lightmap.sizeBytes(),
-                            summary.vkBuffer(), summary.sizeBytes(),
-                            lightVolume != null ? lightVolume.vkBuffer() : -1L,
-                            lightVolume != null ? lightVolume.sizeBytes() : 0L,
-                            uploads, occupancyScratch, payloadScratch, faceSealScratch,
-                            paletteScratch, summaryScratch, lightZeroScratch, faceTextureScratch, lightmapScratch);
-                } finally {
-                    backend.close();
-                }
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            BufferInstance occupancy = registry.getBuffer(OCCUPANCY_TARGET);
+            BufferInstance payload = registry.getBuffer(PAYLOAD_TARGET);
+            BufferInstance palette = registry.getBuffer(PALETTE_TARGET);
+            BufferInstance faceTexture = registry.getBuffer(VoxelFaceTexture.TARGET);
+            BufferInstance lightmap = registry.getBuffer(VoxelLightmap.TARGET);
+            BufferInstance faceSeal = registry.getBuffer(FACE_SEAL_TARGET);
+            BufferInstance summary = registry.getBuffer(BRICK_SUMMARY_TARGET);
+            if (occupancy == null || payload == null || palette == null || faceSeal == null || summary == null) {
+                return; // not allocated yet (or torn down) -- caller must ensureAllocated() first
             }
-        } finally {
-            MemoryUtil.memFree(occupancyScratch);
-            MemoryUtil.memFree(payloadScratch);
-            MemoryUtil.memFree(faceSealScratch);
-            MemoryUtil.memFree(paletteScratch);
-            MemoryUtil.memFree(summaryScratch);
-            MemoryUtil.memFree(faceTextureScratch);
-            MemoryUtil.memFree(lightmapScratch);
-            MemoryUtil.memFree(lightZeroScratch);
+            BufferInstance lightVolume = registry.getBuffer(LIGHT_VOLUME_TARGET); // may legitimately be null
+            VoxelUploadResources resources = registry.voxelUploadResources();
+            if (resources == null) return;
+            uploadBatchLocked(resources,
+                        occupancy.vkBuffer(), occupancy.sizeBytes(),
+                        payload.vkBuffer(), payload.sizeBytes(),
+                        faceSeal.vkBuffer(), faceSeal.sizeBytes(),
+                        palette.vkBuffer(), palette.sizeBytes(),
+                        faceTexture == null ? -1L : faceTexture.vkBuffer(),
+                        faceTexture == null ? 0L : faceTexture.sizeBytes(),
+                        lightmap == null ? -1L : lightmap.vkBuffer(),
+                        lightmap == null ? 0L : lightmap.sizeBytes(),
+                        summary.vkBuffer(), summary.sizeBytes(),
+                        lightVolume != null ? lightVolume.vkBuffer() : -1L,
+                        lightVolume != null ? lightVolume.sizeBytes() : 0L,
+                        uploads, resources.occupancy, resources.payload, resources.faceSeal,
+                        resources.palette, resources.summary, resources.lightZero, resources.faceTexture, resources.lightmap);
         }
     }
 
-    /** One command buffer covering every entry in {@code uploads}: for each slot, the same
+    /** One reused command pool covering every entry in {@code uploads}: for each slot, the same
      * occupancy/payload/palette/summary packing {@link #uploadLocked} does for a single slot (reusing
      * the shared scratch buffers instead of allocating fresh ones), plus an optional light-volume
-     * zero-fill ({@link #clearLightSlot}'s single range) when {@link SlotUpload#clearLight()} is set
-     * -- then ONE fence create/submit/wait/destroy for the whole batch. Caller holds {@code
+     * zero-fill ({@link #clearLightSlot}'s single range) when {@link SlotUpload#clearLight()} is set,
+     * then one submit and one completion wait, using the registry's reusable fence. Caller holds {@code
      * SHARED_QUEUE_LOCK}. {@code lightVolumeBuffer} of {@code -1L} means the light-volume buffer
      * isn't allocated; light-clear entries are skipped rather than attempted against an invalid
      * handle, matching {@link #clearLightSlot}'s own no-op behavior.
@@ -927,7 +870,7 @@ public final class BrickGridUpload {
      * (harvested after the shrink) already reflect the new, smaller one, so a single all-or-nothing
      * decision for the whole batch would either wrongly write the stale entries or wrongly drop the
      * still-valid ones. */
-    private static void uploadBatchLocked(VulkanComputeBackend backend,
+    private static void uploadBatchLocked(VoxelUploadResources resources,
                                           long occupancyBuffer, long occupancyBufferSize,
                                           long payloadBuffer, long payloadBufferSize,
                                           long faceSealBuffer, long faceSealBufferSize,
@@ -940,139 +883,110 @@ public final class BrickGridUpload {
                                           ByteBuffer faceSealScratch,
                                           ByteBuffer paletteScratch, ByteBuffer summaryScratch,
                                           ByteBuffer lightZeroScratch, ByteBuffer faceTextureScratch, ByteBuffer lightmapScratch) {
-        VulkanDevice device = backend.device();
-        VkCommandBuffer cmd = backend.commandPool().allocateBuffer();
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack).sType$Default();
-            VK13.vkBeginCommandBuffer(cmd, beginInfo);
+        resources.execute(cmd -> {
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                for (SlotUpload item : uploads) {
+                    int slot = item.slot();
+                    SectionHarvester.Result result = item.result();
+                    byte[] paletteIndices = result.paletteIndices();
 
-            for (SlotUpload item : uploads) {
-                int slot = item.slot();
-                SectionHarvester.Result result = item.result();
-                byte[] paletteIndices = result.paletteIndices();
-
-                long occupancyOffset = (long) slot * OCCUPANCY_BYTES_PER_SLOT;
-                long payloadOffset = (long) slot * VOXELS_PER_SECTION;
-                long faceSealOffset = (long) slot * FACE_SEAL_BYTES_PER_SLOT;
-                long summaryOffset = (long) slot * BRICK_SUMMARY_BYTES_PER_SLOT;
-                // Correctness guard, per item -- see this method's own "Per-item bounds guard" doc and
-                // fitsInBuffer's doc (out-of-bounds-write fix). Checked BEFORE packing any bytes for
-                // this item, so a stale/rejected item costs nothing beyond the check itself.
-                if (!fitsInBuffer(occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize)) {
-                    logOobDrop(OCCUPANCY_TARGET, slot, occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize);
-                    continue;
-                }
-                if (!fitsInBuffer(payloadOffset, VOXELS_PER_SECTION, payloadBufferSize)) {
-                    logOobDrop(PAYLOAD_TARGET, slot, payloadOffset, VOXELS_PER_SECTION, payloadBufferSize);
-                    continue;
-                }
-                if (!fitsInBuffer(faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize)) {
-                    logOobDrop(FACE_SEAL_TARGET, slot, faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize);
-                    continue;
-                }
-                if (!fitsInBuffer(summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize)) {
-                    logOobDrop(BRICK_SUMMARY_TARGET, slot, summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize);
-                    continue;
-                }
-
-                byte[] textureData = faceTextureBuffer == -1L ? new byte[0]
-                        : packFaceTextures(result.palette().entries());
-                long textureOffset = (long) slot * VoxelFaceTexture.BYTES_PER_SLOT;
-                if (faceTextureBuffer != -1L && !fitsInBuffer(textureOffset, textureData.length, faceTextureBufferSize)) {
-                    logOobDrop(VoxelFaceTexture.TARGET, slot, textureOffset, textureData.length, faceTextureBufferSize);
-                    continue; // Reject before writing any of this slot's ranges.
-                }
-                long lightmapOffset = (long) slot * VoxelLightmap.BYTES_PER_SLOT;
-                if (lightmapBuffer != -1L && !fitsInBuffer(lightmapOffset, VoxelLightmap.BYTES_PER_SLOT, lightmapBufferSize)) {
-                    logOobDrop(VoxelLightmap.TARGET, slot, lightmapOffset, VoxelLightmap.BYTES_PER_SLOT, lightmapBufferSize);
-                    continue;
-                }
-                occupancyScratch.clear();
-                for (int i = 0; i < OCCUPANCY_BYTES_PER_SLOT; i++) {
-                    occupancyScratch.put(i, (byte) 0);
-                }
-                payloadScratch.clear();
-                faceSealScratch.clear();
-                for (int voxel = 0; voxel < VOXELS_PER_SECTION; voxel++) {
-                    int paletteIndex = paletteIndices[voxel] & 0xFF;
-                    SectionPalette.Entry entry = result.palette().entries().get(paletteIndex);
-                    boolean occupied = isOccupyingShape(entry.shapeKind());
-                    if (occupied) {
-                        int byteIndex = voxel / 8;
-                        int bitIndex = voxel % 8;
-                        occupancyScratch.put(byteIndex, (byte) (occupancyScratch.get(byteIndex) | (1 << bitIndex)));
+                    long occupancyOffset = (long) slot * OCCUPANCY_BYTES_PER_SLOT;
+                    long payloadOffset = (long) slot * VOXELS_PER_SECTION;
+                    long faceSealOffset = (long) slot * FACE_SEAL_BYTES_PER_SLOT;
+                    long summaryOffset = (long) slot * BRICK_SUMMARY_BYTES_PER_SLOT;
+                    // Correctness guard, per item -- see this method's own "Per-item bounds guard" doc and
+                    // fitsInBuffer's doc (out-of-bounds-write fix). Checked BEFORE packing any bytes for
+                    // this item, so a stale/rejected item costs nothing beyond the check itself.
+                    if (!fitsInBuffer(occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize)) {
+                        logOobDrop(OCCUPANCY_TARGET, slot, occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize);
+                        continue;
                     }
-                    payloadScratch.put(voxel, paletteIndices[voxel]);
-                    faceSealScratch.put(voxel, packFaceSeal(entry));
-                }
-                VK13.vkCmdUpdateBuffer(cmd, occupancyBuffer, occupancyOffset, occupancyScratch);
-                VK13.vkCmdUpdateBuffer(cmd, payloadBuffer, payloadOffset, payloadScratch);
-                VK13.vkCmdUpdateBuffer(cmd, faceSealBuffer, faceSealOffset, faceSealScratch);
-
-                byte[] paletteData = packPaletteEntries(result.palette().entries());
-                if (paletteData.length > 0) {
-                    long paletteOffset = (long) slot * PALETTE_BYTES_PER_SLOT;
-                    if (fitsInBuffer(paletteOffset, paletteData.length, paletteBufferSize)) {
-                        paletteScratch.clear();
-                        paletteScratch.put(paletteData).flip();
-                        VK13.vkCmdUpdateBuffer(cmd, paletteBuffer, paletteOffset, paletteScratch);
-                    } else {
-                        logOobDrop(PALETTE_TARGET, slot, paletteOffset, paletteData.length, paletteBufferSize);
+                    if (!fitsInBuffer(payloadOffset, VOXELS_PER_SECTION, payloadBufferSize)) {
+                        logOobDrop(PAYLOAD_TARGET, slot, payloadOffset, VOXELS_PER_SECTION, payloadBufferSize);
+                        continue;
                     }
-                }
+                    if (!fitsInBuffer(faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize)) {
+                        logOobDrop(FACE_SEAL_TARGET, slot, faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize);
+                        continue;
+                    }
+                    if (!fitsInBuffer(summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize)) {
+                        logOobDrop(BRICK_SUMMARY_TARGET, slot, summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize);
+                        continue;
+                    }
 
-                if (textureData.length > 0) {
-                    faceTextureScratch.clear(); faceTextureScratch.put(textureData).flip();
-                    VK13.vkCmdUpdateBuffer(cmd, faceTextureBuffer, textureOffset, faceTextureScratch);
-                }
-                if (lightmapBuffer != -1L) {
-                    lightmapScratch.clear(); lightmapScratch.put(result.lightmap()).flip();
-                    VK13.vkCmdUpdateBuffer(cmd, lightmapBuffer, lightmapOffset, lightmapScratch);
-                }
-                summaryScratch.clear();
-                summaryScratch.putInt(0, summaryWord(anySolidVoxel(paletteIndices, result.palette().entries()),
-                        anyEmitter(result.palette().entries())));
-                VK13.vkCmdUpdateBuffer(cmd, summaryBuffer, summaryOffset, summaryScratch);
+                    byte[] textureData = faceTextureBuffer == -1L ? new byte[0]
+                            : packFaceTextures(result.palette().entries());
+                    long textureOffset = (long) slot * VoxelFaceTexture.BYTES_PER_SLOT;
+                    if (faceTextureBuffer != -1L && !fitsInBuffer(textureOffset, textureData.length, faceTextureBufferSize)) {
+                        logOobDrop(VoxelFaceTexture.TARGET, slot, textureOffset, textureData.length, faceTextureBufferSize);
+                        continue; // Reject before writing any of this slot's ranges.
+                    }
+                    long lightmapOffset = (long) slot * VoxelLightmap.BYTES_PER_SLOT;
+                    if (lightmapBuffer != -1L && !fitsInBuffer(lightmapOffset, VoxelLightmap.BYTES_PER_SLOT, lightmapBufferSize)) {
+                        logOobDrop(VoxelLightmap.TARGET, slot, lightmapOffset, VoxelLightmap.BYTES_PER_SLOT, lightmapBufferSize);
+                        continue;
+                    }
+                    occupancyScratch.clear();
+                    for (int i = 0; i < OCCUPANCY_BYTES_PER_SLOT; i++) {
+                        occupancyScratch.put(i, (byte) 0);
+                    }
+                    payloadScratch.clear();
+                    faceSealScratch.clear();
+                    for (int voxel = 0; voxel < VOXELS_PER_SECTION; voxel++) {
+                        int paletteIndex = paletteIndices[voxel] & 0xFF;
+                        SectionPalette.Entry entry = result.palette().entries().get(paletteIndex);
+                        boolean occupied = isOccupyingShape(entry.shapeKind());
+                        if (occupied) {
+                            int byteIndex = voxel / 8;
+                            int bitIndex = voxel % 8;
+                            occupancyScratch.put(byteIndex, (byte) (occupancyScratch.get(byteIndex) | (1 << bitIndex)));
+                        }
+                        payloadScratch.put(voxel, paletteIndices[voxel]);
+                        faceSealScratch.put(voxel, packFaceSeal(entry));
+                    }
+                    VK13.vkCmdUpdateBuffer(cmd, occupancyBuffer, occupancyOffset, occupancyScratch);
+                    VK13.vkCmdUpdateBuffer(cmd, payloadBuffer, payloadOffset, payloadScratch);
+                    VK13.vkCmdUpdateBuffer(cmd, faceSealBuffer, faceSealOffset, faceSealScratch);
 
-                if (item.clearLight() && lightVolumeBuffer != -1L) {
-                    long lightOffset = (long) slot * lightVolumeBytesPerSlot();
-                    if (fitsInBuffer(lightOffset, lightVolumeBytesPerSlot(), lightVolumeBufferSize)) {
-                        lightZeroScratch.clear();
-                        VK13.vkCmdUpdateBuffer(cmd, lightVolumeBuffer, lightOffset, lightZeroScratch);
-                    } else {
-                        logOobDrop(LIGHT_VOLUME_TARGET, slot, lightOffset, lightVolumeBytesPerSlot(), lightVolumeBufferSize);
+                    byte[] paletteData = packPaletteEntries(result.palette().entries());
+                    if (paletteData.length > 0) {
+                        long paletteOffset = (long) slot * PALETTE_BYTES_PER_SLOT;
+                        if (fitsInBuffer(paletteOffset, paletteData.length, paletteBufferSize)) {
+                            paletteScratch.clear();
+                            paletteScratch.put(paletteData).flip();
+                            VK13.vkCmdUpdateBuffer(cmd, paletteBuffer, paletteOffset, paletteScratch);
+                        } else {
+                            logOobDrop(PALETTE_TARGET, slot, paletteOffset, paletteData.length, paletteBufferSize);
+                        }
+                    }
+
+                    if (textureData.length > 0) {
+                        faceTextureScratch.clear(); faceTextureScratch.put(textureData).flip();
+                        VK13.vkCmdUpdateBuffer(cmd, faceTextureBuffer, textureOffset, faceTextureScratch);
+                    }
+                    if (lightmapBuffer != -1L) {
+                        lightmapScratch.clear(); lightmapScratch.put(result.lightmap()).flip();
+                        VK13.vkCmdUpdateBuffer(cmd, lightmapBuffer, lightmapOffset, lightmapScratch);
+                    }
+                    summaryScratch.clear();
+                    summaryScratch.putInt(0, summaryWord(anySolidVoxel(paletteIndices, result.palette().entries()),
+                            anyEmitter(result.palette().entries())));
+                    VK13.vkCmdUpdateBuffer(cmd, summaryBuffer, summaryOffset, summaryScratch);
+
+                    if (item.clearLight() && lightVolumeBuffer != -1L) {
+                        long lightOffset = (long) slot * lightVolumeBytesPerSlot();
+                        if (fitsInBuffer(lightOffset, lightVolumeBytesPerSlot(), lightVolumeBufferSize)) {
+                            lightZeroScratch.clear();
+                            VK13.vkCmdUpdateBuffer(cmd, lightVolumeBuffer, lightOffset, lightZeroScratch);
+                        } else {
+                            logOobDrop(LIGHT_VOLUME_TARGET, slot, lightOffset, lightVolumeBytesPerSlot(), lightVolumeBufferSize);
+                        }
                     }
                 }
-            }
 
-            recordUploadToComputeReadBarrier(cmd, stack);
-            VK13.vkEndCommandBuffer(cmd);
-
-            VkFenceCreateInfo fenceInfo = VkFenceCreateInfo.calloc(stack).sType$Default();
-            LongBuffer fenceOut = stack.mallocLong(1);
-            if (VK13.vkCreateFence(device.vkDevice(), fenceInfo, null, fenceOut) != VK13.VK_SUCCESS) {
-                FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkCreateFence failed for batched slot upload");
-                return;
+                recordUploadToComputeReadBarrier(cmd, stack);
             }
-            long fence = fenceOut.get(0);
-            try {
-                VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack).sType$Default()
-                        .pCommandBuffers(stack.pointers(cmd));
-                int submitResult = VK13.vkQueueSubmit(backend.computeQueue().vkQueue(), submitInfo, fence);
-                if (submitResult != VK13.VK_SUCCESS) {
-                    // Must not wait on a fence nothing was ever submitted against -- that would block this
-                    // (SHARED_QUEUE_LOCK-held) thread on FENCE_WAIT_TIMEOUT forever.
-                    FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkQueueSubmit failed with VkResult {} for batched slot upload", submitResult);
-                    return;
-                }
-                int waitResult = VK13.vkWaitForFences(device.vkDevice(), fence, true, FENCE_WAIT_TIMEOUT);
-                if (waitResult != VK13.VK_SUCCESS) {
-                    FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkWaitForFences returned VkResult {} for batched slot upload", waitResult);
-                }
-            } finally {
-                VK13.vkDestroyFence(device.vkDevice(), fence, null);
-            }
-        }
+        });
     }
 
     /** Zero-fills one slot's three light ranges. Called when a toroidal slot is CLAIMED by a

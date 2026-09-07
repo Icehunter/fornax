@@ -2390,6 +2390,14 @@ generation it was submitted under, and both the bookkeeping and the upload turn 
 generation under the shared upload lock. So a reload at the same camera spot cannot leave fresh
 pending buffers under stale owners, and a late harvest cannot write into new storage.
 
+Batch voxel uploads reuse one scratch space, command pool and fence, all owned by the registry and
+held under the shared queue lock. Each batch reads the current destination handles and sizes fresh,
+keeps the same per-slot packing and bounds checks, and waits for the work to finish before
+returning. `SynchronousTransfer` stops the pool from being reset or destroyed after a wait fails; a
+failed submit never waits on a fence nothing was signaled against. Closing the registry blocks any
+new resource request and retires the workspace; a changed light-volume layout also replaces it.
+Single-slot uploads and clears keep their own separate paths.
+
 ### Voxel model material coverage
 
 Harvest reads whether a surface is alpha-tested off each baked quad's material layer, so it works

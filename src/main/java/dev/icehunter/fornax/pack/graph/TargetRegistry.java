@@ -10,6 +10,7 @@ import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.pack.GraphSpec;
 import dev.icehunter.fornax.pack.TargetSpec;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
+import dev.icehunter.fornax.voxel.VoxelUploadResources;
 import org.jspecify.annotations.Nullable;
 import org.joml.Vector4f;
 import org.lwjgl.PointerBuffer;
@@ -52,6 +53,21 @@ public final class TargetRegistry implements AutoCloseable {
     private final Map<String, Long> computeContentRevisions = new LinkedHashMap<>();
     private long nextComputeContentRevision;
     private final StorageTextureInitialization storageTextureInitialization = new StorageTextureInitialization();
+
+    private @Nullable VoxelUploadResources voxelUploadResources;
+    private boolean voxelUploadsClosed;
+
+    /** Keeps only the upload scratch space and submission objects. Never keeps destination buffer handles. */
+    public @Nullable VoxelUploadResources voxelUploadResources() {
+        VoxelUploadResources.requireLock();
+        if (voxelUploadsClosed) return null;
+        if (voxelUploadResources != null && !voxelUploadResources.matchesLightLayout()) {
+            voxelUploadResources.close();
+            voxelUploadResources = null;
+        }
+        if (voxelUploadResources == null) voxelUploadResources = VoxelUploadResources.tryCreate();
+        return voxelUploadResources;
+    }
 
     /** Allocation-only batch completion; call before frame bindings or raw compute are recorded. */
     void completeStorageTextureInitialization() {
@@ -531,6 +547,13 @@ public final class TargetRegistry implements AutoCloseable {
 
     @Override
     public void close() {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            voxelUploadsClosed = true;
+            if (voxelUploadResources != null) {
+                voxelUploadResources.close();
+                voxelUploadResources = null;
+            }
+        }
         VulkanComputeBackend.waitForGpuIdleBeforeDestroy();
 
         // Drain anything still sitting in the retirement ring (see its own doc) instead of leaking
