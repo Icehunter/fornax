@@ -2393,16 +2393,19 @@ are average colours and rough shapes, not lit surfaces and not the model's trian
 A pack that declares and enables the `voxelFaceTexture` buffer gets exact atlas UVs beside the
 16-word palette; left out or switched off, nothing is allocated. Only tier zero fills it, with the
 same wrap-around slot and 96-entry addressing as `voxelPalette`:
-`(slot * 96 + entry) * 48 + face * 8`, faces in DOWN, UP, NORTH, SOUTH, WEST, EAST order. Each face
-holds flags (bit 0 usable, bit 1 alpha-tested), the biome tint as ARGB, then six floats
-`u0,v0,du/ds,dv/ds,du/dt,dv/dt`. Local `(s,t)` is `(y,z)` on X faces, `(x,z)` on Y faces and `(x,y)`
-on Z faces, so a turned or mirrored baked UV still comes out right. A face is usable only when one
-opaque or alpha-tested quad covers the whole cell face with UVs running straight across it.
-See-through materials, stacked faces, part cells, crosses, loose leaf quads and higher tint layers
-mark it unusable, and a reader must fall back on the average face colour.
+`(slot * 96 + entry) * 42 + face * 7`, faces in DOWN, UP, NORTH, SOUTH, WEST, EAST order. Each face
+has one header word, then six raw float words `u0,v0,du/ds,dv/ds,du/dt,dv/dt`. The header packs
+biome RGB into bits 0..23 and flags into bits 24..31 (flag bit 0 usable, bit 1 alpha-tested). Tint
+alpha is not stored; alpha comes from the atlas sample instead. Local `(s,t)` is `(y,z)` on X faces,
+`(x,z)` on Y faces and `(x,y)` on Z faces, so a turned or mirrored baked UV still comes out right. A
+face is usable only when one opaque or alpha-tested quad covers the whole cell face with UVs
+running straight across it. See-through materials, stacked faces, part cells, crosses, loose leaf
+quads and higher tint layers mark it unusable, and a reader must fall back on the average face
+colour.
 
-The buffer costs 18,432 bytes per slot: about 12.8 MiB at diameter 9, 86.4 MiB at 17. A new one is
-zeroed. Both uploads write it before the summary word in the same submission, so pending ownership
+The buffer holds 16,128 bytes per slot: about 11.2 MiB at diameter 9, 75.6 MiB at 17. Readers must
+use this seven-word face layout and reject a buffer of the wrong size. A new buffer starts at zero.
+Both uploads write it before the summary word in the same submission, so pending ownership
 still guards stale data. `VoxelWindow.initializeStorage` drops the old owners and queued harvest
 generations, so fresh face data goes up before any summary reads valid again.
 

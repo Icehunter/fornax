@@ -65,7 +65,8 @@ public final class SectionPalette {
                          int faceSealMask, int[] faceTextureWords) {
         public Entry {
             if (faceTextureWords.length != VoxelFaceTexture.ENTRY_WORDS) {
-                throw new IllegalArgumentException("faceTextureWords must contain 48 words");
+                throw new IllegalArgumentException("faceTextureWords must contain "
+                        + VoxelFaceTexture.ENTRY_WORDS + " words, got " + faceTextureWords.length);
             }
             if (faceColors.length != 6) {
                 throw new IllegalArgumentException("faceColors must have exactly 6 entries, got " + faceColors.length);

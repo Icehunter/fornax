@@ -15,7 +15,8 @@ import java.util.List;
  * extra buffer leaves the 16-word palette layout alone. */
 public final class VoxelFaceTexture {
     public static final String TARGET = "voxelFaceTexture";
-    public static final int FACE_WORDS = 8;
+    // One header word for RGB and flags, then six raw float words for UV. Tint alpha is not read.
+    public static final int FACE_WORDS = 7;
     public static final int ENTRY_WORDS = 6 * FACE_WORDS;
     public static final int WORDS_PER_SLOT = SectionHarvester.MAX_PALETTE_ENTRIES * ENTRY_WORDS;
     public static final int BYTES_PER_SLOT = WORDS_PER_SLOT * Integer.BYTES;
@@ -48,7 +49,9 @@ public final class VoxelFaceTexture {
         return words;
     }
 
-    /** words: flags(valid=1, alpha-tested=2), ARGB tint, then float u0,v0,du/ds,dv/ds,du/dt,dv/dt.
+    /** words: RGB tint in header bits 0..23, flags(valid=1, alpha-tested=2) in bits 24..31,
+     * then raw float u0,v0,du/ds,dv/ds,du/dt,dv/dt. Readers must use this seven-word layout.
+     * Tint alpha is dropped; alpha testing uses the atlas alpha instead.
      * Local st uses (y,z) for X faces, (x,z) for Y faces and (x,y) for Z faces. */
     static int[] mapping(BakedQuad quad, Direction face, int tint) {
         int[] words = new int[FACE_WORDS];
@@ -77,11 +80,13 @@ public final class VoxelFaceTexture {
             // Rounding only: four ulps cover the three float sums above.
             if (Math.abs(expected - uv[3][c]) > 4 * Math.ulp(Math.max(Math.abs(expected), Math.abs(uv[3][c])))) return words;
         }
-        words[0] = 1 | (quad.materialInfo().layer() == ChunkSectionLayer.CUTOUT ? 2 : 0);
-        words[1] = quad.materialInfo().tintIndex() == 0 ? tint : -1;
-        words[2] = Float.floatToRawIntBits(uv[0][0]); words[3] = Float.floatToRawIntBits(uv[0][1]);
-        words[4] = Float.floatToRawIntBits(uv[1][0]-uv[0][0]); words[5] = Float.floatToRawIntBits(uv[1][1]-uv[0][1]);
-        words[6] = Float.floatToRawIntBits(uv[2][0]-uv[0][0]); words[7] = Float.floatToRawIntBits(uv[2][1]-uv[0][1]);
+        int flags = 1 | (quad.materialInfo().layer() == ChunkSectionLayer.CUTOUT ? 2 : 0);
+        int rgb = quad.materialInfo().tintIndex() == 0 ? tint : -1;
+        // RGB takes three bytes; the top byte holds the two flag bits.
+        words[0] = (flags << 24) | (rgb & 0x00ffffff);
+        words[1] = Float.floatToRawIntBits(uv[0][0]); words[2] = Float.floatToRawIntBits(uv[0][1]);
+        words[3] = Float.floatToRawIntBits(uv[1][0]-uv[0][0]); words[4] = Float.floatToRawIntBits(uv[1][1]-uv[0][1]);
+        words[5] = Float.floatToRawIntBits(uv[2][0]-uv[0][0]); words[6] = Float.floatToRawIntBits(uv[2][1]-uv[0][1]);
         return words;
     }
 }
