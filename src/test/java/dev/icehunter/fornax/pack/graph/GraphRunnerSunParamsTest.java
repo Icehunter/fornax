@@ -1,6 +1,8 @@
 package dev.icehunter.fornax.pack.graph;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -11,6 +13,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -44,9 +48,23 @@ class GraphRunnerSunParamsTest {
     private static final Pattern PASS_PARAMS_BLOCK =
             Pattern.compile("uniform\\s+u_PassParams\\s*\\{[^}]*}", Pattern.DOTALL);
 
-    @Test void voxelSurfaceShadingReceivesTheSameSunAndTerrainDistanceAsResolve() {
-        assertTrue(GraphRunner.wantsSunAndDebugParams("voxel_water_reflection"));
-        assertTrue(GraphRunner.suppliesParam2("voxel_water_reflection"));
+    @ParameterizedTest
+    @ValueSource(strings = {"voxel_water_reflection", "voxel_water_reflection_probe_trace",
+            "voxel_water_reflection_probe_surface", "voxel_water_reflection_probe_direct",
+            "voxel_water_reflection_probe_full", "voxel_water_reflection_variant"})
+    void voxelSurfaceShadingFamilyReceivesTheSameSunAndTerrainDistanceAsResolve(String name) {
+        assertAll(name,
+                () -> assertTrue(GraphRunner.wantsSunAndDebugParams(name), "sun and debug params"),
+                () -> assertTrue(GraphRunner.suppliesParam2(name), "terrain render distance"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"voxel_water_reflections", "voxel_water_reflectionprobe_trace",
+            "other_voxel_water_reflection_probe_trace"})
+    void similarNamesOutsideTheVoxelSurfaceShadingFamilyDoNotReceiveItsParams(String name) {
+        assertAll(name,
+                () -> assertFalse(GraphRunner.wantsSunAndDebugParams(name), "sun and debug params"),
+                () -> assertFalse(GraphRunner.suppliesParam2(name), "terrain render distance"));
     }
 
     @Test

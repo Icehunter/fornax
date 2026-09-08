@@ -1060,6 +1060,10 @@ extra one such as `glint_occlusion_voxel` matches `water_composite` on sun direc
 height and `u_Param2` terrain distance. A name the engine does not know reads reset defaults, with
 no error.
 
+The exact `voxel_water_reflection` name and every name starting with `voxel_water_reflection_`
+share that same parameter block. Diagnostic variants such as `voxel_water_reflection_probe_trace`
+therefore receive the base pass's live sun/moon direction, true sun height and terrain distance.
+
 ### The reserved `globals` input (`compute` and `particles`)
 
 `compute` and `particles` passes build their own descriptor sets by hand, so neither gets
@@ -2460,6 +2464,6 @@ new one's slot.
 A section above or below build height has no geometry but still reads the world's light layers:
 empty must not turn open sky into no sky light.
 
-The `voxel_water_reflection` fullscreen pass gets the same sun and debug PassParams as `resolve`:
-real sun/moon direction, true sun height, and `u_Param2` holding terrain render distance in blocks.
-Not the render-fog end point, and not the default pass sun height.
+The `voxel_water_reflection` fullscreen pass and its underscore-suffixed variants get the same sun
+and debug PassParams as `resolve`: real sun/moon direction, true sun height, and `u_Param2` holding
+terrain render distance in blocks. This anchors their lighting and fog to the same world state.

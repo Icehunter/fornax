@@ -2201,6 +2201,8 @@ public final class GraphRunner {
      * further mutually-exclusive arms of one shader family). {@code clouds_march*} covers the
      * CLOUD_QUALITY==2 {@code clouds_march_full} arm. {@code resolve} (the LDR pass) is matched
      * exactly, since it does not share the {@code resolve_hdr} prefix.
+     * {@code voxel_water_reflection} and its underscore-suffixed variants share this block so
+     * diagnostic passes use the same lighting and fog inputs as the base pass.
      *
      * <p>Some listed passes want only part of this block. {@code direct_light_analytic} consumes
      * {@code u_Param3} only to SUPPRESS itself during the resolve-branched instrument views
@@ -2227,6 +2229,7 @@ public final class GraphRunner {
         return name.equals("resolve") || name.startsWith("resolve_hdr")
                 || name.equals("tonemap") || name.equals("water_composite")
                 || name.equals("voxel_water_reflection")
+                || name.startsWith("voxel_water_reflection_")
                 || name.startsWith("water_volume_march")
                 || name.equals("water_volume_scatter_history")
                 || name.equals("ssr_water_fill") || name.equals("direct_light_analytic")
@@ -2296,8 +2299,8 @@ public final class GraphRunner {
             // the same screen distance the surrounding opaque terrain's fog does -- a different
             // anchor here would show as a border-fog seam at the water's edge. u_SunDirection feeds
             // its light-normal specular lobe. u_Param3 (debug-view id) is harmless-unused for it.
-            // voxel_water_reflection lights real world hits, so it needs the same sun and terrain
-            // distance. A zero u_Param2 or an overhead sun would drift from the terrain.
+            // The voxel_water_reflection family lights real world hits, so every variant needs the
+            // same sun and terrain distance. A zero u_Param2 or an overhead sun drifts from terrain.
             // ssr_water_fill needs the exact same u_Param2 anchor as water_composite, for the same
             // reason: its own per-voxel-hit aerial fog border term must dissolve at the identical
             // screen distance, or the voxel fill would show a border-fog seam where render distance
