@@ -112,16 +112,16 @@ class PlaguePackLoadsTest {
     }
 
     /**
-     * A target that is read back MAGNIFIED must declare {@code filter = "linear"}.
+     * Downsampled targets read by fullscreen passes must declare {@code filter = "linear"}.
      *
-     * <p>Every fullscreen input binds NEAREST by default, which is correct at 1:1 and wrong the
-     * moment a pass samples a smaller target across a bigger output: each texel becomes a visible
-     * square. Plague's bloom chain is entirely such targets -- quarter scale down to 1/256 -- and
-     * {@code bloomFinal} is the worst case, since tonemap reads it at full resolution and it carries
-     * the whole bloom contribution rather than one weighted level.
+     * <p>Fullscreen samplers default to NEAREST, so magnifying a smaller image can expose texel
+     * squares. This static gate covers declared fullscreen inputs, including history reads, by
+     * scale rather than target name. Compute-only storage images are outside its scope: their
+     * exact image loads do not use the fullscreen sampler and may carry metadata.
      *
-     * <p>Asserted by SCALE rather than by name, so a future downsampled target is covered the day it
-     * is declared instead of the day someone notices blocks in a screenshot.
+     * <p>This is a conservative manifest check, not proof that a shader magnifies an input or uses
+     * its sampler filter. It does not inspect shader accesses, output size, or whether pass gates
+     * are currently enabled; texelFetch and custom reconstruction still need separate verification.
      */
     @Test
     void everyDownsampledTargetIsSampledLinearly() {
@@ -130,17 +130,23 @@ class PlaguePackLoadsTest {
 
         PackModel pack = PackDiscovery.loadFrom(root, 1920, 1080);
 
+        Set<String> fullscreenInputs = pack.graph().passes().stream()
+                .filter(p -> p.type() == PassType.FULLSCREEN)
+                .flatMap(p -> p.inputs().stream())
+                .map(name -> name.endsWith(".history")
+                        ? name.substring(0, name.length() - ".history".length()) : name)
+                .collect(Collectors.toSet());
         Set<String> nearestAndDownsampled = pack.graph().targets().values().stream()
                 .filter(t -> t.kind() == TargetKind.TEXTURE)
+                .filter(t -> fullscreenInputs.contains(t.name()))
                 .filter(t -> t.scale() > 0.0 && t.scale() < 1.0)
                 .filter(t -> t.filter() == TargetFilter.NEAREST)
                 .map(TargetSpec::name)
                 .collect(Collectors.toCollection(TreeSet::new));
 
         assertTrue(nearestAndDownsampled.isEmpty(),
-                "these targets are smaller than the frame, so any pass reading them magnifies them and"
-                        + " NEAREST turns their texels into visible squares -- declare"
-                        + " filter = \"linear\" on each, or document why point sampling is intended: "
+                "these downsampled fullscreen inputs require filter = \"linear\" under the"
+                        + " conservative manifest sampling check: "
                         + nearestAndDownsampled);
     }
 
