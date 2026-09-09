@@ -12,7 +12,9 @@ import dev.icehunter.fornax.pass.compute.ComputeShaderCompiler;
 import dev.icehunter.fornax.pipeline.PersistentPipelineCache;
 import dev.icehunter.fornax.profile.ProfilerOverlay;
 import dev.icehunter.fornax.util.RendererReload;
+import dev.icehunter.fornax.voxel.VoxelWindow;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.CommonLifecycleEvents;
 import org.slf4j.Logger;
@@ -37,6 +39,10 @@ public class FornaxMod implements ClientModInitializer {
         FornaxKeybind.register();
         FornaxDebugKeys.register();
         ProfilerOverlay.register();
+        // A teleport can resync before destination chunks arrive. Mesh rebuilds and camera
+        // movement are not guaranteed afterward, so chunk availability must wake backfill itself.
+        ClientChunkEvents.CHUNK_LOAD.register((level, chunk) ->
+                VoxelWindow.onChunkLoaded(level, chunk.getPos().x(), chunk.getPos().z()));
 
         // Fabric fires this entrypoint from INSIDE Minecraft's constructor (after the singleton
         // instance is assigned, before its final fields exist), so nothing here may touch the

@@ -7,6 +7,7 @@ import com.google.gson.JsonParser;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.pack.PassSpec;
@@ -90,12 +91,16 @@ public final class FullscreenCapture {
             for (boolean buffer : bufferInputs) if (buffer) {
                 throw new IllegalArgumentException("Buffer-input passes cannot be captured by this texture-only facility");
             }
-            long passBytes = bytesFor(output);
-            for (GpuTextureView input : inputs) passBytes = Math.addExact(passBytes, bytesFor(input));
-            if (passBytes > MAX_BYTES - session.reserved) throw new IllegalArgumentException("Capture exceeds 1 GiB total byte budget");
-            session.reserved += passBytes;
+            TexturePlan plan = planTextures(output, inputs, MAX_BYTES - session.reserved);
+            session.reserved += plan.bytes();
             for (int index = 0; index < inputs.size(); index++) {
-                capture.texture(inputs.get(index), spec.inputs().get(index), index, samplers.get(index), false);
+                String unavailable = plan.inputs().get(index).unavailableReason();
+                if (unavailable == null) {
+                    capture.texture(inputs.get(index), spec.inputs().get(index), index, samplers.get(index), false);
+                } else {
+                    capture.unavailableTexture(inputs.get(index), spec.inputs().get(index), index,
+                            samplers.get(index), unavailable);
+                }
             }
             capture.output = output;
             capture.outputName = spec.outputs().getFirst();
@@ -151,10 +156,36 @@ public final class FullscreenCapture {
         return bytes;
     }
 
+    record InputPlan(long bytes, String unavailableReason) {}
+    record TexturePlan(long bytes, List<InputPlan> inputs) {}
+
+    static TexturePlan planTextures(GpuTextureView output, List<GpuTextureView> inputs, long remainingBytes) {
+        long bytes = bytesFor(output);
+        List<InputPlan> planned = new ArrayList<>();
+        for (GpuTextureView input : inputs) {
+            long inputBytes = validatedTextureBytes(input);
+            if ((input.texture().usage() & GpuTexture.USAGE_COPY_SRC) == 0) {
+                planned.add(new InputPlan(0, "Texture is not allocated with COPY_SRC: " + input.texture().getLabel()));
+            } else {
+                planned.add(new InputPlan(inputBytes, null));
+                bytes = Math.addExact(bytes, inputBytes);
+            }
+        }
+        if (bytes > remainingBytes) throw new IllegalArgumentException("Capture exceeds 1 GiB total byte budget");
+        return new TexturePlan(bytes, List.copyOf(planned));
+    }
+
     private static long bytesFor(GpuTextureView view) {
-        if (view == null || view.isClosed()) throw new IllegalArgumentException("Missing or closed texture input");
-        if ((view.texture().usage() & com.mojang.blaze3d.textures.GpuTexture.USAGE_COPY_SRC) == 0) {
+        long bytes = validatedTextureBytes(view);
+        if ((view.texture().usage() & GpuTexture.USAGE_COPY_SRC) == 0) {
             throw new IllegalArgumentException("Texture is not allocated with COPY_SRC: " + view.texture().getLabel());
+        }
+        return bytes;
+    }
+
+    private static long validatedTextureBytes(GpuTextureView view) {
+        if (view == null || view.isClosed() || view.texture().isClosed()) {
+            throw new IllegalArgumentException("Missing or closed texture input");
         }
         return textureBytes(view.texture().getFormat(), view.getWidth(0), view.getHeight(0), view.texture().getDepthOrLayers());
     }
@@ -231,10 +262,17 @@ public final class FullscreenCapture {
             }
         }
 
-        private void texture(GpuTextureView view, String ref, int index, String sampler, boolean isOutput) {
+        private void unavailableTexture(GpuTextureView view, String ref, int index, String sampler, String reason) {
+            Map<String, Object> entry = textureMetadata(view, ref, index, sampler);
+            entry.put("capturedMipLevels", 0);
+            entry.put("bytes", 0);
+            entry.put("status", "unavailable");
+            entry.put("error", reason);
+            inputs.add(entry); // Keep positional slots even when this binding cannot be copied.
+        }
+
+        private static Map<String, Object> textureMetadata(GpuTextureView view, String ref, int index, String sampler) {
             Map<String, Object> entry = new LinkedHashMap<>();
-            long bytes = bytesFor(view);
-            String file = name + (isOutput ? "-output-" : "-input-") + index + ".bin";
             entry.put("index", index);
             entry.put("name", ref);
             entry.put("sampler", sampler);
@@ -243,6 +281,13 @@ public final class FullscreenCapture {
             entry.put("height", view.getHeight(0));
             entry.put("baseMipLevel", view.baseMipLevel());
             entry.put("mipLevels", view.mipLevels());
+            return entry;
+        }
+
+        private void texture(GpuTextureView view, String ref, int index, String sampler, boolean isOutput) {
+            long bytes = bytesFor(view);
+            Map<String, Object> entry = textureMetadata(view, ref, index, sampler);
+            String file = name + (isOutput ? "-output-" : "-input-") + index + ".bin";
             entry.put("capturedMipLevels", 1);
             entry.put("bytes", bytes);
             entry.put("file", file);
@@ -317,8 +362,11 @@ public final class FullscreenCapture {
             boolean unavailable = false;
             for (Capture capture : passes.values()) {
                 if (capture.data.containsKey("error")) failed = true;
-                else if (ended && pending == 0 && capture.texturesComplete()) capture.data.put("status", "captured");
-                unavailable |= capture.uniforms.stream().anyMatch(entry -> "unavailable".equals(entry.get("status")));
+                else if (ended && pending == 0) {
+                    capture.data.put("status", capture.texturesComplete() ? "captured" : "incomplete");
+                }
+                unavailable |= capture.inputs.stream().anyMatch(entry -> "unavailable".equals(entry.get("status")))
+                        || capture.uniforms.stream().anyMatch(entry -> "unavailable".equals(entry.get("status")));
             }
             manifest.put("textureCaptureComplete", ended && pending == 0 && !failed
                     && passes.values().stream().allMatch(Capture::texturesComplete));

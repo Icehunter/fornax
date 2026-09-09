@@ -1,5 +1,6 @@
 package dev.icehunter.fornax.pack.graph;
 
+import dev.icehunter.fornax.pack.RawShaderImports;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -7,6 +8,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
@@ -84,6 +87,7 @@ class GraphRunnerSunParamsTest {
         Path graph = plague.resolve("graph.toml");
         assumeTrue(Files.isRegularFile(graph), "graph.toml absent -- skipping");
         String graphText = Files.readString(graph);
+        Map<String, String> sources = includeSources(plague);
 
         Set<String> unwired = new TreeSet<>();
         for (PassDecl pass : declaredFullscreenPasses(graphText)) {
@@ -91,7 +95,8 @@ class GraphRunnerSunParamsTest {
             if (!Files.isRegularFile(shader)) {
                 continue;
             }
-            if (!readsSunDirection(Files.readString(shader))) {
+            if (!readsSunDirection(RawShaderImports.expand(
+                    Files.readString(shader), sources, pass.shader))) {
                 continue;
             }
             if (!GraphRunner.wantsSunAndDebugParams(pass.name)) {
@@ -128,8 +133,36 @@ class GraphRunnerSunParamsTest {
     }
 
     @Test
+    void submergedWaterVolumeRecoveryReceivesTheActiveCelestialDirection() {
+        assertTrue(GraphRunner.wantsSunAndDebugParams("water_volume_composite_submerged"));
+    }
+
+    @Test
     void waterVolumeHistoryReceivesTheLiveDebugIdSoDiagnosticsCannotPoisonHistory() {
         assertTrue(GraphRunner.wantsSunAndDebugParams("water_volume_scatter_history"));
+    }
+
+    @Test
+    void sharedIncludeSunReadsAreDetectedBeyondTheRootDeclaration() {
+        String root = """
+                uniform u_PassParams { vec4 u_SunDirection; };
+                #moj_import <fornax_runtime:shared.glsl>
+                void main() { shade(); }
+                """;
+        Map<String, String> includes = Map.of("shaders/include/shared.glsl",
+                "float shade() { return u_SunDirection.y; }");
+        assertFalse(readsSunDirection(root));
+        assertTrue(readsSunDirection(RawShaderImports.expand(root, includes, "test")));
+    }
+
+    private static Map<String, String> includeSources(Path pack) throws IOException {
+        Map<String, String> sources = new TreeMap<>();
+        try (Stream<Path> files = Files.walk(pack.resolve("shaders/include"))) {
+            for (Path file : files.filter(Files::isRegularFile).toList()) {
+                sources.put(pack.relativize(file).toString().replace('\\', '/'), Files.readString(file));
+            }
+        }
+        return sources;
     }
 
     private record PassDecl(String name, String shader, String type) {

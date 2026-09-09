@@ -68,7 +68,7 @@ public final class DirectSectionReader {
         // unharvested section as known empty.
         var candidate = level.getChunk(position.x(), position.z(), ChunkStatus.FULL, false);
         if (!(candidate instanceof LevelChunk chunk)) {
-            return null; // not loaded -- caller retries later, not an error
+            return null; // Unknown until a chunk-arrival callback or later shell resync retries it.
         }
         int sectionIndex = chunk.getSectionIndexFromSectionY(position.y());
         if (sectionIndex < 0 || sectionIndex >= chunk.getSections().length) {

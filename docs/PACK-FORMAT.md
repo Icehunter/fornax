@@ -269,6 +269,14 @@ Import it with `#moj_import <fornax_runtime:chunk_vertex.glsl>`. The `fornax_run
 your own pack's files; `fornax` is the engine's, and only `globals.glsl` and `block_atlas.glsl` are
 available there.
 
+XYZ is a whole-number code carried in RGBA16_UNORM, not a position scaled straight from that
+normalized value. Recover it with `floor(a_Position.xyz * 65535.0 + 0.5)`, divide by 2048, then
+subtract 8. The encoder rounds to that grid and clamps to `[0,65535]`, so +24 clamps to
+`24 - 1/2048` instead of wrapping around. This keeps matching planes lined up at 16-block section
+edges. UVs still use plain 65535-based UNORM, and position W still carries packed facts. Keep the
+engine encoder and every pack decoder for XYZ matching each other, and rebuild terrain whenever
+that changes.
+
 ### Declare the push-constant block
 
 Block positions arrive relative to their own 16-block section, not as world coordinates, because

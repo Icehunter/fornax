@@ -16,10 +16,10 @@ uint _material_params;
 vec3 _vert_face_normal;
 
 // The mesh builder emits vertex-local coordinates for a 16-block chunk section with some overhang
-// for shared edge geometry between sections; this range (-8..+24 on each axis) is wide enough to
-// cover that overhang while still fitting a 16-bit fixed-point channel with useful precision.
+// for shared edge geometry between sections. 2^16 codes over 32 blocks give 2048 binary steps
+// per block, covering [-8,24) and preserving section boundaries and model sixteenths exactly.
 const float FORNAX_MODEL_MIN = -8.0;
-const float FORNAX_MODEL_SIZE = 32.0;
+const float FORNAX_POSITION_SCALE = 2048.0;
 
 const vec3 FORNAX_FACE_NORMALS[6] = vec3[](
     vec3(0.0, -1.0, 0.0),
@@ -36,7 +36,7 @@ const vec3 FORNAX_FACE_NORMALS[6] = vec3[](
 // PAGE_INDEX constants. Nothing writes the page bits yet, so they read zero.
 const uint FORNAX_BLOCK_CLASS_COAL = 1u;
 
-in vec4 a_Position;        // RGBA16_UNORM: xyz = normalized [0,1] position, w = a packed 16-bit
+in vec4 a_Position;        // RGBA16_UNORM: xyz = fixed-point position codes, w = a packed 16-bit
                            // code of this BLOCK's own facts: Block.getLightEmission() level 0-15 in
                            // bits 0-3, BlockClasses flags in bits 4-10, atlas page index reserved
                            // in bits 11-15 (always zero until the paged atlas goes live)
@@ -48,7 +48,10 @@ in uvec4 a_Normal;         // RGBA8_UINT: x=face index (0-5, see FORNAX_FACE_NOR
                            // w = biome precipitation type (0 none, 1 rain, 2 snow)
 
 void _vert_init() {
-    _vert_position = a_Position.xyz * FORNAX_MODEL_SIZE + FORNAX_MODEL_MIN;
+    // Recover the whole-number code before scaling: scaling UNORM by 32 directly steps unevenly
+    // and splits matching section edges apart. The encoder clamps +24 to the highest code.
+    vec3 positionCode = floor(a_Position.xyz * 65535.0 + 0.5);
+    _vert_position = positionCode / FORNAX_POSITION_SCALE + FORNAX_MODEL_MIN;
     // THE BLOCK'S OWN FACTS, unpacked from one 16-bit code. a_Position.w is a UNORM16 channel, so
     // the value arrives as code/65535 and the +0.5 recovers the integer code exactly; the encoder
     // writes that code as a raw short for the same reason (FornaxChunkVertex.writeUnorm16Code).

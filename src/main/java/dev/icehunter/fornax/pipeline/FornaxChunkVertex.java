@@ -55,9 +55,11 @@ import net.minecraft.core.Direction;
  * <p>The lane is 16-bit UNORM because the format is RGBA16_UNORM and nothing narrower was
  * available for a fourth position component.
  *
- * <p><b>Encoding:</b> a_Position is 4x16-bit UNORM (fixed-point, normalized over a
- * {@value #MODEL_MIN}..{@value #MODEL_MIN}+{@value #MODEL_SIZE} cube -- wide enough for the mesh
- * builder's per-section overhang). a_Color is RGB = the vertex's biome tint (Sodium's own {@code
+ * <p><b>Encoding:</b> a_Position is 4x16-bit UNORM. Its xyz codes are fixed-point positions at
+ * {@value #POSITION_SCALE} steps per block with origin {@value #MODEL_MIN}; the shader recovers
+ * the integer code before scaling. The 32-block range covers the mesh builder's per-section
+ * overhang, and its power-of-two grid keeps matching section edges lined up exactly. a_Color is RGB
+ * = the vertex's biome tint (Sodium's own {@code
  * vertex.color}, unmultiplied -- white/identity for most untinted blocks) and A = vanilla's
  * per-face directional shade times AO (Sodium's own {@code vertex.ao}, a scalar broadcast to all
  * three colour channels -- see {@code ColorMixer.mul}). Keeping tint (RGB) and shade/AO (A)
@@ -106,7 +108,9 @@ public class FornaxChunkVertex extends CompactChunkVertex {
             .addAttribute("a_Normal", GpuFormat.RGBA8_UINT).build();
 
     private static final float MODEL_MIN = -8.0f;
-    private static final float MODEL_SIZE = 32.0f;
+    // 2^16 codes across the 32-block model span give 2048 exact binary steps per block.
+    // Section origins and model sixteenths then share this grid, so edges never show gaps.
+    private static final float POSITION_SCALE = 2048.0f;
 
     /**
      * Reserved bit slice within {@link #packBlockFacts}'s code for the block-atlas PAGE INDEX (M13),
@@ -155,9 +159,9 @@ public class FornaxChunkVertex extends CompactChunkVertex {
             for (int i = 0; i < 4; i++) {
                 var vertex = vertices[i];
 
-                writeUnorm16(ptr + POSITION_OFFSET + 0, normalizeAxis(vertex.x));
-                writeUnorm16(ptr + POSITION_OFFSET + 2, normalizeAxis(vertex.y));
-                writeUnorm16(ptr + POSITION_OFFSET + 4, normalizeAxis(vertex.z));
+                writePosition(ptr + POSITION_OFFSET + 0, vertex.x);
+                writePosition(ptr + POSITION_OFFSET + 2, vertex.y);
+                writePosition(ptr + POSITION_OFFSET + 4, vertex.z);
                 // The block's own facts, packed. See packBlockFacts and the class doc for the layout,
                 // for why this lane rather than a_Normal.w's spare bits, and for why the write is a
                 // raw code rather than a float.
@@ -283,8 +287,10 @@ public class FornaxChunkVertex extends CompactChunkVertex {
         MemoryIntrinsics.putShort(address, (short) (code & 0xFFFF));
     }
 
-    private static float normalizeAxis(float v) {
-        return (v - MODEL_MIN) / MODEL_SIZE;
+    private static void writePosition(long address, float value) {
+        int quantized = Math.round((value - MODEL_MIN) * POSITION_SCALE);
+        // +24 maps to code 65536, past the top: clamp to the last step, never wrap to -8.
+        writeUnorm16Code(address, Math.max(0, Math.min(0xFFFF, quantized)));
     }
 
     private static void writeUnorm16(long address, float value) {

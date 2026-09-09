@@ -958,7 +958,7 @@ public final class BrickGridUpload {
                                           ByteBuffer paletteScratch, ByteBuffer summaryScratch,
                                           ByteBuffer lightZeroScratch, ByteBuffer faceTextureScratch, ByteBuffer lightmapScratch,
                                           ByteBuffer sectionStateScratch, ByteBuffer sourceSummaryScratch) {
-        List<SlotUpload> committed = sectionStateBuffer != -1L || sourceSummaryBuffer != -1L ? new ArrayList<>() : null;
+        List<SlotUpload> committed = new ArrayList<>();
         resources.execute(cmd -> {
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 if (sectionStateBuffer != -1L || sourceSummaryBuffer != -1L)
@@ -1019,6 +1019,12 @@ public final class BrickGridUpload {
                         logOobDrop(VoxelSourceSummary.TARGET, slot, sourceSummaryOffset, VoxelSourceSummary.BYTES_PER_SLOT, sourceSummaryBufferSize);
                         continue;
                     }
+                    long lightOffset = (long) slot * lightVolumeBytesPerSlot();
+                    if (item.clearLight() && lightVolumeBuffer != -1L
+                            && !fitsInBuffer(lightOffset, lightVolumeBytesPerSlot(), lightVolumeBufferSize)) {
+                        logOobDrop(LIGHT_VOLUME_TARGET, slot, lightOffset, lightVolumeBytesPerSlot(), lightVolumeBufferSize);
+                        continue; // A required clear and its payload must succeed together.
+                    }
                     byte[] paletteData = packPaletteEntries(result.palette().entries());
                     long paletteOffset = (long) slot * PALETTE_BYTES_PER_SLOT;
                     if (paletteData.length > 0 && !fitsInBuffer(paletteOffset, paletteData.length, paletteBufferSize)) {
@@ -1076,23 +1082,18 @@ public final class BrickGridUpload {
                         VK13.vkCmdUpdateBuffer(cmd, sectionStateBuffer, sectionStateOffset, sectionStateScratch);
                     }
 
-                    if (committed != null) committed.add(item);
                     if (item.clearLight() && lightVolumeBuffer != -1L) {
-                        long lightOffset = (long) slot * lightVolumeBytesPerSlot();
-                        if (fitsInBuffer(lightOffset, lightVolumeBytesPerSlot(), lightVolumeBufferSize)) {
-                            lightZeroScratch.clear();
-                            VK13.vkCmdUpdateBuffer(cmd, lightVolumeBuffer, lightOffset, lightZeroScratch);
-                        } else {
-                            logOobDrop(LIGHT_VOLUME_TARGET, slot, lightOffset, lightVolumeBytesPerSlot(), lightVolumeBufferSize);
-                        }
+                        lightZeroScratch.clear();
+                        VK13.vkCmdUpdateBuffer(cmd, lightVolumeBuffer, lightOffset, lightZeroScratch);
                     }
+                    committed.add(item);
                 }
 
                 recordUploadToComputeReadBarrier(cmd, stack);
             }
         });
         // execute returns only after the existing batch fence completes successfully.
-        if (committed != null) for (SlotUpload item : committed) VoxelWindow.onSectionUploadCommitted(item);
+        for (SlotUpload item : committed) VoxelWindow.onSectionUploadCommitted(item);
     }
 
     /** Zero-fills one slot's three light ranges. Called when a toroidal slot is CLAIMED by a

@@ -3,6 +3,8 @@ package dev.icehunter.fornax.voxel;
 import dev.icehunter.fornax.pack.GraphSpec;
 import dev.icehunter.fornax.pack.graph.TargetRegistry;
 import net.minecraft.core.SectionPos;
+import net.minecraft.world.level.Level;
+import java.util.function.BiFunction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import java.util.LinkedHashMap;
@@ -15,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Checks CPU ownership across a GPU storage swap. It does not stand in for GPU allocation. */
 class VoxelWindowStorageTest {
+    private static final BiFunction<Level, SectionPos, SectionHarvester.Result> READER = DirectSectionReader::read;
     private static TargetRegistry registry() {
         return TargetRegistry.create(new GraphSpec(new LinkedHashMap<>(), List.of()), Map.of());
     }
@@ -78,15 +81,46 @@ class VoxelWindowStorageTest {
         VoxelWindow.recenter(32, 3, -55, 4);
         var harvest = VoxelWindow.class.getDeclaredMethod("harvestAndUploadBatch",
                 net.minecraft.world.level.Level.class, List.class,
-                java.util.function.LongConsumer.class, Runnable.class, long.class, long.class);
+                java.util.function.LongConsumer.class, Runnable.class, long.class, long.class, BiFunction.class);
         harvest.setAccessible(true);
         var processed = new java.util.concurrent.atomic.AtomicInteger();
         // A stale queued task must drain its counts without touching the old world, null here.
         harvest.invoke(null, null, List.of(SectionPos.of(32, 3, -55)),
                 (java.util.function.LongConsumer) count -> { throw new AssertionError("stale harvest"); },
-                (Runnable) processed::incrementAndGet, queuedGeneration, VoxelHarvestLifecycle.generation());
+                (Runnable) processed::incrementAndGet, queuedGeneration, VoxelHarvestLifecycle.generation(), READER);
         assertEquals(1, processed.get());
         assertFalse(VoxelWindow.hasValidData(32, 3, -55));
+    }
+
+    @Test void queuedSectionsOutsideTheMovedWindowDrainWithoutReadingTheWorld() throws Exception {
+        VoxelWindow.attachRegistry(registry());
+        VoxelHarvestLifecycle.onModelsPublished();
+        VoxelWindow.recenter(0, 4, 0, 2);
+        // These positions were eligible when queued; the teleport leaves all of them behind.
+        List<SectionPos> queued = List.of(SectionPos.of(0, 4, 0), SectionPos.of(2, 4, 0),
+                SectionPos.of(-2, 4, 0));
+        var epoch = VoxelWindow.class.getDeclaredField("storageGeneration");
+        epoch.setAccessible(true);
+        long queuedGeneration = epoch.getLong(null);
+        long queuedHarvestGeneration = VoxelHarvestLifecycle.generation();
+        VoxelWindow.recenter(50, 4, 50, 2);
+        assertEquals(queuedGeneration, epoch.getLong(null), "movement keeps the storage generation");
+        assertTrue(VoxelHarvestLifecycle.isCurrent(queuedHarvestGeneration));
+        for (SectionPos pos : queued) {
+            assertEquals(-1, VoxelWindow.slotFor(pos.x(), pos.y(), pos.z()));
+            assertFalse(VoxelWindow.hasValidData(pos.x(), pos.y(), pos.z()));
+        }
+        var harvest = VoxelWindow.class.getDeclaredMethod("harvestAndUploadBatch",
+                net.minecraft.world.level.Level.class, List.class,
+                java.util.function.LongConsumer.class, Runnable.class, long.class, long.class, BiFunction.class);
+        harvest.setAccessible(true);
+        var processed = new java.util.concurrent.atomic.AtomicInteger();
+        // Null is a forbidden-world-read sentinel, as in the old-generation tests above.
+        harvest.invoke(null, null, queued,
+                (java.util.function.LongConsumer) count -> { throw new AssertionError("out-of-window harvest"); },
+                (Runnable) processed::incrementAndGet, queuedGeneration, queuedHarvestGeneration, READER);
+        assertEquals(queued.size(), processed.get(), "discarded work must still drain pending counts");
+        assertEquals(0.0, VoxelWindow.populationFraction());
     }
 
     @Test void queuedOldModelsCannotTouchTheCapturedWorldAfterPublication() throws Exception {
@@ -99,14 +133,14 @@ class VoxelWindowStorageTest {
         epoch.setAccessible(true);
         var harvest = VoxelWindow.class.getDeclaredMethod("harvestAndUploadBatch",
                 net.minecraft.world.level.Level.class, List.class,
-                java.util.function.LongConsumer.class, Runnable.class, long.class, long.class);
+                java.util.function.LongConsumer.class, Runnable.class, long.class, long.class, BiFunction.class);
         harvest.setAccessible(true);
         var processed = new java.util.concurrent.atomic.AtomicInteger();
         // Use CURRENT storage to isolate the lifetime guard. Reading this old null world would
         // throw; the queued generation must cancel before DirectSectionReader touches it.
         harvest.invoke(null, null, List.of(SectionPos.of(32, 3, -55)),
                 (java.util.function.LongConsumer) count -> { throw new AssertionError("stale model harvest"); },
-                (Runnable) processed::incrementAndGet, epoch.getLong(null), queuedHarvestGeneration);
+                (Runnable) processed::incrementAndGet, epoch.getLong(null), queuedHarvestGeneration, READER);
         assertEquals(1, processed.get());
         assertFalse(VoxelWindow.hasValidData(32, 3, -55));
     }

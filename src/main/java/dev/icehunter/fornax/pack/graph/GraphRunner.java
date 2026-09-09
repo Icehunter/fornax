@@ -2242,6 +2242,7 @@ public final class GraphRunner {
                 || name.startsWith("voxel_water_reflection_")
                 || name.startsWith("water_volume_march")
                 || name.equals("water_volume_scatter_history")
+                || name.equals("water_volume_composite_submerged")
                 || name.equals("ssr_water_fill") || name.equals("direct_light_analytic")
                 || name.startsWith("clouds_march") || name.equals("cloud_shadow_mask")
                 || name.startsWith("glint_occlusion");

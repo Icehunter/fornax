@@ -1064,6 +1064,12 @@ The exact `voxel_water_reflection` name and every name starting with `voxel_wate
 share that same parameter block. Diagnostic variants such as `voxel_water_reflection_probe_trace`
 therefore receive the base pass's live sun/moon direction, true sun height and terrain distance.
 
+`water_volume_composite_submerged` gets the same live sun/moon data as the water-volume march and
+history passes. Its full-resolution pass adds up direct light, so a reset-zero sun vector would not
+match the half-resolution pass. The test that checks this follows shared shader imports as well as
+reads in the main file, and counts a read inside an imported function even if one shader variant
+never calls it.
+
 ### The reserved `globals` input (`compute` and `particles`)
 
 `compute` and `particles` passes build their own descriptor sets by hand, so neither gets
@@ -1134,11 +1140,21 @@ own shaders are never used for terrain while a pack is active.
 
 | Attribute | GPU format | Offset | Size | Contents |
 |---|---|---|---|---|
-| `a_Position` | RGBA16_UNORM | 0 | 8 | xyz normalized over a fixed model-space cube (wide enough for the mesh builder's per-section overhang); w unused |
+| `a_Position` | RGBA16_UNORM | 0 | 8 | xyz fixed-point position codes at 2048 steps/block with origin -8; w packs emission and block-class facts |
 | `a_TexCoord` | RG16_UNORM | 8 | 4 | direct, unbiased atlas UV |
 | `a_Color` | RGBA8_UNORM | 12 | 4 | vertex colour already combined with baked ambient occlusion |
 | `a_LightAndData` | RGBA8_UINT | 16 | 4 | x = block light (0-15), y = sky light (0-15), z = renderer-internal material/render-layer bits (not the block-material ID), w = draw/region id |
 | `a_Normal` | RGBA8_UINT | 20 | 4 | x = flat face index (0-5), y/z = u16 block-material category ID (low byte first), w reserved |
+
+**Position agreement.** XYZ stores `clamp(round((position + 8) * 2048), 0, 65535)`.
+The shader reads back the whole number with `floor(a_Position.xyz * 65535 + 0.5)`, then divides by
+2048 and subtracts 8. This grid keeps block faces and model steps lined up exactly across 16-block
+section edges; scaling the raw attribute straight over 32 blocks instead would leave gaps at
+matching edges. The range covered is `[-8, 24 - 1/2048]`; +24 and above clamp to the highest code
+instead of wrapping around. UVs keep their own separate 65535-based UNORM encoding, and position W
+still carries its packed facts. Every pack-owned position decoder must match this XYZ scheme.
+`FornaxChunkPositionTest` checks the real encoder against the engine's own decoder, the example
+decoders, and a sibling pack when one is present.
 
 The face normal itself is not stored per vertex; it is recovered on the GPU from the flat face
 index via a fixed lookup table, since a quad's own edges already determine it and storing it
@@ -2070,7 +2086,11 @@ no conversion and no vertical flip; D32_FLOAT depth stays reversed-Z. The opaque
 COPY_SRC so this can read it.
 
 A request may copy 1 GiB of texture, checked before each pass, and one texture at most 512 MiB. Each
-texture must be single-layer, stencil-free and copyable; a pass with a buffer input is turned down.
+texture must be single-layer and stencil-free; a pass with a buffer input is turned down.
+An input that is otherwise fine but missing COPY_SRC is marked `unavailable` in its slot, with its
+format, size and reason, but no file or bytes. The other inputs and the output still copy. That
+pass ends `incomplete` and `textureCaptureComplete` stays false; a bad output, a bad texture, or
+running past the byte budget still fails the pass before any copy runs.
 A failed capture is recorded and the pass still renders. The manifest also holds the compile values
 and the bytes written to the per-pass parameter buffer. The globals and pack-options buffers have no
 safe way to read back, so they are marked unavailable and `replayComplete` is false;
@@ -2079,6 +2099,12 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
 
 ## 12. Known laws
 
+- **A section's local position code must still line up after its section origin is added.**
+  Matching faces in neighbouring sections must land on the same position once each section's
+  origin is added in. XYZ therefore carries whole-number codes on a fixed grid, and the shader
+  turns those codes back into a position before scaling. Scaling the raw UNORM XYZ value instead
+  leaves gaps, even when both sides mean the same point in the world. Changing only the encoder or
+  only a pack's decoder breaks this with no warning, so change both together and rebuild terrain.
 - **The sprite-bounds grid's resolution is not fixed.** The engine sizes it to the pack, since the
   same grid sets how tightly a paged stitch may place sprites. A shader that derives the cell index
   from its own constant reads the wrong cell, with no error: the rect-contains-uv test fails and
@@ -2388,13 +2414,37 @@ start at zero. Harvest writes the occupancy and emitter bits over pending, so ze
 harvested and empty. Direct section reads ask for `ChunkStatus.FULL` with `create=false`, so a chunk
 the client has not got stays pending rather than coming back as an empty stand-in.
 
-GPU storage and the record of which section owns each slot live and die together.
+Storage setup or teardown drops CPU ownership of geometry.
 `VoxelWindow.initializeStorage` drops the owner, data and population records before it allocates or
 resizes, and detaching or swapping the registry drops them too. Allocation is keyed by registry and
 diameter, so asking for the same storage again keeps it. A queued resync task carries the storage
 generation it was submitted under, and both the bookkeeping and the upload turn down an old
 generation under the shared upload lock. So a reload at the same camera spot cannot leave fresh
 pending buffers under stale owners, and a late harvest cannot write into new storage.
+A queued section that has moved outside the current window is dropped before any world read, even
+when storage has not changed. A dropped entry still counts toward the pending total. The lock still
+checks ownership again after each harvest, since the camera can move while a read is in flight.
+Right before transfer, the batch is filtered once more under the same lock: each entry must still
+be marked populated, hold the same result, and be owned by that slot in the current window. This
+stops a stale write from going through after a move or a newer harvest, with or without optional
+GPU metadata.
+A shell clear also drops CPU validity by removing the slot from the populated set, with or without
+optional metadata. Moving back to an old CPU owner still means the geometry must be harvested
+again. Light ownership is tracked on its own, apart from these queued records.
+
+`ClientChunkEvents.CHUNK_LOAD`, wired up by the client entry point, queues a loaded column's
+still-missing in-window sections on the resync executor. This fills in sections that came back
+empty on first read, without waiting for the camera to move or terrain to rebuild, and never
+overwrites valid geometry. Repeat requests for the same column merge into one within a single
+storage/model generation. That merge record clears once reading starts, so a new arrival during a
+slow read can queue its own retry. Each task keeps the storage and harvest generation it started
+with, checks the window again before reading the world, and drains its full pending count if a
+read or transfer fails, for both arrival jobs and ordinary resync. If a read or transfer fails
+partway with an unflushed batch, its entries that still match get their CPU owner and data
+restored, and their populated/metadata state cleared, without touching a newer owner or a replaced
+storage. A successful flush throws away its rollback records. Sections that arrive before the
+first window is set are handled by the first resync; sections outside the window are handled once
+a later window covers them.
 
 Batch voxel uploads reuse one scratch space, command pool and fence, all owned by the registry and
 held under the shared queue lock. Each batch reads the current destination handles and sizes fresh,
@@ -2402,7 +2452,16 @@ keeps the same per-slot packing and bounds checks, and waits for the work to fin
 returning. `SynchronousTransfer` stops the pool from being reset or destroyed after a wait fails; a
 failed submit never waits on a fence nothing was signaled against. Closing the registry blocks any
 new resource request and retires the workspace; a changed light-volume layout also replaces it.
-Single-slot uploads and clears keep their own separate paths.
+A single mesh publish uses this same batch path too, with or without optional metadata.
+A CPU map tracks the owner each slot's light was last successfully uploaded for. Mesh, resync and
+light-only updates all check against that map: a newer update for the same owner inherits a clear
+that has not gone through yet, and going back to the owner already on the GPU keeps its settled
+light. A slot's entry in this map only moves forward once the fence and its required clear both
+succeed; a stale, skipped, out-of-bounds or failed transfer cannot mark the debt as paid. The
+required light range is checked before any writes run. Clearing this bookkeeping means a missing
+owner always asks for a clear on the next accepted upload, since resetting CPU state can leave the
+GPU data untouched. Only a known owner that was actually committed keeps its light settled.
+The older single-slot upload and clear calls are still there on their own.
 
 ### Optional voxel section state and source inventory
 
@@ -2422,8 +2481,8 @@ committed owner also preserves a required propagated-light clear when a newer qu
 supersedes the first harvest for a recycled slot. While a same-owner
 update waits in a batch, the GPU record still describes the old GPU payload. Recycled slots are
 explicitly zeroed in the occupancy-clear transfer, and a same-size storage reset clears the optional
-metadata too. Enabled metadata makes single-slot harvests use the batch transfer; the ordinary
-single-slot path stays in use when both optional metadata buffers are disabled.
+metadata too. Every mesh harvest goes through the batch transfer now, so having optional metadata
+on or off no longer changes whether a successful upload updates light ownership.
 
 `voxelSourceSummary` has an eight-word header followed by an eight-word record for every tier-zero
 slot: `(8 + slot * 8 + word)`. Header words 0/1 hold the current material-source atlas generation,
