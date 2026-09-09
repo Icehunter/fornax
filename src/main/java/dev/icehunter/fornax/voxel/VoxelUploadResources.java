@@ -18,7 +18,7 @@ import java.util.function.Consumer;
 /** Batch workspace owned by the registry. Every access goes through SHARED_QUEUE_LOCK, one at a time. */
 public final class VoxelUploadResources implements AutoCloseable {
     private final ByteBuffer allocation;
-    final ByteBuffer occupancy, payload, faceSeal, palette, summary, faceTexture, lightmap, lightZero;
+    final ByteBuffer occupancy, payload, faceSeal, palette, summary, faceTexture, lightmap, lightZero, sectionState, sourceSummary;
     private final NativeTransfer nativeTransfer;
     private final SynchronousTransfer transfer;
     private boolean closed;
@@ -27,7 +27,8 @@ public final class VoxelUploadResources implements AutoCloseable {
         int[] sizes = {(int) BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, BrickGridUpload.VOXELS_PER_SECTION,
                 (int) BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT, (int) BrickGridUpload.PALETTE_BYTES_PER_SLOT,
                 (int) BrickGridUpload.BRICK_SUMMARY_BYTES_PER_SLOT, VoxelFaceTexture.BYTES_PER_SLOT,
-                VoxelLightmap.BYTES_PER_SLOT, Math.toIntExact(BrickGridUpload.lightVolumeBytesPerSlot())};
+                VoxelLightmap.BYTES_PER_SLOT, Math.toIntExact(BrickGridUpload.lightVolumeBytesPerSlot()),
+                VoxelSectionState.BYTES_PER_SLOT, VoxelSourceSummary.BYTES_PER_SLOT};
         int bytes = 0;
         for (int size : sizes) bytes = Math.addExact(bytes, size);
         allocation = MemoryUtil.memCalloc(bytes);
@@ -40,6 +41,7 @@ public final class VoxelUploadResources implements AutoCloseable {
             }
             occupancy = slices[0]; payload = slices[1]; faceSeal = slices[2]; palette = slices[3];
             summary = slices[4]; faceTexture = slices[5]; lightmap = slices[6]; lightZero = slices[7];
+            sectionState = slices[8]; sourceSummary = slices[9];
             nativeTransfer = new NativeTransfer(backend);
             transfer = new SynchronousTransfer(nativeTransfer);
         } catch (RuntimeException | Error failure) {

@@ -106,6 +106,7 @@ class GraphValidatorBufferTargetTest {
                         BrickGridUpload.BRICK_SUMMARY_TARGET,
                         dev.icehunter.fornax.voxel.VoxelFaceTexture.TARGET,
                         dev.icehunter.fornax.voxel.VoxelLightmap.TARGET,
+                        "voxelSectionState", "voxelSourceSummary",
                         VoxelWaterReflBuffer.TARGET, AnalyticLightListBuffer.TARGET,
                         PrecipClipmapBuffer.TARGET, PrecipCoarseClipmapBuffer.TARGET,
                         SurfaceFluidClipmapBuffer.TARGET,

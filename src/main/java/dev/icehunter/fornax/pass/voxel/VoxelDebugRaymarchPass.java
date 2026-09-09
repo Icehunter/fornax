@@ -26,6 +26,7 @@ import dev.icehunter.fornax.pass.compute.ComputeShaderCompiler;
 import dev.icehunter.fornax.pipeline.PersistentPipelineCache;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import dev.icehunter.fornax.profile.FrameProfiler;
+import dev.icehunter.fornax.voxel.VoxelSourceSummary;
 import dev.icehunter.fornax.voxel.BrickGridUpload;
 import dev.icehunter.fornax.voxel.VoxelWindow;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
@@ -270,7 +271,7 @@ public final class VoxelDebugRaymarchPass {
         // the harvest-throughput fix's priority ordering (front-facing slots harvested synchronously
         // first) -- see VoxelWindow.recenterAndResync's own doc.
         Level level = mc.level;
-        if (sectionKey != lastCameraSection && level != null) {
+        if ((sectionKey != lastCameraSection || VoxelWindow.currentState().radius() == 0) && level != null) {
             Vector3fc forward = mc.gameRenderer.mainCamera().forwardVector();
             VoxelWindow.recenterAndResync(sectionX, sectionY, sectionZ, radius, level,
                     forward.x(), forward.y(), forward.z());
@@ -310,6 +311,19 @@ public final class VoxelDebugRaymarchPass {
         profiler.recordValue("voxel_async", asyncTotal - prevAsyncHarvestedTotal);
         profiler.recordValue("voxel_cleared", clearedTotal - prevClearedTotal);
         profiler.recordValue("voxel_pop", VoxelWindow.populationFraction() * 100.0);
+        if (VoxelSourceSummary.isEnabled()) {
+            var sources = VoxelWindow.sourceInventoryStats();
+            profiler.recordValue("source_slots", sources.committedSlots());
+            profiler.recordValue("source_intrinsic_cells", sources.intrinsicCandidateCells());
+            profiler.recordValue("source_authored_cells", sources.authoredCandidateCells());
+            profiler.recordValue("source_authored_faces", sources.authoredCandidateFaces());
+            profiler.recordValue("source_unknown_cells", sources.unknownCells());
+            profiler.recordValue("source_overflow_slots", sources.overflowSlots());
+            profiler.recordValue("source_uploads", sources.committedUploads());
+            profiler.recordValue("source_stale_uploads", sources.staleUploads());
+            profiler.recordValue("source_cleared_slots", sources.clearedSlots());
+        }
+
 
         prevSyncHarvestedTotal = syncTotal;
         prevAsyncHarvestedTotal = asyncTotal;

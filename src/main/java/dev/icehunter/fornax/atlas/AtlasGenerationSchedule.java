@@ -105,6 +105,24 @@ public final class AtlasGenerationSchedule {
         return PENDING.containsKey(location);
     }
 
+    /**
+     * Commits retained-sidecar CPU identities only after vanilla's upload successfully returns.
+     * An unchanged block reload skips both sidecar builders, so their fingerprint reuse callbacks
+     * never run. Scheduling at HEAD is not publication: failed or superseded uploads must keep
+     * the previous bindings. The exact preparations identity distinguishes the winning upload.
+     */
+    public static synchronized void onAtlasUploaded(Identifier location,
+                                                     SpriteLoader.Preparations preparations) {
+        Pending pending = PENDING.get(location);
+        if (pending == null || pending.preparations() != preparations || pending.scope().rebuildSidecars()) {
+            return;
+        }
+        MaterialMapAtlas material = MaterialMapAtlas.getInstance(location);
+        if (material != null) {
+            material.rebindSourceIndex(preparations.regions().values());
+        }
+    }
+
     /** Chooses which resources an atlas upload must retire and rebuild. */
     public static RebuildScope scopeFor(Identifier location, boolean sidecarsUnchanged) {
         if (location.equals(TextureAtlas.LOCATION_BLOCKS)) {

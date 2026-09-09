@@ -69,7 +69,7 @@ public abstract class ChunkBuilderMeshingTaskMixin {
                     MaterialScalarsHolder.current(),
                     buildContext.cache.getWorldSlice(),
                     origin.minBlockX(), origin.minBlockY(), origin.minBlockZ());
-            VoxelWindow.onSectionHarvested(origin, result);
+            if (result != null) VoxelWindow.onSectionHarvested(origin, result);
         } catch (Throwable t) {
             FornaxMod.LOGGER.error("Voxel harvest failed for section {} -- Sodium's own mesh build "
                     + "still proceeds, but this section's voxel occupancy/shadow data stays stale "

@@ -29,6 +29,7 @@ public final class MaterialMapAtlas implements AutoCloseable {
     private final LabPbrAnimationSet animations;
     private final ArrayTextures.@Nullable Allocation pages;
     private final @Nullable String fingerprint;
+    private volatile MaterialSourceIndex sourceIndex = MaterialSourceIndex.EMPTY;
 
     MaterialMapAtlas(GpuTexture texture, GpuTextureView textureView) {
         this(texture, textureView, LabPbrAnimationSet.EMPTY, null, null);
@@ -47,6 +48,19 @@ public final class MaterialMapAtlas implements AutoCloseable {
         this.animations = animations;
         this.pages = pages;
         this.fingerprint = fingerprint;
+    }
+
+    public MaterialSourceIndex sourceIndex() {
+        return this.sourceIndex;
+    }
+
+    void setSourceIndex(MaterialSourceIndex sourceIndex) {
+        this.sourceIndex = Objects.requireNonNull(sourceIndex, "sourceIndex");
+    }
+
+    /** GPU reuse still replaces sprite identities, so CPU consumers need a fresh generation. */
+    void rebindSourceIndex(java.util.Collection<net.minecraft.client.renderer.texture.TextureAtlasSprite> sprites) {
+        this.sourceIndex = this.sourceIndex.rebind(sprites);
     }
 
     /**

@@ -87,6 +87,8 @@ public final class GraphValidator {
             BrickGridUpload.PALETTE_TARGET, BrickGridUpload.LIGHT_VOLUME_TARGET,
             BrickGridUpload.BRICK_SUMMARY_TARGET, dev.icehunter.fornax.voxel.VoxelFaceTexture.TARGET,
             dev.icehunter.fornax.voxel.VoxelLightmap.TARGET,
+            dev.icehunter.fornax.voxel.VoxelSectionState.TARGET,
+            dev.icehunter.fornax.voxel.VoxelSourceSummary.TARGET,
             VoxelWaterReflBuffer.TARGET, AnalyticLightListBuffer.TARGET,
             PrecipClipmapBuffer.TARGET, PrecipCoarseClipmapBuffer.TARGET,
             SurfaceFluidClipmapBuffer.TARGET,

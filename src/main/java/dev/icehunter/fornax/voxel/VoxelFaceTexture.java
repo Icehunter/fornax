@@ -1,6 +1,7 @@
 package dev.icehunter.fornax.voxel;
 
 import net.minecraft.client.Minecraft;
+import dev.icehunter.fornax.atlas.MaterialSourceIndex;
 import net.minecraft.client.model.geom.builders.UVPair;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModelPart;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
@@ -21,6 +22,79 @@ public final class VoxelFaceTexture {
     public static final int WORDS_PER_SLOT = SectionHarvester.MAX_PALETTE_ENTRIES * ENTRY_WORDS;
     public static final int BYTES_PER_SLOT = WORDS_PER_SLOT * Integer.BYTES;
     private VoxelFaceTexture() { }
+
+    public record SourceFaces(int[] textureWords, List<MaterialSourceIndex.Summary> summaries,
+                              long atlasGeneration) {
+        public SourceFaces {
+            if (textureWords.length != ENTRY_WORDS || summaries.size() != Direction.values().length)
+                throw new IllegalArgumentException("source faces require 42 texture words and six summaries");
+            textureWords = textureWords.clone();
+            summaries = List.copyOf(summaries);
+        }
+        @Override public int[] textureWords() { return this.textureWords.clone(); }
+    }
+
+    static SourceFaces resolveSources(BlockState state, VoxelShapeKind kind, int tint) {
+        return resolveSources(state, kind, tint, MaterialSourceIndex.current());
+    }
+
+    static SourceFaces resolveSources(BlockState state, VoxelShapeKind kind, int tint,
+                                      MaterialSourceIndex index) {
+        var model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
+        List<BlockStateModelPart> parts = new ArrayList<>();
+        model.collectParts(RandomSource.create(0L), parts); // Match the existing palette model variant.
+        return packSources(parts, kind, tint, index);
+    }
+
+    /** Whole-sprite source evidence is only usable for an exact single full-sprite face.
+     * A crop, stacked face or partial shape retains candidate evidence but is explicitly unknown. */
+    static SourceFaces packSources(List<BlockStateModelPart> parts, VoxelShapeKind kind, int tint,
+                                   MaterialSourceIndex index) {
+        int[] words = kind == VoxelShapeKind.FULL ? pack(parts, tint) : new int[ENTRY_WORDS];
+        List<MaterialSourceIndex.Summary> summaries = new ArrayList<>();
+        for (Direction face : Direction.values()) {
+            List<BakedQuad> candidates = new ArrayList<>();
+            for (var part : parts) {
+                candidates.addAll(part.getQuads(face));
+                for (var quad : part.getQuads(null)) {
+                    if (quad.direction() == face) candidates.add(quad);
+                }
+            }
+            MaterialSourceIndex.Summary summary = null;
+            int combinedFlags = 0;
+            for (var quad : candidates) {
+                var candidate = index.lookup(quad.materialInfo().sprite());
+                combinedFlags |= candidate.flags();
+                // Unsupported stacked faces retain one positive source's raw evidence, not a
+                // fabricated average or a source-texel count represented as visible coverage.
+                if (summary == null || (!summary.authoredCandidate() && candidate.authoredCandidate()))
+                    summary = candidate;
+            }
+            if (summary == null) summary = MaterialSourceIndex.unavailable(MaterialSourceIndex.UNSUPPORTED_GEOMETRY);
+            if (kind != VoxelShapeKind.FULL || candidates.size() != 1
+                    || (words[face.get3DDataValue() * FACE_WORDS] >>> 24 & 1) == 0) {
+                combinedFlags |= MaterialSourceIndex.UNSUPPORTED_GEOMETRY;
+            } else if (!coversWholeSprite(candidates.getFirst())) {
+                combinedFlags |= MaterialSourceIndex.CROPPED_UV;
+            }
+            summaries.add(summary.withFlags(combinedFlags));
+        }
+        return new SourceFaces(words, summaries, index.generation());
+    }
+
+    private static boolean coversWholeSprite(BakedQuad quad) {
+        var sprite = quad.materialInfo().sprite();
+        if (sprite == null || sprite.getU0() >= sprite.getU1() || sprite.getV0() >= sprite.getV1()) return false;
+        int corners = 0;
+        for (int i = 0; i < BakedQuad.VERTEX_COUNT; i++) {
+            float u = UVPair.unpackU(quad.packedUV(i)), v = UVPair.unpackV(quad.packedUV(i));
+            if ((u != sprite.getU0() && u != sprite.getU1()) || (v != sprite.getV0() && v != sprite.getV1())) return false;
+            int corner = (u == sprite.getU1() ? 1 : 0) | (v == sprite.getV1() ? 2 : 0);
+            corners |= 1 << corner;
+        }
+        // Four distinct rectangular sprite corners, independent of UV rotation or reflection.
+        return corners == 0b1111;
+    }
 
     static int[] resolve(BlockState state, VoxelShapeKind kind, int tint) {
         if (kind != VoxelShapeKind.FULL) return new int[ENTRY_WORDS];

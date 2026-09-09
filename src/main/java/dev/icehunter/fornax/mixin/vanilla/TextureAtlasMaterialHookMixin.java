@@ -44,6 +44,9 @@ public class TextureAtlasMaterialHookMixin {
         if (!LabPbrGeometryBindings.isMirroredAtlasOwner(this.location)) {
             return;
         }
+        // This RETURN callback certifies vanilla's new sprite identities are published.
+        // Retained sidecars need rebinding even while their overflow/grid rebuild is pending.
+        AtlasGenerationSchedule.onAtlasUploaded(this.location, preparations);
         if (this.location.equals(TextureAtlas.LOCATION_BLOCKS)) {
             LabPbrSidecarRegistry.refreshActive(resourceManager);
         }

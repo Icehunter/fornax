@@ -22,6 +22,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class DirectSectionReaderTest {
     @Test
+    void structuralEmptySourceInventoryCapturesTheCurrentAtlasGeneration() throws Exception {
+        // Installing an atlas needs a GPU; pin the empty-path generation seam separately from
+        // the pure summary word and zero-count tests.
+        String source = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src/main/java/dev/icehunter/fornax/voxel/DirectSectionReader.java"));
+        assertTrue(source.contains("MaterialSourceIndex.current().generation()"),
+                "a structural empty slot must not publish the default generation zero forever");
+    }
+
+    @Test
     void emptyResultHasExactlyOneUnoccupiedPaletteEntry() {
         assertEquals(1, DirectSectionReader.EMPTY_RESULT.palette().entries().size());
         SectionPalette.Entry entry = DirectSectionReader.EMPTY_RESULT.palette().entries().get(0);

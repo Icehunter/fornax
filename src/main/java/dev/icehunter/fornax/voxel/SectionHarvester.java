@@ -4,6 +4,7 @@ import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.pack.material.BlockMaterials;
 import dev.icehunter.fornax.pack.material.MaterialScalars;
 import net.minecraft.client.Minecraft;
+import dev.icehunter.fornax.atlas.MaterialSourceIndex;
 import net.minecraft.client.color.block.BlockTintSource;
 import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.core.BlockPos;
@@ -52,13 +53,22 @@ public final class SectionHarvester {
     /** Distinct states already reported by the cutout-drop diagnostic below, so a chunk-load storm logs each once. */
     private static final java.util.Set<String> CUTOUT_DROP_LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    public record Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap) {
+    public record Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
+                         VoxelSourceSummary sourceSummary, long harvestGeneration) {
         public Result {
+            java.util.Objects.requireNonNull(sourceSummary, "sourceSummary");
             if (lightmap.length != VoxelLightmap.BYTES_PER_SLOT)
                 throw new IllegalArgumentException("voxel lightmap must contain one byte per section cell");
         }
+        public Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
+                      VoxelSourceSummary sourceSummary) {
+            this(paletteIndices, palette, lightmap, sourceSummary, VoxelHarvestLifecycle.generation());
+        }
+        public Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap) {
+            this(paletteIndices, palette, lightmap, VoxelSourceSummary.EMPTY);
+        }
         public Result(byte[] paletteIndices, SectionPalette palette) {
-            this(paletteIndices, palette, new byte[VoxelLightmap.BYTES_PER_SLOT]);
+            this(paletteIndices, palette, new byte[VoxelLightmap.BYTES_PER_SLOT], VoxelSourceSummary.EMPTY);
         }
     }
 
@@ -66,7 +76,7 @@ public final class SectionHarvester {
     }
 
     /** No tint: grass, leaves, vines and water come back atlas-grey. Pass a tint if you have one. */
-    public static Result harvest(PalettedContainerRO<BlockState> blockData, MaterialScalars materialScalars) {
+    public static @Nullable Result harvest(PalettedContainerRO<BlockState> blockData, MaterialScalars materialScalars) {
         return harvest(blockData, materialScalars, null, 0, 0, 0);
     }
 
@@ -76,14 +86,30 @@ public final class SectionHarvester {
      * @param originX    section corner in world blocks. The tint is read once at the middle: the
      *                   palette is per-section and biome colour moves slower than 16 blocks.
      */
-    public static Result harvest(PalettedContainerRO<BlockState> blockData, MaterialScalars materialScalars,
+    public static @Nullable Result harvest(PalettedContainerRO<BlockState> blockData, MaterialScalars materialScalars,
                                  @Nullable BlockAndTintGetter tintSource,
                                  int originX, int originY, int originZ) {
+        try (var lease = VoxelHarvestLifecycle.tryAcquire()) {
+            if (lease == null) return null;
+            return harvestLeased(blockData, materialScalars, tintSource, originX, originY, originZ,
+                    lease.generation());
+        }
+    }
+
+    private static Result harvestLeased(PalettedContainerRO<BlockState> blockData, MaterialScalars materialScalars,
+                                       @Nullable BlockAndTintGetter tintSource,
+                                       int originX, int originY, int originZ, long harvestGeneration) {
         BlockPos tintAt = tintSource == null
                 ? null : new BlockPos(originX + 8, originY + 8, originZ + 8);
         Map<BlockState, Integer> indexByState = new IdentityHashMap<>();
         List<SectionPalette.Entry> entries = new ArrayList<>();
         boolean[] overflowLogged = {false};
+        // One immutable material generation per harvest. Upload readers reject it after a reload.
+        boolean sourceDiagnostics = VoxelSourceSummary.isEnabled();
+        MaterialSourceIndex sourceIndex = sourceDiagnostics ? MaterialSourceIndex.current() : MaterialSourceIndex.EMPTY;
+        List<VoxelSourceSummary.Entry> sourceEntries = sourceDiagnostics ? new ArrayList<>() : null;
+        VoxelSourceSummary.Accumulator sourceInventory = sourceDiagnostics
+                ? new VoxelSourceSummary.Accumulator(sourceIndex.generation()) : null;
 
         blockData.forEachInPalette(state -> {
             if (indexByState.containsKey(state)) {
@@ -101,7 +127,8 @@ public final class SectionHarvester {
                 return;
             }
             indexByState.put(state, entries.size());
-            entries.add(buildEntry(state, materialScalars, biomeTint(state, tintSource, tintAt)));
+            entries.add(buildEntry(state, materialScalars, biomeTint(state, tintSource, tintAt),
+                    sourceIndex, sourceEntries));
         });
 
         byte[] paletteIndices = new byte[16 * 16 * 16];
@@ -113,6 +140,11 @@ public final class SectionHarvester {
                     // A state that was skipped above (palette overflow past MAX_PALETTE_ENTRIES) has no
                     // entry here -- fall back to index 0 deterministically rather than unboxing null.
                     paletteIndices[(y << 8) | (z << 4) | x] = (byte) (index != null ? index : 0);
+                    if (sourceInventory != null) {
+                        // Intrinsic emission is raw world data; category styling must not hide it.
+                        sourceInventory.add(!state.isAir(), state.getLightEmission(),
+                                index == null ? null : sourceEntries.get(index));
+                    }
                 }
             }
         }
@@ -127,7 +159,9 @@ public final class SectionHarvester {
         PaletteSizeHistogram.record(entries.size(), overflowLogged[0]);
 
         return new Result(paletteIndices, new SectionPalette(entries),
-                VoxelLightmap.capture(tintSource, originX, originY, originZ));
+                VoxelLightmap.capture(tintSource, originX, originY, originZ),
+                sourceInventory == null ? VoxelSourceSummary.EMPTY : sourceInventory.finish(overflowLogged[0]),
+                harvestGeneration);
     }
 
     /**
@@ -155,7 +189,8 @@ public final class SectionHarvester {
     }
 
     private static SectionPalette.Entry buildEntry(BlockState state, MaterialScalars materialScalars,
-                                                   int tint) {
+                                                   int tint, MaterialSourceIndex sourceIndex,
+                                                   @Nullable List<VoxelSourceSummary.Entry> sourceEntries) {
         VoxelShapeClassifier.ClassifiedShape shape = VoxelShapeClassifier.classify(state);
         int categoryId = BlockMaterials.idForState(state);
 
@@ -253,10 +288,21 @@ public final class SectionHarvester {
         boolean lightTransmissive = effectiveKind == VoxelShapeKind.FULL
                 && state.getLightDampening() < net.minecraft.world.level.lighting.LightEngine.MAX_LEVEL;
 
+        int[] faceTextures;
+        if (sourceEntries == null) {
+            faceTextures = VoxelFaceTexture.resolve(state, effectiveKind, tint);
+        } else if (state.isAir()) {
+            faceTextures = VoxelFaceTexture.resolve(state, effectiveKind, tint);
+            sourceEntries.add(new VoxelSourceSummary.Entry(0, false));
+        } else {
+            var sourceFaces = VoxelFaceTexture.resolveSources(state, effectiveKind, tint, sourceIndex);
+            faceTextures = sourceFaces.textureWords();
+            sourceEntries.add(VoxelSourceSummary.Entry.from(sourceFaces.summaries()));
+        }
         return new SectionPalette.Entry(effectiveKind, effectiveBoxes, faceColors, emissiveStrength,
                 lightTransmissive, emissionColor, cutout, uvRect, extinction,
                 FaceSealResolver.resolve(effectiveKind, effectiveBoxes),
-                VoxelFaceTexture.resolve(state, effectiveKind, tint));
+                faceTextures);
     }
 
     /** See the call site above -- extracted pure so the tagged/untagged/off-lamp matrix is directly

@@ -1235,6 +1235,8 @@ be restated here.
 | `TextureAtlasCelestialHookMixin` | `TextureAtlas` | Capture the celestials atlas (sun + all 8 moon-phase sprite UV rects) into `CelestialSprites` whenever it is (re)uploaded | Inject |
 | `TextureAtlasBlockHookMixin` | `TextureAtlas` | Capture the live block atlas texture/view used by voxel cutout-occlusion and analytic-light passes | Inject |
 | `TextureAtlasMaterialHookMixin` | `TextureAtlas` | Rebuild the material-map atlas whenever the block atlas is (re)uploaded | Inject |
+| `TextureAtlasVoxelLifetimeMixin` | `TextureAtlas.clearTextureData()V` | Before the block atlas closes sprite CPU images, cancel new voxel model reads, drain active leases and retire cached/queued harvests; reload and shutdown share this boundary | Inject (HEAD) |
+| `ModelManagerVoxelLifetimeMixin` | `ModelManager.apply(ModelManager$ReloadState)V` | Reopen voxel model reads only after successful model publication and request a stationary-camera resync | Inject (RETURN) |
 | `TextureAtlasReleaseGenerationMixin` | `TextureAtlas` | At `upload` HEAD, select a rebuild scope and hand it to `AtlasGenerationSchedule`: changed block = sidecars + overflow/grid, unchanged block = retain sidecars but retire overflow/grid, changed non-block mirrored atlas = sidecars only, unchanged non-block = no-op. Released resources rebuild only after three render-loop-separated polls | Inject (HEAD) |
 | `VulkanRenderPipelineMixin` | `VulkanRenderPipeline` | Declare the widened 60-byte push-constant range on every terrain-family Vulkan pipeline layout | WrapOperation |
 | `WindowMixin` | `Window` | Report the supersampled dimensions while a scaled frame is in flight, so downstream size queries stay consistent | ModifyReturnValue x2 |
@@ -2401,6 +2403,107 @@ returning. `SynchronousTransfer` stops the pool from being reset or destroyed af
 failed submit never waits on a fence nothing was signaled against. Closing the registry blocks any
 new resource request and retires the workspace; a changed light-volume layout also replaces it.
 Single-slot uploads and clears keep their own separate paths.
+
+### Optional voxel section state and source inventory
+
+`voxelSectionState` is an optional tier-zero buffer of eight scalar uint words (32 bytes) per
+wrap-around slot. Words 0..2 hold absolute section xyz as signed-int bits, word 3 the storage
+generation, word 4 the geometry revision, word 5 the content revision, word 6 validity, and word 7
+reserved zero. Validity zero is pending/invalid, including on allocation; one is committed. Geometry
+harvest advances both revisions; a world-light refresh preserves the geometry revision and advances
+content. Revisions identify accepted snapshots, not hashes or a guarantee that the world cannot
+change. Generation and revision counters fail on overflow instead of reusing a shader identity.
+
+A CPU harvest queues an immutable token. The uploader rejects a token superseded by another harvest,
+a slot clear, a recenter out of range or a storage reset before writing any of its ranges. It writes
+committed state in the same transfer as the occupancy, palette, world light and source inventory.
+CPU `recordHarvest` happens earlier and must not be read as GPU commitment. The separately tracked
+committed owner also preserves a required propagated-light clear when a newer queued harvest
+supersedes the first harvest for a recycled slot. While a same-owner
+update waits in a batch, the GPU record still describes the old GPU payload. Recycled slots are
+explicitly zeroed in the occupancy-clear transfer, and a same-size storage reset clears the optional
+metadata too. Enabled metadata makes single-slot harvests use the batch transfer; the ordinary
+single-slot path stays in use when both optional metadata buffers are disabled.
+
+`voxelSourceSummary` has an eight-word header followed by an eight-word record for every tier-zero
+slot: `(8 + slot * 8 + word)`. Header words 0/1 hold the current material-source atlas generation,
+low word first; word 2 is ABI version 1; the rest are zero. Slot records hold:
+
+| Words | Meaning |
+|---|---|
+| 0, 1 | The harvested material-source atlas generation, low/high |
+| 2 | Intrinsic candidate cells |
+| 3 | Cells with supported authored-source evidence |
+| 4 | Supported authored candidate faces |
+| 5 | Nonempty cells with unsupported or unknown authored evidence |
+| 6 | Flags: bit 0 palette overflow; other bits reserved |
+| 7 | Nonempty cells |
+
+Allocation is `32 + diameter^3 * 32` bytes. Both optional buffers together use 64 bytes per slot plus
+one 32-byte header. Source summary writes precede the matching committed section-state record; a
+shader must check ownership, committed validity and slot/header atlas-generation equality before
+using the inventory. These counts describe source candidates, not radiance, exposed area or a
+complete geometric light emitter list.
+
+`MaterialSourceIndex` summarizes original labPBR alpha before filtering: zero is off, 1..254
+contains authored emission, and 255 is unprovided. Static sprite identities bind immutable summaries
+to an atlas generation. Missing maps are known absent; unreadable, animated, cropped or otherwise
+unsupported mappings remain unknown. Section harvesting counts these candidates in its existing
+cell walk and caches model evidence per palette entry. The seven-word face-texture ABI is unchanged.
+No source colour, integrated energy, exposed-face selection or transport is added here.
+
+An unchanged block reload skips sidecar builders. The successful vanilla atlas upload RETURN
+therefore rebinds the retained source index before the pending overflow/grid early return. The
+schedule accepts only its exact pending preparations. HEAD scheduling, failed uploads and
+superseded callbacks cannot publish new sprite identities.
+
+Optional metadata readers run on the compute queue. Upload, reset and clear commands order prior
+compute shader reads before their first transfer writes; the existing final transfer-to-compute
+barrier makes the new records visible to subsequent compute reads. A pack can publish a status
+image for graphics through the graph's existing semaphore and image-reuse chain. These buffer
+barriers alone do not authorize direct graphics-queue reads of mutable metadata.
+
+Atlas publication is independent of graph registry lifetime. Before consumers execute,
+`VoxelWindow.synchronizeSourceGeneration` compares the current atlas generation against its
+synchronized one. A change retires CPU upload tokens, advances storage generation, zeroes both
+optional buffers' slot records and writes the new header in one reset transfer. The radius-zero
+window sentinel requests a full resync even at an unchanged camera. A harvest captured from an older
+atlas cannot publish into this generation. Reset fails loudly if allocated metadata has no upload
+backend; an unsuccessful transfer cannot leave an old header silently accepted. No per-section
+submission, fence or readback is added.
+
+`VoxelWindow.sourceInventoryStats` reports CPU totals of source summaries only after the existing
+batch transfer completion wait succeeds. Replacing a committed slot replaces its contribution;
+clearing it subtracts that contribution. Committed-upload, stale-upload and cleared-slot counters
+reset with storage. These CPU totals cannot establish GPU visibility, visual coverage or correct
+lighting in a client.
+
+### Voxel CPU model lifetime
+
+`VoxelHarvestLifecycle` pins model and sprite CPU reads independently of optional diagnostic
+buffers. `SectionHarvester` holds a read lease through its model resolution and last texel read;
+the resync worker additionally acquires the generation captured when its world work was queued,
+before calling `DirectSectionReader`. Both leases end before the GPU queue lock or upload. At the
+block atlas's `clearTextureData()V` HEAD, retirement advances the lifetime generation, rejects new
+reads and waits for entered readers to finish before any sprite image is closed. This is the CPU
+lifetime boundary shared by atlas upload and shutdown; releasing GPU textures cannot protect it.
+
+Only successful `ModelManager.apply(ModelManager$ReloadState)V` RETURN reopens reads. Clear or atlas
+upload completion cannot reopen them because models published before retirement may still refer to
+retired sprite contents. A failed publication or shutdown leaves reads paused. Retirement and
+publication invalidate the window's cached owners and queued storage generation; paused frames
+do not consume the radius-zero sentinel, so an unchanged camera requests a full resync after the
+new models publish. Consumers must still respect the published window bounds and buffer sizes;
+the CPU lifetime gate itself does not gate an arbitrary pack's GPU reads. Every result retains
+its harvest generation, including light-only replacements.
+Both upload paths check that lifetime even with diagnostics disabled, using volatile state rather
+than acquiring a CPU lease while holding the GPU lock.
+
+The hook descriptors and the close/upload-to-clear call relationship were checked against the
+Minecraft 26.2 runtime API. Headless tests exercise an allocated native image with concurrent reader
+retirement, cancellation, stale-result rejection and rescan enumeration; source contracts pin hook
+registration and upload ordering. They do not prove mixin execution in a running client or actual
+reload/shutdown timing. This boundary does not change palette colours, lighting or the GPU face ABI.
 
 ### Voxel model material coverage
 

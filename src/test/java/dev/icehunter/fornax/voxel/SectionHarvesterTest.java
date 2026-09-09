@@ -43,6 +43,19 @@ class SectionHarvesterTest {
     }
 
     @Test
+    void diagnosticAllAirSectionDoesNotNeedAClientModel() {
+        VoxelSourceSummary.setEnabled(true);
+        try {
+            var result = SectionHarvester.harvest(uniformSection(Blocks.AIR.defaultBlockState()),
+                    MaterialScalars.build(List.of()));
+            assertEquals(0, result.sourceSummary().nonemptyCells());
+            assertEquals(0, result.sourceSummary().unknownCells());
+        } finally {
+            VoxelSourceSummary.setEnabled(false);
+        }
+    }
+
+    @Test
     void allAirSectionHasATrivialPalette() {
         PalettedContainerRO<BlockState> allAir = uniformSection(Blocks.AIR.defaultBlockState());
         SectionHarvester.Result result = SectionHarvester.harvest(allAir, MaterialScalars.build(List.of()));

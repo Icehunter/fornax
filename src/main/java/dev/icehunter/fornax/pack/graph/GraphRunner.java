@@ -43,6 +43,9 @@ import dev.icehunter.fornax.pass.ssaa.SsaaManager;
 import dev.icehunter.fornax.pass.taa.CameraJitter;
 import dev.icehunter.fornax.pass.voxel.VoxelDebugRaymarchPass;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
+import dev.icehunter.fornax.atlas.MaterialSourceIndex;
+import dev.icehunter.fornax.voxel.VoxelSourceSummary;
+import dev.icehunter.fornax.voxel.VoxelSectionState;
 import dev.icehunter.fornax.voxel.BrickGridUpload;
 import dev.icehunter.fornax.voxel.PrecipClipmapUpload;
 import dev.icehunter.fornax.voxel.PrecipCoarseClipmapUpload;
@@ -769,6 +772,7 @@ public final class GraphRunner {
         // history target. Idempotent: harmless if called again on a graph that already has it.
         GraphSpec graphWithSceneHistory = SceneHistory.injectInto(pack.graph());
         registry = TargetRegistry.create(graphWithSceneHistory, compileValues);
+        VoxelSourceSummary.setEnabled(registry.isEnabledBufferTarget(VoxelSourceSummary.TARGET));
         packTextureRegistry = PackTextureRegistry.create(pack.root(), pack.graph().textures());
         packDeclaresDepthCopyback = computePackDeclaresDepthCopyback(graphWithSceneHistory);
 
@@ -1169,6 +1173,11 @@ public final class GraphRunner {
             return;
         }
         ensureRunnersBuilt();
+        // Material publication is independent of graph rebuilds. Retire old source evidence before
+        // any consumer runs; unchanged generations reuse the existing metadata without a transfer.
+        if (runnersBuilt && registry != null && VoxelSourceSummary.isEnabled()) {
+            VoxelWindow.synchronizeSourceGeneration(registry, MaterialSourceIndex.current().generation());
+        }
         // AFTER ensureRunnersBuilt, which is what lazily creates optionsBuffer, and BEFORE any pass
         // binds u_PackOptions this frame. This is the only safe point to rotate the ring.
         flushPendingRuntimeValues();
@@ -1847,7 +1856,8 @@ public final class GraphRunner {
                 continue;
             }
             for (String in : p.inputs()) {
-                if (in.equals(BrickGridUpload.OCCUPANCY_TARGET)) {
+                if (in.equals(BrickGridUpload.OCCUPANCY_TARGET)
+                        || in.equals(VoxelSectionState.TARGET) || in.equals(VoxelSourceSummary.TARGET)) {
                     return true;
                 }
             }
@@ -2891,6 +2901,7 @@ public final class GraphRunner {
         passRunFailureLogged.clear();
         runnerBuildFailureLogged.clear();
 
+        VoxelSourceSummary.setEnabled(false);
         if (registry != null) {
             registry.close();
             registry = null;

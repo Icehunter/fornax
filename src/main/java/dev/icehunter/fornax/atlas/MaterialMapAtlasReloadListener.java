@@ -129,6 +129,7 @@ public final class MaterialMapAtlasReloadListener {
         String fingerprint = LabPbrAtlasFingerprint.compute(atlasLocation, preparations, survey, pagedLayout);
         MaterialMapAtlas existing = MaterialMapAtlas.getInstance(atlasLocation);
         if (existing != null && fingerprint.equals(existing.fingerprint())) {
+            existing.rebindSourceIndex(sprites);
             FornaxMod.LOGGER.info("[LabPBR] Material map atlas reuse: fingerprint unchanged, "
                     + "skipping rebuild ({} sprites)", sprites.size());
             return existing;
@@ -153,6 +154,8 @@ public final class MaterialMapAtlasReloadListener {
             layerRects.add(new ArrayList<>());
         }
 
+        java.util.Map<TextureAtlasSprite, MaterialSourceIndex.Summary> sourceSummaries =
+                new java.util.IdentityHashMap<>();
         MaterialMapAtlas builtAtlas;
         try (NativeImage atlasImage = sourcedFromDisk ? diskCached.base()
                 : new NativeImage(NativeImage.Format.RGBA, atlasWidth, atlasHeight, false)) {
@@ -205,6 +208,11 @@ public final class MaterialMapAtlasReloadListener {
                 // resolveEmissionSentinel. The array is how a lambda reports back; the alternative
                 // was threading a return value through a hook whose other caller has no use for it.
                 boolean[] authored = new boolean[1];
+                MaterialSourceIndex.Summary[] sourceSummary = {
+                        MaterialSourceIndex.initialSummary(surveyed, resourceManager, animationLookup)};
+                if (sourcedFromDisk && surveyed.id() != null && animationLookup.usable() && animation == null) {
+                    sourceSummary[0] = MaterialSourceIndex.readStatic(surveyed, resourceManager);
+                }
                 LabPbrAnimatedSidecar animated = animation == null ? null
                         : LabPbrAnimatedSidecar.load(
                                 surveyed, resourceManager, animation,
@@ -215,8 +223,10 @@ public final class MaterialMapAtlasReloadListener {
                 int initialFrame = animation == null ? 0 : animation.frames().getFirst().index();
                 int frameColumns = animation == null ? 1 : animation.frameColumns();
                 if (usable && (sourcedFromDisk || blitSidecar(atlasImage, surveyed, resourceManager, rect,
-                        (source, frameHeight) ->
-                                authored[0] = resolveEmissionSentinel(source, frameHeight),
+                        (source, frameHeight) -> {
+                            authored[0] = resolveEmissionSentinel(source, frameHeight);
+                            if (animation == null) sourceSummary[0] = MaterialSourceIndex.summarize(source);
+                        },
                         initialFrame, frameColumns, animation != null))) {
                     found++;
                     if (authored[0]) {
@@ -232,6 +242,7 @@ public final class MaterialMapAtlasReloadListener {
                     missing++;
                 }
 
+                sourceSummaries.put(sprite, sourceSummary[0]);
                 markOccupied(occupied, atlasWidth, rect);
                 spriteRects.add(rect);
 
@@ -271,6 +282,7 @@ public final class MaterialMapAtlasReloadListener {
 
             builtAtlas = upload(device, atlasImage, spriteRects,
                     animations, occupiedAnimationRegions, layerImages, layerRects, fingerprint);
+            builtAtlas.setSourceIndex(new MaterialSourceIndex(sourceSummaries));
             animationsTransferred = true;
         } finally {
             if (!animationsTransferred) {

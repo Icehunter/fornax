@@ -1,6 +1,7 @@
 package dev.icehunter.fornax.voxel;
 
 import dev.icehunter.fornax.pack.material.MaterialScalarsHolder;
+import dev.icehunter.fornax.atlas.MaterialSourceIndex;
 import net.minecraft.core.SectionPos;
 import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.world.level.Level;
@@ -53,7 +54,10 @@ public final class DirectSectionReader {
 
     /** No geometry outside build height, but the sky light there is not always zero. */
     static SectionHarvester.Result emptyResultWithLight(byte[] lightmap) {
-        return new SectionHarvester.Result(EMPTY_RESULT.paletteIndices(), EMPTY_RESULT.palette(), lightmap);
+        VoxelSourceSummary sources = VoxelSourceSummary.isEnabled()
+                ? new VoxelSourceSummary(MaterialSourceIndex.current().generation(), 0, 0, 0, 0, 0, 0)
+                : VoxelSourceSummary.EMPTY;
+        return new SectionHarvester.Result(EMPTY_RESULT.paletteIndices(), EMPTY_RESULT.palette(), lightmap, sources);
     }
 
     private DirectSectionReader() {

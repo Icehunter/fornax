@@ -78,13 +78,35 @@ class VoxelWindowStorageTest {
         VoxelWindow.recenter(32, 3, -55, 4);
         var harvest = VoxelWindow.class.getDeclaredMethod("harvestAndUploadBatch",
                 net.minecraft.world.level.Level.class, List.class,
-                java.util.function.LongConsumer.class, Runnable.class, long.class);
+                java.util.function.LongConsumer.class, Runnable.class, long.class, long.class);
         harvest.setAccessible(true);
         var processed = new java.util.concurrent.atomic.AtomicInteger();
         // A stale queued task must drain its counts without touching the old world, null here.
         harvest.invoke(null, null, List.of(SectionPos.of(32, 3, -55)),
                 (java.util.function.LongConsumer) count -> { throw new AssertionError("stale harvest"); },
-                (Runnable) processed::incrementAndGet, queuedGeneration);
+                (Runnable) processed::incrementAndGet, queuedGeneration, VoxelHarvestLifecycle.generation());
+        assertEquals(1, processed.get());
+        assertFalse(VoxelWindow.hasValidData(32, 3, -55));
+    }
+
+    @Test void queuedOldModelsCannotTouchTheCapturedWorldAfterPublication() throws Exception {
+        long queuedHarvestGeneration = VoxelHarvestLifecycle.generation();
+        VoxelHarvestLifecycle.onBlockAtlasRetired();
+        VoxelHarvestLifecycle.onModelsPublished();
+        VoxelWindow.attachRegistry(registry());
+        VoxelWindow.recenter(32, 3, -55, 4);
+        var epoch = VoxelWindow.class.getDeclaredField("storageGeneration");
+        epoch.setAccessible(true);
+        var harvest = VoxelWindow.class.getDeclaredMethod("harvestAndUploadBatch",
+                net.minecraft.world.level.Level.class, List.class,
+                java.util.function.LongConsumer.class, Runnable.class, long.class, long.class);
+        harvest.setAccessible(true);
+        var processed = new java.util.concurrent.atomic.AtomicInteger();
+        // Use CURRENT storage to isolate the lifetime guard. Reading this old null world would
+        // throw; the queued generation must cancel before DirectSectionReader touches it.
+        harvest.invoke(null, null, List.of(SectionPos.of(32, 3, -55)),
+                (java.util.function.LongConsumer) count -> { throw new AssertionError("stale model harvest"); },
+                (Runnable) processed::incrementAndGet, epoch.getLong(null), queuedHarvestGeneration);
         assertEquals(1, processed.get());
         assertFalse(VoxelWindow.hasValidData(32, 3, -55));
     }
@@ -103,6 +125,42 @@ class VoxelWindowStorageTest {
         // Null would throw in recordHarvest: a callback before the first recenter must not publish.
         VoxelWindow.onSectionHarvested(SectionPos.of(0, 0, 0), null);
         assertFalse(VoxelWindow.hasValidData(0, 0, 0));
+    }
+
+    @Test void atlasGenerationChangeInvalidatesQueuedTokensAtAnUnchangedCamera() throws Exception {
+        var graph = dev.icehunter.fornax.pack.PackTomlLoader.loadGraph(new java.io.StringReader("""
+                [targets.voxelSourceSummary]
+                kind = "buffer"
+                """), "graph.toml");
+        TargetRegistry r = TargetRegistry.create(graph, Map.of());
+        VoxelWindow.attachRegistry(r);
+        assertTrue(VoxelWindow.synchronizeSourceGeneration(r, 8));
+        VoxelWindow.recenter(0, 0, 0, 4);
+        var field = VoxelWindow.class.getDeclaredField("sectionStates");
+        field.setAccessible(true);
+        var states = (VoxelSectionState) field.get(null);
+        var queued = states.geometry(0, SectionPos.of(0, 0, 0));
+        assertFalse(VoxelWindow.synchronizeSourceGeneration(r, 8), "same generation keeps the populated window");
+        assertTrue(VoxelWindow.isCurrentSectionState(0, queued));
+        assertTrue(VoxelWindow.synchronizeSourceGeneration(r, 9));
+        assertEquals(0, VoxelWindow.currentState().radius(), "force resync with an unchanged camera");
+        VoxelWindow.recenter(0, 0, 0, 4);
+        assertFalse(VoxelWindow.isCurrentSectionState(0, queued));
+        var staleResult = new SectionHarvester.Result(new byte[4096], new SectionPalette(List.of()),
+                new byte[4096], new VoxelSourceSummary(8, 0, 0, 0, 0, 0, 0));
+        assertFalse(VoxelWindow.hasCurrentSourceSummary(staleResult));
+        VoxelWindow.onSectionHarvested(SectionPos.of(0, 0, 0), staleResult);
+        assertFalse(VoxelWindow.hasValidData(0, 0, 0), "a late old-atlas result must not claim the new storage");
+        assertEquals(0, VoxelWindow.sourceInventoryStats().committedSlots());
+        assertEquals(1, VoxelWindow.sourceInventoryStats().staleUploads());
+    }
+
+    @Test void disabledSourceInventoryDoesNotResetTheOrdinaryVoxelWindow() throws Exception {
+        TargetRegistry r = registry();
+        VoxelWindow.attachRegistry(r);
+        seedOwner();
+        assertFalse(VoxelWindow.synchronizeSourceGeneration(r, 81));
+        assertTrue(VoxelWindow.hasValidData(32, 3, -55));
     }
 
 }
