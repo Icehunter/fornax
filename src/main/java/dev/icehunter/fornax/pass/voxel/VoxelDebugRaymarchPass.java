@@ -318,6 +318,8 @@ public final class VoxelDebugRaymarchPass {
             profiler.recordValue("source_authored_cells", sources.authoredCandidateCells());
             profiler.recordValue("source_authored_faces", sources.authoredCandidateFaces());
             profiler.recordValue("source_unknown_cells", sources.unknownCells());
+            profiler.recordValue("source_eligible_faces", sources.eligibleFaces());
+            profiler.recordValue("source_unsupported_faces", sources.unsupportedFaces());
             profiler.recordValue("source_overflow_slots", sources.overflowSlots());
             profiler.recordValue("source_uploads", sources.committedUploads());
             profiler.recordValue("source_stale_uploads", sources.staleUploads());

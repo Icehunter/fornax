@@ -40,8 +40,11 @@ class VoxelHarvestLifecycleContractTest {
                 + "                            || (item.sectionState() != null"));
         String window = Files.readString(Path.of(
                 "src/main/java/dev/icehunter/fornax/voxel/VoxelWindow.java"));
-        assertTrue(window.contains("previous.sourceSummary(), previous.harvestGeneration()"),
-                "light-only refresh must not recertify an older geometry palette");
+        assertTrue(window.contains("previous.withLightmap(sample.getValue())"));
+        String harvester = Files.readString(Path.of(
+                "src/main/java/dev/icehunter/fornax/voxel/SectionHarvester.java"));
+        assertTrue(harvester.contains("updated, sourceSummary, harvestGeneration, sourceEvidence"),
+                "light-only refresh must retain geometry evidence and its captured generations");
         String sodium = Files.readString(Path.of(
                 "src/main/java/dev/icehunter/fornax/mixin/sodium/ChunkBuilderMeshingTaskMixin.java"));
         assertTrue(sodium.contains("if (result != null)"), "expected cancellation is not a harvest failure");

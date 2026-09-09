@@ -54,11 +54,19 @@ public final class SectionHarvester {
     private static final java.util.Set<String> CUTOUT_DROP_LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public record Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
-                         VoxelSourceSummary sourceSummary, long harvestGeneration) {
+                         VoxelSourceSummary sourceSummary, long harvestGeneration, VoxelSourceEvidence sourceEvidence) {
         public Result {
             java.util.Objects.requireNonNull(sourceSummary, "sourceSummary");
+            java.util.Objects.requireNonNull(sourceEvidence, "sourceEvidence");
             if (lightmap.length != VoxelLightmap.BYTES_PER_SLOT)
                 throw new IllegalArgumentException("voxel lightmap must contain one byte per section cell");
+        }
+        public Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
+                      VoxelSourceSummary sourceSummary, long harvestGeneration) {
+            this(paletteIndices, palette, lightmap, sourceSummary, harvestGeneration, VoxelSourceEvidence.UNAVAILABLE);
+        }
+        public Result withLightmap(byte[] updated) {
+            return new Result(paletteIndices, palette, updated, sourceSummary, harvestGeneration, sourceEvidence);
         }
         public Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
                       VoxelSourceSummary sourceSummary) {
@@ -108,6 +116,7 @@ public final class SectionHarvester {
         boolean sourceDiagnostics = VoxelSourceSummary.isEnabled();
         MaterialSourceIndex sourceIndex = sourceDiagnostics ? MaterialSourceIndex.current() : MaterialSourceIndex.EMPTY;
         List<VoxelSourceSummary.Entry> sourceEntries = sourceDiagnostics ? new ArrayList<>() : null;
+        VoxelSourceEvidence.Builder sourceEvidence = sourceDiagnostics ? new VoxelSourceEvidence.Builder() : null;
         VoxelSourceSummary.Accumulator sourceInventory = sourceDiagnostics
                 ? new VoxelSourceSummary.Accumulator(sourceIndex.generation()) : null;
 
@@ -128,7 +137,7 @@ public final class SectionHarvester {
             }
             indexByState.put(state, entries.size());
             entries.add(buildEntry(state, materialScalars, biomeTint(state, tintSource, tintAt),
-                    sourceIndex, sourceEntries));
+                    sourceIndex, sourceEntries, sourceEvidence));
         });
 
         byte[] paletteIndices = new byte[16 * 16 * 16];
@@ -144,6 +153,7 @@ public final class SectionHarvester {
                         // Intrinsic emission is raw world data; category styling must not hide it.
                         sourceInventory.add(!state.isAir(), state.getLightEmission(),
                                 index == null ? null : sourceEntries.get(index));
+                        sourceEvidence.addCell(!state.isAir(), index == null ? -1 : index);
                     }
                 }
             }
@@ -161,7 +171,8 @@ public final class SectionHarvester {
         return new Result(paletteIndices, new SectionPalette(entries),
                 VoxelLightmap.capture(tintSource, originX, originY, originZ),
                 sourceInventory == null ? VoxelSourceSummary.EMPTY : sourceInventory.finish(overflowLogged[0]),
-                harvestGeneration);
+                harvestGeneration, sourceEvidence == null ? VoxelSourceEvidence.UNAVAILABLE
+                        : sourceEvidence.finish(overflowLogged[0]));
     }
 
     /**
@@ -190,7 +201,8 @@ public final class SectionHarvester {
 
     private static SectionPalette.Entry buildEntry(BlockState state, MaterialScalars materialScalars,
                                                    int tint, MaterialSourceIndex sourceIndex,
-                                                   @Nullable List<VoxelSourceSummary.Entry> sourceEntries) {
+                                                   @Nullable List<VoxelSourceSummary.Entry> sourceEntries,
+                                                   VoxelSourceEvidence.@Nullable Builder sourceEvidence) {
         VoxelShapeClassifier.ClassifiedShape shape = VoxelShapeClassifier.classify(state);
         int categoryId = BlockMaterials.idForState(state);
 
@@ -294,10 +306,12 @@ public final class SectionHarvester {
         } else if (state.isAir()) {
             faceTextures = VoxelFaceTexture.resolve(state, effectiveKind, tint);
             sourceEntries.add(new VoxelSourceSummary.Entry(0, false));
+            sourceEvidence.add(false, 0, List.of());
         } else {
             var sourceFaces = VoxelFaceTexture.resolveSources(state, effectiveKind, tint, sourceIndex);
             faceTextures = sourceFaces.textureWords();
             sourceEntries.add(VoxelSourceSummary.Entry.from(sourceFaces.summaries()));
+            sourceEvidence.add(true, state.getLightEmission(), sourceFaces.summaries());
         }
         return new SectionPalette.Entry(effectiveKind, effectiveBoxes, faceColors, emissiveStrength,
                 lightTransmissive, emissionColor, cutout, uvRect, extinction,

@@ -2511,6 +2511,41 @@ unsupported mappings remain unknown. Section harvesting counts these candidates 
 cell walk and caches model evidence per palette entry. The seven-word face-texture ABI is unchanged.
 No source colour, integrated energy, exposed-face selection or transport is added here.
 
+`SectionHarvester.Result.sourceEvidence` keeps one CPU word per palette entry when source
+diagnostics are on: the raw intrinsic level, plus supported, authored-positive, missing-map, and
+unknown masks for the six `Direction.get3DDataValue()` positions. `VoxelFaceTexture.packSources`
+marks unsupported or cropped geometry as unknown; a valid UV word alone does not prove a face has
+source support. A missing material map alone still allows intrinsic evidence, but any unknown flag
+wins over it. An unknown face counts as unsupported even when the source data cannot be read at
+all. The masks do not tell apart a texel that is authored off from one that was never provided.
+Both cases keep the raw intrinsic reading, on purpose: a later step that checks alpha must filter
+out the authored-off ones before using them as light. Material color is not kept or read as light
+output here.
+
+The eligible and unsupported face counts build up during the harvester's own cell walk.
+`Result.withLightmap` keeps this evidence and both the source and model generations. A section with
+no blocks uses one shared, known-empty evidence value. Old constructors, and diagnostics turned off,
+share one unavailable value: no extra palette memory, cell scan, or model work happens while off.
+`VoxelWindow` keeps evidence with each current snapshot and each queued replacement waiting to
+apply. The committed inventory keeps only the two counts, alongside its existing source summary.
+
+`VoxelEmitterCandidates.enumerate` turns a snapshot into a list of plain int keys on demand,
+ordered by local cell index then direction. A key is `cellIndex * 6 + direction`, with cell index
+`x | z << 4 | y << 8`. The result reports status, the total eligible count, how many keys it
+stored, how many it could not fit, and the unsupported count. A full palette rejects the whole
+snapshot. So does any cell whose palette entry is missing, even below the cap: falling back to
+palette entry zero would not give a trustworthy result. Every non-empty face in a rejected snapshot
+counts as unsupported. This listing does not run on its own during harvest, and no section keeps
+candidate objects around. Its default cap of 4096 comes from the local colored-light design's
+overall candidate budget. A caller can pass a different cap; this is a limit, not a shared pool or
+a selection rule.
+
+The stored palette data is four bytes per entry, so at most 384 bytes at the current 96-entry cap.
+Across a reach-12 window's 15,625 slots that is at most 5.72 MiB total, or 1.91 MiB at 32 entries
+per section, not counting JVM object and array headers or short-lived snapshots. A default listing
+call keeps at most 16 KiB of key data, and only for the caller that asked for it. Neither the
+seven-word face texture nor the eight-word source-summary GPU layout changes.
+
 An unchanged block reload skips sidecar builders. The successful vanilla atlas upload RETURN
 therefore rebinds the retained source index before the pending overflow/grid early return. The
 schedule accepts only its exact pending preparations. HEAD scheduling, failed uploads and
@@ -2533,7 +2568,9 @@ submission, fence or readback is added.
 
 `VoxelWindow.sourceInventoryStats` reports CPU totals of source summaries only after the existing
 batch transfer completion wait succeeds. Replacing a committed slot replaces its contribution;
-clearing it subtracts that contribution. Committed-upload, stale-upload and cleared-slot counters
+clearing it subtracts that contribution. Eligible and unsupported face counters follow the same
+completion and invalidation rule and show up in the existing F10 source telemetry; a queued or
+replaced harvest cannot move them. Committed-upload, stale-upload and cleared-slot counters
 reset with storage. These CPU totals cannot establish GPU visibility, visual coverage or correct
 lighting in a client.
 

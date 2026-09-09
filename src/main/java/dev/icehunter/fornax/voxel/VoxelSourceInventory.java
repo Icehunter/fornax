@@ -15,10 +15,20 @@ public final class VoxelSourceInventory {
 
     public record Stats(int committedSlots, long intrinsicCandidateCells, long authoredCandidateCells,
                         long authoredCandidateFaces, long unknownCells, long nonemptyCells,
-                        long overflowSlots, long committedUploads, long staleUploads, long clearedSlots) { }
+                        long overflowSlots, long committedUploads, long staleUploads, long clearedSlots,
+                        long eligibleFaces, long unsupportedFaces) {
+        public Stats(int committedSlots, long intrinsicCandidateCells, long authoredCandidateCells,
+                     long authoredCandidateFaces, long unknownCells, long nonemptyCells,
+                     long overflowSlots, long committedUploads, long staleUploads, long clearedSlots) {
+            this(committedSlots, intrinsicCandidateCells, authoredCandidateCells, authoredCandidateFaces,
+                    unknownCells, nonemptyCells, overflowSlots, committedUploads, staleUploads, clearedSlots, 0, 0);
+        }
+    }
 
-    private final Map<Integer, VoxelSourceSummary> committed = new HashMap<>();
-    private long intrinsic, authoredCells, authoredFaces, unknown, nonempty, overflow;
+    // Only two counts join the summary here; this inventory keeps no palette evidence arrays.
+    private record Committed(VoxelSourceSummary summary, int eligibleFaces, int unsupportedFaces) { }
+    private final Map<Integer, Committed> committed = new HashMap<>();
+    private long intrinsic, authoredCells, authoredFaces, unknown, nonempty, overflow, eligible, unsupported;
     private long uploads, stale, cleared;
 
     public static long bufferBytes(int diameter) {
@@ -41,16 +51,21 @@ public final class VoxelSourceInventory {
         destination.putInt(2 * Integer.BYTES, ABI_VERSION);
     }
 
-    public void commit(int slot, VoxelSourceSummary summary) {
-        VoxelSourceSummary previous = committed.put(slot, summary);
+    public void commit(int slot, VoxelSourceSummary summary, VoxelSourceEvidence evidence) {
+        var current = new Committed(summary, evidence.eligibleFaces(), evidence.unsupportedFaces());
+        Committed previous = committed.put(slot, current);
         if (previous != null) add(previous, -1);
-        add(summary, 1);
+        add(current, 1);
         uploads++;
+    }
+
+    public void commit(int slot, VoxelSourceSummary summary) {
+        commit(slot, summary, VoxelSourceEvidence.UNAVAILABLE);
     }
 
     public void invalidate(Collection<Integer> slots) {
         for (int slot : slots) {
-            VoxelSourceSummary previous = committed.remove(slot);
+            Committed previous = committed.remove(slot);
             if (previous != null) {
                 add(previous, -1);
                 cleared++;
@@ -62,16 +77,19 @@ public final class VoxelSourceInventory {
 
     public void reset() {
         committed.clear();
-        intrinsic = authoredCells = authoredFaces = unknown = nonempty = overflow = 0;
+        intrinsic = authoredCells = authoredFaces = unknown = nonempty = overflow = eligible = unsupported = 0;
         uploads = stale = cleared = 0;
     }
 
     public Stats stats() {
         return new Stats(committed.size(), intrinsic, authoredCells, authoredFaces, unknown, nonempty,
-                overflow, uploads, stale, cleared);
+                overflow, uploads, stale, cleared, eligible, unsupported);
     }
 
-    private void add(VoxelSourceSummary summary, int sign) {
+    private void add(Committed current, int sign) {
+        VoxelSourceSummary summary = current.summary();
+        eligible += (long) sign * current.eligibleFaces();
+        unsupported += (long) sign * current.unsupportedFaces();
         intrinsic += (long) sign * summary.intrinsicCandidateCells();
         authoredCells += (long) sign * summary.authoredCandidateCells();
         authoredFaces += (long) sign * summary.authoredCandidateFaces();

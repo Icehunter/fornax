@@ -54,10 +54,13 @@ public final class DirectSectionReader {
 
     /** No geometry outside build height, but the sky light there is not always zero. */
     static SectionHarvester.Result emptyResultWithLight(byte[] lightmap) {
-        VoxelSourceSummary sources = VoxelSourceSummary.isEnabled()
+        boolean sourceDiagnostics = VoxelSourceSummary.isEnabled();
+        VoxelSourceSummary sources = sourceDiagnostics
                 ? new VoxelSourceSummary(MaterialSourceIndex.current().generation(), 0, 0, 0, 0, 0, 0)
                 : VoxelSourceSummary.EMPTY;
-        return new SectionHarvester.Result(EMPTY_RESULT.paletteIndices(), EMPTY_RESULT.palette(), lightmap, sources);
+        return new SectionHarvester.Result(EMPTY_RESULT.paletteIndices(), EMPTY_RESULT.palette(), lightmap, sources,
+                VoxelHarvestLifecycle.generation(), sourceDiagnostics
+                        ? VoxelSourceEvidence.EMPTY : VoxelSourceEvidence.UNAVAILABLE);
     }
 
     private DirectSectionReader() {

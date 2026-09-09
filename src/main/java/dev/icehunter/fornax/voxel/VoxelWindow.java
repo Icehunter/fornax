@@ -157,7 +157,7 @@ public final class VoxelWindow {
         if (item.sectionState() != null) {
             sectionStates.commit(item.slot(), item.sectionState());
             if (registry != null && registry.isEnabledBufferTarget(VoxelSourceSummary.TARGET))
-                sourceInventory.commit(item.slot(), item.result().sourceSummary());
+                sourceInventory.commit(item.slot(), item.result().sourceSummary(), item.result().sourceEvidence());
         }
     }
 
@@ -508,7 +508,7 @@ public final class VoxelWindow {
                             if (slot < 0 || !hasValidData(position.x(),position.y(),position.z())) continue;
                             SectionHarvester.Result previous = slotData.get(slot);
                             if (previous == null) continue;
-                            var updated = new SectionHarvester.Result(previous.paletteIndices(), previous.palette(), sample.getValue(), previous.sourceSummary(), previous.harvestGeneration());
+                            var updated = previous.withLightmap(sample.getValue());
                             slotData.put(slot, updated);
                             var snapshot = sectionMetadataEnabled(capturedRegistry)
                                     ? sectionStates.content(slot) : null;
