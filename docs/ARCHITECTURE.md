@@ -2463,6 +2463,32 @@ owner always asks for a clear on the next accepted upload, since resetting CPU s
 GPU data untouched. Only a known owner that was actually committed keeps its light settled.
 The older single-slot upload and clear calls are still there on their own.
 
+### Voxel refill profiling
+
+`VoxelRefillTelemetry` accumulates host wall times and section counts for completed resync and
+chunk-arrival harvest jobs. The render thread publishes the retained totals into the profiler's
+`refill_*` rows, so an F10 dump after the queue settles still contains the work. Totals span the
+process lifetime, including reloads: subtract two dumps to measure a teleport. Active jobs count
+executing jobs, excluding queued jobs. Worker-local counters merge once at job completion, including
+failed jobs; ordinary mesh harvests and separate light-only refresh jobs are outside this scope.
+
+Read time includes light capture. Upload time includes transfer reset, packing and command
+recording, submit, fence wait and CPU commit bookkeeping. These spans overlap: do not add them
+together. Shared-queue lock waiting covers result admission and batch upload entry, before taking
+the outer lock. Fence waiting is elapsed host time, including scheduling delays, not GPU busy time.
+Reentrant jobs restore the enclosing telemetry scope; their elapsed spans overlap too.
+Queue time runs from submission to harvest-job entry; for chunk arrivals it also includes removing
+the pending request under the shared lock. Summed queue time can overlap between jobs, and maximum
+job time is not the wall duration of a whole window refill.
+
+Visited positions, attempted reads, null results, successful reads, already-valid skips, obsolete
+work, retired leases and rejected results have separate counts. Null results do not necessarily mean
+unloaded chunks. Outside-build-height reads are counted separately. Light cells count fully captured
+lightmaps; packed sections have recorded update commands; committed sections have completed the
+fence and passed CPU ownership checks. None of these counters asserts complete world coverage.
+Timing adds no per-cell clocks, new world reads or GPU waits. It measures existing work inside a
+refill job, not all renderer contention or the later render-thread source-pool publication.
+
 ### Optional voxel section state and source inventory
 
 `voxelSectionState` is an optional tier-zero buffer of eight scalar uint words (32 bytes) per
@@ -2523,8 +2549,7 @@ out the authored-off ones before using them as light. Material color is not kept
 output here.
 
 The eligible and unsupported face counts build up during the harvester's own cell walk.
-`Result.withLightmap` keeps this evidence and both the source and model generations. A section with
-no blocks uses one shared, known-empty evidence value. Old constructors, and diagnostics turned off,
+`Result.withLightmap` keeps this evidence and both the source and model generations. A structurally empty section result uses one shared, known-empty evidence value. Old constructors, and diagnostics turned off,
 share one unavailable value: no extra palette memory, cell scan, or model work happens while off.
 `VoxelWindow` keeps evidence with each current snapshot and each queued replacement waiting to
 apply. The committed inventory keeps only the two counts, alongside its existing source summary.
@@ -2532,7 +2557,7 @@ apply. The committed inventory keeps only the two counts, alongside its existing
 `VoxelEmitterCandidates.enumerate` turns a snapshot into a list of plain int keys on demand,
 ordered by local cell index then direction. A key is `cellIndex * 6 + direction`, with cell index
 `x | z << 4 | y << 8`. The result reports status, the total eligible count, how many keys it
-stored, how many it could not fit, and the unsupported count. A full palette rejects the whole
+stored, how many it could not fit, and the unsupported count. Palette overflow rejects the whole
 snapshot. So does any cell whose palette entry is missing, even below the cap: falling back to
 palette entry zero would not give a trustworthy result. Every non-empty face in a rejected snapshot
 counts as unsupported. This listing does not run on its own during harvest, and no section keeps
@@ -2545,6 +2570,39 @@ Across a reach-12 window's 15,625 slots that is at most 5.72 MiB total, or 1.91 
 per section, not counting JVM object and array headers or short-lived snapshots. A default listing
 call keeps at most 16 KiB of key data, and only for the caller that asked for it. Neither the
 seven-word face texture nor the eight-word source-summary GPU layout changes.
+
+`voxelEmitterPool` is an optional engine-owned, compute-readable buffer containing a bounded
+4096-face diagnostic subset. It requires `voxelSectionState` and `voxelSourceSummary` buffer inputs
+on every consumer; graph validation rejects graphics readers and pack writers. Its 64-byte header
+and 4096 64-byte records occupy 262,208 bytes. All fields are scalar uint words:
+
+| Header words | Meaning |
+|---|---|
+| 0..3 | ABI 1, capacity, stored count, flags (bit 0 rebuilding, bit 1 deferred) |
+| 4..9 | Eligible, deferred and unsupported counts, each low/high |
+| 10..15 | Publication revision low/high, atlas generation low/high, storage generation, reserved |
+
+| Record words | Meaning |
+|---|---|
+| 0..3 | Signed owner section xyz, storage generation |
+| 4..7 | Geometry revision, atlas generation low/high, local face key |
+| 8 | Raw intrinsic level in bits 0..3; missing-map flag in bit 4 |
+| 9..15 | Existing seven-word face mapping, including tint and valid/cutout flags |
+
+Admission retains references to committed snapshots and one scalar cursor per section, never
+per-section candidate arrays. It takes turns through owner-coordinate order with a budget of 4096
+cell-index reads per frame, including repeated directional reads. A full pool stops scanning.
+Lightmap-only updates preserve admission; geometry replacement, slot recycling, atlas change and
+storage reset remove the affected rows. Atlas overflow placeholders are unsupported source mappings:
+their UVs address fallback strips, not the original page's pixels.
+
+Only dirty pool snapshots enter `EngineBufferUploadQueue`, in aligned chunks no larger than
+65,536 bytes. A queued publication contains the complete zero-padded buffer; its publication counter
+means queue acceptance, not GPU completion. Existing transfer ordering and ownership checks apply,
+with no new queue wait or fence. Consumers must validate owner, committed state, geometry, storage
+and atlas generation before any atlas read. The buffer provides neither integrated energy nor
+exposed-face selection: deferred faces remain explicitly counted, and this subset is neither nearest
+nor an unbiased transport sample. The pack decides how to evaluate source colour and display it.
 
 An unchanged block reload skips sidecar builders. The successful vanilla atlas upload RETURN
 therefore rebinds the retained source index before the pending overflow/grid early return. The

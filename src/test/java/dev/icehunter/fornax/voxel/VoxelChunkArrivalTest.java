@@ -74,6 +74,26 @@ class VoxelChunkArrivalTest {
         VoxelWindow.onSectionUploadCommitted(new BrickGridUpload.SlotUpload(slot, result, true, snapshotAt(slot)));
     }
 
+    @Test void refillTelemetrySeparatesUnavailableReadsFromSuccessfulReadsAndGpuCommits() {
+        var before = VoxelRefillTelemetry.LIVE.snapshot();
+        recenter(0, (level, pos) -> null);
+        var missing = VoxelRefillTelemetry.LIVE.snapshot();
+        // Radius one visits 3 cubed sections in a synchronous prefix and one queued tail.
+        assertEquals(2, missing.jobs() - before.jobs());
+        assertEquals(27, missing.count(VoxelRefillTelemetry.Count.READ) - before.count(VoxelRefillTelemetry.Count.READ));
+        assertEquals(27, missing.count(VoxelRefillTelemetry.Count.NULL_READ) - before.count(VoxelRefillTelemetry.Count.NULL_READ));
+        assertEquals(0, missing.activeJobs());
+
+        arrival(0, (level, pos) -> data());
+        drain();
+        var filled = VoxelRefillTelemetry.LIVE.snapshot();
+        // One arriving column covers three section heights. This fixture has no GPU buffers.
+        assertEquals(3, filled.count(VoxelRefillTelemetry.Count.READ_OK) - missing.count(VoxelRefillTelemetry.Count.READ_OK));
+        assertEquals(before.count(VoxelRefillTelemetry.Count.PACKED), filled.count(VoxelRefillTelemetry.Count.PACKED));
+        assertEquals(before.count(VoxelRefillTelemetry.Count.COMMITTED), filled.count(VoxelRefillTelemetry.Count.COMMITTED));
+        assertEquals(0, filled.activeJobs());
+    }
+
     @Test void clearedReenteredSectionsAreHarvestedAgainWithoutDiagnosticBuffers() {
         recenter(0, (level, pos) -> data());
         assertTrue(VoxelWindow.hasValidData(0, 4, 0));

@@ -1178,6 +1178,7 @@ public final class GraphRunner {
         if (runnersBuilt && registry != null && VoxelSourceSummary.isEnabled()) {
             VoxelWindow.synchronizeSourceGeneration(registry, MaterialSourceIndex.current().generation());
         }
+        if (runnersBuilt && registry != null) VoxelWindow.prepareEmitterPool(registry);
         // AFTER ensureRunnersBuilt, which is what lazily creates optionsBuffer, and BEFORE any pass
         // binds u_PackOptions this frame. This is the only safe point to rotate the ring.
         flushPendingRuntimeValues();

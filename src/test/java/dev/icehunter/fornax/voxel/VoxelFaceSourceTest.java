@@ -83,6 +83,24 @@ class VoxelFaceSourceTest {
         }
     }
 
+    @Test
+    void ghostAtlasFacesRemainUnknownEvenWithValidUvMappingAndPositiveSourceEvidence() {
+        try (SpriteContents contents = contents()) {
+            var ghost = dev.icehunter.fornax.atlas.BlockAtlasGhostSprite.spilled(
+                    TextureAtlas.LOCATION_BLOCKS, contents, 256, 1, 0, 0, 0);
+            var parts = List.of(part(List.of(north(ghost, false))));
+            var faces = VoxelFaceTexture.packSources(parts, VoxelShapeKind.FULL, -1, index(ghost, 0));
+            assertTrue((faces.textureWords()[14] >>> 24 & 1) != 0);
+            assertTrue(faces.summaries().get(2).unknown(), "base atlas ghost texels are not the true source page");
+            assertTrue(faces.summaries().get(2).authoredCandidate());
+            assertArrayEquals(VoxelFaceTexture.pack(parts, -1), faces.textureWords());
+            var builder = new VoxelSourceEvidence.Builder();
+            builder.add(true, 15, faces.summaries());
+            builder.addCell(true, 0);
+            assertEquals(0, builder.finish(false).eligibleFaces());
+        }
+    }
+
     private static MaterialSourceIndex index(TextureAtlasSprite sprite, int flags) {
         return new MaterialSourceIndex(Map.of(sprite,
                 new MaterialSourceIndex.Summary(flags, 1, 0, 1, 0, 0x01112233)));

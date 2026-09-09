@@ -1,6 +1,7 @@
 package dev.icehunter.fornax.voxel;
 
 import dev.icehunter.fornax.pack.graph.TargetRegistry;
+import dev.icehunter.fornax.pack.graph.EngineBufferUploadQueue;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.Level;
@@ -77,6 +78,7 @@ public final class VoxelWindow {
                                       SectionHarvester.@Nullable Result previousData) { }
     private static final VoxelSectionState sectionStates = new VoxelSectionState();
     private static final VoxelSourceInventory sourceInventory = new VoxelSourceInventory();
+    private static @Nullable VoxelEmitterPool emitterPool;
     private static long sourceAtlasGeneration = -1; // No synchronized atlas generation yet.
 
     private static void invalidateStorage() {
@@ -91,6 +93,11 @@ public final class VoxelWindow {
         slotLightOwner.clear();
         slotData.clear();
         populatedSlots.clear();
+        if (emitterPool != null) {
+            emitterPool.reset(Math.toIntExact(storageGeneration), 0);
+            EngineBufferUploadQueue.discard(VoxelEmitterPool.TARGET);
+            publishEmitterPoolLocked(); // Retire a pending full pool even if its consumer skipped a frame.
+        }
     }
 
     /** Cancels queued world reads and cached results when CPU atlas/model ownership changes.
@@ -109,6 +116,7 @@ public final class VoxelWindow {
             BrickGridUpload.ensureAllocated(newRegistry, diameter);
             BrickGridUpload.invalidateSectionStates(newRegistry);
             registry = newRegistry;
+            configureEmitterPool(newRegistry);
         }
     }
 
@@ -125,6 +133,10 @@ public final class VoxelWindow {
             // Publish the synchronized CPU generation only after the reset transfer succeeds.
             // A failed reset leaves the sentinel so the next frame retries instead of accepting it.
             sourceAtlasGeneration = atlasGeneration;
+            if (emitterPool != null) {
+                emitterPool.reset(Math.toIntExact(storageGeneration), atlasGeneration);
+                publishEmitterPoolLocked();
+            }
             return true;
         }
     }
@@ -134,6 +146,34 @@ public final class VoxelWindow {
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
             return sourceInventory.stats();
         }
+    }
+
+    public static VoxelEmitterPool.Stats emitterPoolStats() {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            return emitterPool == null ? VoxelEmitterPool.EMPTY_STATS : emitterPool.stats();
+        }
+    }
+
+    /** Runs before the first consuming compute pass. Only allocated/enabled pools do scan work. */
+    public static void prepareEmitterPool(TargetRegistry currentRegistry) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            if (registry != currentRegistry || emitterPool == null
+                    || currentRegistry.getBuffer(VoxelEmitterPool.TARGET) == null) return;
+            emitterPool.advance(VoxelEmitterPool.CELL_SCAN_BUDGET);
+            publishEmitterPoolLocked();
+        }
+    }
+
+    private static void configureEmitterPool(@Nullable TargetRegistry currentRegistry) {
+        EngineBufferUploadQueue.discard(VoxelEmitterPool.TARGET);
+        emitterPool = currentRegistry != null && currentRegistry.isEnabledBufferTarget(VoxelEmitterPool.TARGET)
+                ? new VoxelEmitterPool() : null;
+        if (emitterPool != null) emitterPool.reset(Math.toIntExact(storageGeneration), Math.max(0, sourceAtlasGeneration));
+    }
+
+    private static void publishEmitterPoolLocked() {
+        if (emitterPool != null && registry != null && registry.getBuffer(VoxelEmitterPool.TARGET) != null)
+            VoxelEmitterPoolUpload.publish(emitterPool);
     }
 
     private static boolean sectionMetadataEnabled(TargetRegistry currentRegistry) {
@@ -158,7 +198,9 @@ public final class VoxelWindow {
             sectionStates.commit(item.slot(), item.sectionState());
             if (registry != null && registry.isEnabledBufferTarget(VoxelSourceSummary.TARGET))
                 sourceInventory.commit(item.slot(), item.result().sourceSummary(), item.result().sourceEvidence());
+            if (emitterPool != null) emitterPool.commit(item.slot(), item.result(), item.sectionState());
         }
+        VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.COMMITTED);
     }
 
     private static boolean needsLightClear(int slot, SectionPos owner) {
@@ -338,6 +380,7 @@ public final class VoxelWindow {
             if (registry != newRegistry) {
                 invalidateStorage();
                 registry = newRegistry;
+                configureEmitterPool(newRegistry);
             }
         }
     }
@@ -445,12 +488,13 @@ public final class VoxelWindow {
             queuedChunkLoads.add(request);
             pendingSlots.addAndGet(positions.size());
         }
+        long queuedAt = System.nanoTime();
         executor.execute(() -> {
             synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
                 queuedChunkLoads.remove(request);
             }
             harvestAndUploadBatch(level, positions, asyncHarvestedTotal::addAndGet,
-                    pendingSlots::decrementAndGet, request.storageGeneration(), request.harvestGeneration(), reader);
+                    pendingSlots::decrementAndGet, request.storageGeneration(), request.harvestGeneration(), reader, queuedAt);
         });
     }
 
@@ -648,7 +692,9 @@ public final class VoxelWindow {
                 if (!exposed.isEmpty()) {
                     sectionStates.invalidate(exposed);
                     sourceInventory.invalidate(exposed);
+                    if (emitterPool != null) emitterPool.invalidate(exposed);
                     BrickGridUpload.clearOccupancySlots(r, exposed);
+                    publishEmitterPoolLocked();
                     // Telemetry: these slots hold no real geometry (shell-clear) until the harvest
                     // below (sync or async) republishes them: see populatedSlots'/clearedTotal's own doc.
                     populatedSlots.removeAll(exposed);
@@ -663,7 +709,7 @@ public final class VoxelWindow {
         shell.sort(priorityComparator(newCenterX, newCenterY, newCenterZ, forwardX, forwardY, forwardZ));
         int syncCount = Math.min(SYNC_BUDGET, shell.size());
         if (syncCount > 0) {
-            harvestAndUploadBatch(level, shell.subList(0, syncCount), syncHarvestedTotal::addAndGet, null, generation, harvestGeneration, reader);
+            harvestAndUploadBatch(level, shell.subList(0, syncCount), syncHarvestedTotal::addAndGet, null, generation, harvestGeneration, reader, System.nanoTime());
         }
         if (syncCount < shell.size()) {
             // Copy the deferred tail into its own list: `shell` is local to this call and safe to let
@@ -672,8 +718,9 @@ public final class VoxelWindow {
             // (not per position) -- queue depth stays bounded by call count, never by shell size.
             List<SectionPos> deferred = new ArrayList<>(shell.subList(syncCount, shell.size()));
             pendingSlots.addAndGet(deferred.size());
+            long queuedAt = System.nanoTime();
             executor.execute(() ->
-                    harvestAndUploadBatch(level, deferred, asyncHarvestedTotal::addAndGet, pendingSlots::decrementAndGet, generation, harvestGeneration, reader));
+                    harvestAndUploadBatch(level, deferred, asyncHarvestedTotal::addAndGet, pendingSlots::decrementAndGet, generation, harvestGeneration, reader, queuedAt));
         }
     }
 
@@ -780,79 +827,92 @@ public final class VoxelWindow {
     private static void harvestAndUploadBatch(Level level, List<SectionPos> positions,
                                                LongConsumer onHarvestedBatch, @Nullable Runnable onProcessed, long generation,
                                                long harvestGeneration,
-                                               BiFunction<Level, SectionPos, SectionHarvester.Result> reader) {
-        TargetRegistry r = registry;
-        List<BrickGridUpload.SlotUpload> batch = new ArrayList<>();
-        List<UnpublishedHarvest> unpublished = new ArrayList<>();
-        BatchSizeController controller = new BatchSizeController();
-        long batchHarvestCount = 0; // real harvests accumulated in the CURRENT unflushed batch
-        int processedCount = 0;
+                                               BiFunction<Level, SectionPos, SectionHarvester.Result> reader, long queuedAt) {
+        try (var profile = VoxelRefillTelemetry.LIVE.begin(queuedAt, System::nanoTime)) {
+            TargetRegistry r = registry;
+            List<BrickGridUpload.SlotUpload> batch = new ArrayList<>();
+            List<UnpublishedHarvest> unpublished = new ArrayList<>();
+            BatchSizeController controller = new BatchSizeController();
+            long batchHarvestCount = 0; // real harvests accumulated in the CURRENT unflushed batch
+            int processedCount = 0;
 
-        try {
-            for (SectionPos pos : positions) {
-                // A move can leave queued positions outside the window without changing storage.
-                // Reject them before world reads; the locked check below still covers movement during a read.
-                if (generation == storageGeneration && slotFor(pos.x(), pos.y(), pos.z()) >= 0
-                        && !hasValidData(pos.x(), pos.y(), pos.z())) {
-                    SectionHarvester.Result result = null;
-                    // Acquire before touching the captured world. Old queued jobs stay cancelled even
-                    // after a later model publication reopens harvesting for a newer generation.
-                    try (var lease = VoxelHarvestLifecycle.tryAcquire(harvestGeneration)) {
-                        if (lease != null && generation == storageGeneration) {
-                            result = reader.apply(level, pos);
+            try {
+                for (SectionPos pos : positions) {
+                    VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.VISITED);
+                    // A move can leave queued positions outside the window without changing storage.
+                    // Reject them before world reads; the locked check below still covers movement during a read.
+                    boolean current = generation == storageGeneration && slotFor(pos.x(), pos.y(), pos.z()) >= 0;
+                    boolean valid = current && hasValidData(pos.x(), pos.y(), pos.z());
+                    if (current && !valid) {
+                        SectionHarvester.Result result = null;
+                        // Acquire before touching the captured world. Old queued jobs stay cancelled even
+                        // after a later model publication reopens harvesting for a newer generation.
+                        try (var lease = VoxelHarvestLifecycle.tryAcquire(harvestGeneration)) {
+                            if (lease != null && generation == storageGeneration) {
+                                VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.READ);
+                                long readStart = VoxelRefillTelemetry.start();
+                                try { result = reader.apply(level, pos); }
+                                finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.READ, readStart); }
+                                VoxelRefillTelemetry.count(result == null ? VoxelRefillTelemetry.Count.NULL_READ
+                                        : VoxelRefillTelemetry.Count.READ_OK);
+                            } else VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.RETIRED);
                         }
-                    }
-                    // Every CPU lease is closed before the GPU queue lock or upload below.
-                    if (result != null) {
-                        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
-                            int slot = slotFor(pos.x(), pos.y(), pos.z());
-                            if (generation == storageGeneration && r == registry && slot >= 0 && hasCurrentSourceSummary(result)) {
-                                unpublished.add(new UnpublishedHarvest(slot, pos, result,
-                                        slotOwner.get(slot), slotData.get(slot)));
-                                boolean clearLight = recordHarvest(slot, pos, result);
-                                var snapshot = r != null && sectionMetadataEnabled(r)
-                                        ? sectionStates.geometry(slot, pos) : null;
-                                if (snapshot != null) clearLight |= sectionStates.needsLightClear(slot, snapshot);
-                                batch.add(new BrickGridUpload.SlotUpload(slot, result, clearLight, snapshot));
-                                batchHarvestCount++;
+                        // Every CPU lease is closed before the GPU queue lock or upload below.
+                        if (result != null) {
+                            long lockStart = VoxelRefillTelemetry.start();
+                            synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+                                VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.LOCK, lockStart);
+                                int slot = slotFor(pos.x(), pos.y(), pos.z());
+                                if (generation == storageGeneration && r == registry && slot >= 0 && hasCurrentSourceSummary(result)) {
+                                    unpublished.add(new UnpublishedHarvest(slot, pos, result,
+                                            slotOwner.get(slot), slotData.get(slot)));
+                                    boolean clearLight = recordHarvest(slot, pos, result);
+                                    var snapshot = r != null && sectionMetadataEnabled(r)
+                                            ? sectionStates.geometry(slot, pos) : null;
+                                    if (snapshot != null) clearLight |= sectionStates.needsLightClear(slot, snapshot);
+                                    batch.add(new BrickGridUpload.SlotUpload(slot, result, clearLight, snapshot));
+                                    batchHarvestCount++;
+                                } else VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.REJECTED);
                             }
                         }
+                    } else VoxelRefillTelemetry.count(valid ? VoxelRefillTelemetry.Count.ALREADY_VALID
+                            : VoxelRefillTelemetry.Count.OBSOLETE);
+                    if (onProcessed != null) {
+                        processedCount++;
+                        onProcessed.run();
+                    }
+                    if (batch.size() >= controller.currentTargetSize()) {
+                        if (r != null) {
+                            flushBatch(r, batch, controller, generation);
+                            unpublished.clear();
+                        } else {
+                            batch.clear();
+                        }
+                        if (batchHarvestCount > 0) {
+                            onHarvestedBatch.accept(batchHarvestCount);
+                            batchHarvestCount = 0;
+                        }
                     }
                 }
-                if (onProcessed != null) {
-                    processedCount++;
-                    onProcessed.run();
-                }
-                if (batch.size() >= controller.currentTargetSize()) {
+                if (!batch.isEmpty()) {
                     if (r != null) {
                         flushBatch(r, batch, controller, generation);
                         unpublished.clear();
                     } else {
                         batch.clear();
                     }
-                    if (batchHarvestCount > 0) {
-                        onHarvestedBatch.accept(batchHarvestCount);
-                        batchHarvestCount = 0;
-                    }
+                }
+                if (batchHarvestCount > 0) {
+                    onHarvestedBatch.accept(batchHarvestCount);
+                }
+            } finally {
+                rollbackUnpublished(r, generation, unpublished);
+                // Failed reads/transfers must drain the unread tail for every async caller.
+                if (onProcessed != null) {
+                    for (int remaining = processedCount; remaining < positions.size(); remaining++) onProcessed.run();
                 }
             }
-            if (!batch.isEmpty()) {
-                if (r != null) {
-                    flushBatch(r, batch, controller, generation);
-                    unpublished.clear();
-                } else {
-                    batch.clear();
-                }
-            }
-            if (batchHarvestCount > 0) {
-                onHarvestedBatch.accept(batchHarvestCount);
-            }
-        } finally {
-            rollbackUnpublished(r, generation, unpublished);
-            // Failed reads/transfers must drain the unread tail for every async caller.
-            if (onProcessed != null) {
-                for (int remaining = processedCount; remaining < positions.size(); remaining++) onProcessed.run();
-            }
+            profile.complete();
         }
     }
 
@@ -896,12 +956,16 @@ public final class VoxelWindow {
     private static void flushBatch(TargetRegistry registry, List<BrickGridUpload.SlotUpload> batch,
                                     BatchSizeController controller, long generation) {
         long start = System.nanoTime();
+        long lockStart = VoxelRefillTelemetry.start();
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.LOCK, lockStart);
             if (generation == storageGeneration && registry == VoxelWindow.registry) {
                 // Reads can overlap a recenter or newer mesh publication without replacing storage.
                 // Enforce CPU ownership here even when optional GPU metadata is disabled.
                 batch.removeIf(item -> !isCurrentUpload(item));
-                BrickGridUpload.uploadSlots(registry, batch);
+                long uploadStart = VoxelRefillTelemetry.start();
+                try { BrickGridUpload.uploadSlots(registry, batch); }
+                finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.UPLOAD, uploadStart); }
             }
         }
         long elapsedNanos = System.nanoTime() - start;

@@ -3,6 +3,7 @@ package dev.icehunter.fornax.pack.graph;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK13;
 import org.lwjgl.vulkan.VkCommandBuffer;
+import org.lwjgl.vulkan.VkBufferMemoryBarrier;
 import org.lwjgl.vulkan.VkMemoryBarrier;
 
 import java.nio.ByteBuffer;
@@ -70,6 +71,20 @@ public final class EngineBufferUploadQueue {
             if (update == null) continue;
             BufferInstance buffer = registry.getBuffer(target);
             if (buffer == null) continue;
+            boolean targetWrites = update.clearFirst();
+            for (Range range : update.ranges()) targetWrites |= range.bytes().hasRemaining();
+            if (targetWrites) {
+                // This target is CPU-written and compute-read. Order prior same-queue reads before
+                // overwriting it; the post-transfer barrier below makes the new snapshot visible.
+                VkBufferMemoryBarrier.Buffer priorReads = VkBufferMemoryBarrier.calloc(1, stack).sType$Default()
+                        .srcAccessMask(VK13.VK_ACCESS_SHADER_READ_BIT)
+                        .dstAccessMask(VK13.VK_ACCESS_TRANSFER_WRITE_BIT)
+                        .srcQueueFamilyIndex(VK13.VK_QUEUE_FAMILY_IGNORED)
+                        .dstQueueFamilyIndex(VK13.VK_QUEUE_FAMILY_IGNORED)
+                        .buffer(buffer.vkBuffer()).offset(0).size(buffer.sizeBytes());
+                VK13.vkCmdPipelineBarrier(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK13.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, null, priorReads, null);
+            }
             if (update.clearFirst()) {
                 VK13.vkCmdFillBuffer(cmd, buffer.vkBuffer(), 0, buffer.sizeBytes(), 0);
                 wrote = true;

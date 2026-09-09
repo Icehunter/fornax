@@ -89,6 +89,7 @@ public final class GraphValidator {
             dev.icehunter.fornax.voxel.VoxelLightmap.TARGET,
             dev.icehunter.fornax.voxel.VoxelSectionState.TARGET,
             dev.icehunter.fornax.voxel.VoxelSourceSummary.TARGET,
+            dev.icehunter.fornax.voxel.VoxelEmitterPool.TARGET,
             VoxelWaterReflBuffer.TARGET, AnalyticLightListBuffer.TARGET,
             PrecipClipmapBuffer.TARGET, PrecipCoarseClipmapBuffer.TARGET,
             SurfaceFluidClipmapBuffer.TARGET,
@@ -136,6 +137,20 @@ public final class GraphValidator {
         }
 
         for (PassSpec p : graph.passes()) {
+            if (p.outputs().contains(dev.icehunter.fornax.voxel.VoxelEmitterPool.TARGET))
+                throw new FornaxPackError(FILE, "pass." + p.name() + ".outputs", "voxelEmitterPool is CPU-owned and read-only");
+            if (p.inputs().contains(dev.icehunter.fornax.voxel.VoxelEmitterPool.TARGET)) {
+                for (String dependency : List.of(dev.icehunter.fornax.voxel.VoxelEmitterPool.TARGET,
+                        dev.icehunter.fornax.voxel.VoxelSectionState.TARGET,
+                        dev.icehunter.fornax.voxel.VoxelSourceSummary.TARGET)) {
+                    TargetSpec target = graph.targets().get(dependency);
+                    if (p.type() != PassType.COMPUTE || !p.inputs().contains(dependency)
+                            || target == null || target.kind() != TargetKind.BUFFER)
+                        throw new FornaxPackError(FILE, "pass." + p.name() + ".inputs",
+                                "voxelEmitterPool requires a compute reader with voxelEmitterPool, "
+                                        + "voxelSectionState and voxelSourceSummary buffer inputs");
+                }
+            }
             checkEnabledIf(p.enabledIf(), options, "pass." + p.name() + ".enabled_if");
             // shaders/vanilla/* files are vanilla core-shader overrides (VanillaShaderOverrides),
             // never a pass shader -- they're excluded from the fullscreen-pass preamble splices

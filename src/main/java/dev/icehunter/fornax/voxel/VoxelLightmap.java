@@ -30,10 +30,15 @@ public final class VoxelLightmap {
     /** Values are copied here, never read again during the GPU upload. */
     public static byte[] capture(@Nullable BlockAndLightGetter source, int originX, int originY, int originZ) {
         if (source == null) return new byte[BYTES_PER_SLOT];
-        BlockPos.MutableBlockPos position = new BlockPos.MutableBlockPos();
-        return sample((x,y,z) -> {
-            position.set(x,y,z);
-            return pack(source.getBrightness(LightLayer.BLOCK, position), source.getBrightness(LightLayer.SKY, position));
-        }, originX, originY, originZ);
+        long start = VoxelRefillTelemetry.start();
+        try {
+            BlockPos.MutableBlockPos position = new BlockPos.MutableBlockPos();
+            byte[] lightmap = sample((x,y,z) -> {
+                position.set(x,y,z);
+                return pack(source.getBrightness(LightLayer.BLOCK, position), source.getBrightness(LightLayer.SKY, position));
+            }, originX, originY, originZ);
+            VoxelRefillTelemetry.add(VoxelRefillTelemetry.Count.LIGHT_CELLS, lightmap.length);
+            return lightmap;
+        } finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.LIGHT, start); }
     }
 }

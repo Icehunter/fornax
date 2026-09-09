@@ -311,6 +311,7 @@ public final class VoxelDebugRaymarchPass {
         profiler.recordValue("voxel_async", asyncTotal - prevAsyncHarvestedTotal);
         profiler.recordValue("voxel_cleared", clearedTotal - prevClearedTotal);
         profiler.recordValue("voxel_pop", VoxelWindow.populationFraction() * 100.0);
+        dev.icehunter.fornax.voxel.VoxelRefillTelemetry.LIVE.publish(profiler::recordValue);
         if (VoxelSourceSummary.isEnabled()) {
             var sources = VoxelWindow.sourceInventoryStats();
             profiler.recordValue("source_slots", sources.committedSlots());
@@ -320,6 +321,11 @@ public final class VoxelDebugRaymarchPass {
             profiler.recordValue("source_unknown_cells", sources.unknownCells());
             profiler.recordValue("source_eligible_faces", sources.eligibleFaces());
             profiler.recordValue("source_unsupported_faces", sources.unsupportedFaces());
+            var pool = VoxelWindow.emitterPoolStats();
+            profiler.recordValue("source_pool_stored", pool.stored());
+            profiler.recordValue("source_pool_deferred", pool.deferred());
+            profiler.recordValue("source_pool_rebuilding", pool.rebuilding() ? 1 : 0);
+            profiler.recordValue("source_pool_publications", pool.publications());
             profiler.recordValue("source_overflow_slots", sources.overflowSlots());
             profiler.recordValue("source_uploads", sources.committedUploads());
             profiler.recordValue("source_stale_uploads", sources.staleUploads());

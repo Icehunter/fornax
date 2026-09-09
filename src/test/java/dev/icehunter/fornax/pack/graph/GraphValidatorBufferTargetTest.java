@@ -107,6 +107,7 @@ class GraphValidatorBufferTargetTest {
                         dev.icehunter.fornax.voxel.VoxelFaceTexture.TARGET,
                         dev.icehunter.fornax.voxel.VoxelLightmap.TARGET,
                         "voxelSectionState", "voxelSourceSummary",
+                        dev.icehunter.fornax.voxel.VoxelEmitterPool.TARGET,
                         VoxelWaterReflBuffer.TARGET, AnalyticLightListBuffer.TARGET,
                         PrecipClipmapBuffer.TARGET, PrecipCoarseClipmapBuffer.TARGET,
                         SurfaceFluidClipmapBuffer.TARGET,

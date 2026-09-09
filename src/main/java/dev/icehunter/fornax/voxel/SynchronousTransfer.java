@@ -18,16 +18,24 @@ final class SynchronousTransfer implements AutoCloseable {
     void execute(Runnable record) {
         if (closed) throw new IllegalStateException("Upload resources are closed");
         complete();
-        backend.reset();
-        record.run();
-        backend.submit();
+        long start = VoxelRefillTelemetry.start();
+        try { backend.reset(); }
+        finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.RESET, start); }
+        start = VoxelRefillTelemetry.start();
+        try { record.run(); }
+        finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.RECORD, start); }
+        start = VoxelRefillTelemetry.start();
+        try { backend.submit(); }
+        finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.SUBMIT, start); }
         pending = true;
         complete();
     }
 
     private void complete() {
         if (pending) {
-            backend.await();
+            long start = VoxelRefillTelemetry.start();
+            try { backend.await(); }
+            finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.WAIT, start); }
             pending = false;
         }
     }

@@ -75,6 +75,7 @@ public final class DirectSectionReader {
         }
         int sectionIndex = chunk.getSectionIndexFromSectionY(position.y());
         if (sectionIndex < 0 || sectionIndex >= chunk.getSections().length) {
+            VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.OUTSIDE_HEIGHT);
             // Structurally out of the world's real height range -- never becomes available, so treat
             // it as a definite, permanent EMPTY harvest rather than leaving the slot stale forever
             // (see EMPTY_RESULT's doc comment).

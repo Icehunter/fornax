@@ -63,7 +63,12 @@ public final class VoxelFaceTexture {
             MaterialSourceIndex.Summary summary = null;
             int combinedFlags = 0;
             for (var quad : candidates) {
-                var candidate = index.lookup(quad.materialInfo().sprite());
+                var sprite = quad.materialInfo().sprite();
+                var candidate = index.lookup(sprite);
+                // Page-zero ghost strips are reduced previews; this source diagnostic binds the base
+                // atlases and cannot certify the full-resolution source without overflow-page bindings.
+                if (sprite instanceof dev.icehunter.fornax.atlas.BlockAtlasGhostSprite)
+                    candidate = candidate.withFlags(MaterialSourceIndex.UNSUPPORTED_ATLAS_PAGE);
                 combinedFlags |= candidate.flags();
                 // Unsupported stacked faces retain one positive source's raw evidence, not a
                 // fabricated average or a source-texel count represented as visible coverage.

@@ -26,6 +26,7 @@ public final class MaterialSourceIndex {
     public static final int UNSUPPORTED_GEOMETRY = 1 << 4;
     public static final int CROPPED_UV = 1 << 5;
     public static final int NO_ATLAS = 1 << 6;
+    public static final int UNSUPPORTED_ATLAS_PAGE = 1 << 7;
     private static final AtomicLong NEXT_GENERATION = new AtomicLong();
     public static final MaterialSourceIndex EMPTY = new MaterialSourceIndex(0, Map.of());
 

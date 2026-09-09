@@ -406,6 +406,9 @@ public final class BrickGridUpload {
         if (tier == 0 && registry.isEnabledBufferTarget(VoxelSourceSummary.TARGET)) {
             registry.ensureBufferSize(VoxelSourceSummary.TARGET, VoxelSourceInventory.bufferBytes(diameter));
         }
+        if (tier == 0 && registry.isEnabledBufferTarget(VoxelEmitterPool.TARGET)) {
+            registry.ensureBufferSize(VoxelEmitterPool.TARGET, VoxelEmitterPool.BYTE_SIZE);
+        }
         // Emitter light volume -- windowed/toroidal identically to the four buffers above (same
         // slotCount, same slot indexing). Routed through ensureBufferSize so it inherits the
         // mandatory vkCmdFillBuffer zero-clear at (re)allocation (TargetRegistry.clearBuffer --
@@ -958,6 +961,7 @@ public final class BrickGridUpload {
                                           ByteBuffer paletteScratch, ByteBuffer summaryScratch,
                                           ByteBuffer lightZeroScratch, ByteBuffer faceTextureScratch, ByteBuffer lightmapScratch,
                                           ByteBuffer sectionStateScratch, ByteBuffer sourceSummaryScratch) {
+        VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.BATCHES);
         List<SlotUpload> committed = new ArrayList<>();
         resources.execute(cmd -> {
             try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -1087,13 +1091,19 @@ public final class BrickGridUpload {
                         VK13.vkCmdUpdateBuffer(cmd, lightVolumeBuffer, lightOffset, lightZeroScratch);
                     }
                     committed.add(item);
+                    VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.PACKED);
                 }
 
                 recordUploadToComputeReadBarrier(cmd, stack);
             }
         });
         // execute returns only after the existing batch fence completes successfully.
-        for (SlotUpload item : committed) VoxelWindow.onSectionUploadCommitted(item);
+        long commitStart = VoxelRefillTelemetry.start();
+        try {
+            for (SlotUpload item : committed) {
+                VoxelWindow.onSectionUploadCommitted(item);
+            }
+        } finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.COMMIT, commitStart); }
     }
 
     /** Zero-fills one slot's three light ranges. Called when a toroidal slot is CLAIMED by a
