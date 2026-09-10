@@ -20,6 +20,8 @@ public final class VoxelHarvestLifecycle {
     public static void onBlockAtlasRetired() {
         GATE.retireAndDrain();
         VoxelFaceOpacity.clear();
+        FaceColorResolver.clearCache();
+        FoliageDensityResolver.clearCache();
         // No read/write lease remains held when storage takes the GPU queue lock.
         VoxelWindow.invalidateModelData();
     }

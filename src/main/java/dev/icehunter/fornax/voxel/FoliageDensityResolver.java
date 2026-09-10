@@ -13,6 +13,7 @@ import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Measures a block's EXTINCTION COEFFICIENT (sigma, per block of path length) from its real baked
@@ -74,11 +75,25 @@ public final class FoliageDensityResolver {
      * survive the alpha cutout, and its block-space bounds (3 elements each). */
     public record QuadSample(float area, float opaqueFraction, float[] min, float[] max) {}
 
+    /** Per-state cache: {@code resolveExtinction} takes no other input, so unlike {@link
+     * FaceColorResolver}, which changes with harvest-position tint, the whole result can be cached
+     * as is. Cleared along with {@code FaceColorResolver}'s cache when the block atlas retires, by
+     * {@link VoxelHarvestLifecycle#onBlockAtlasRetired}. */
+    private static final ConcurrentHashMap<BlockState, Float> EXTINCTION_CACHE = new ConcurrentHashMap<>();
+
     private FoliageDensityResolver() {}
+
+    static void clearCache() {
+        EXTINCTION_CACHE.clear();
+    }
 
     /** Extinction coefficient per block of path length for {@code state}'s baked model, or 0 if it
      * bakes no quads (the caller then leaves the block a plain occluder). */
     public static float resolveExtinction(BlockState state) {
+        return EXTINCTION_CACHE.computeIfAbsent(state, FoliageDensityResolver::computeExtinction);
+    }
+
+    private static float computeExtinction(BlockState state) {
         BlockStateModel model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
         List<BlockStateModelPart> parts = new ArrayList<>();
         model.collectParts(RandomSource.create(HARVEST_SEED), parts);

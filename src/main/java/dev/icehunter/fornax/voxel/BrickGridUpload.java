@@ -1198,156 +1198,110 @@ public final class BrickGridUpload {
         if (slots.isEmpty()) {
             return;
         }
-        ByteBuffer zeros = MemoryUtil.memCalloc((int) OCCUPANCY_BYTES_PER_SLOT);
-        ByteBuffer faceSealZeros = MemoryUtil.memCalloc((int) FACE_SEAL_BYTES_PER_SLOT);
-        // NOT memCalloc: this word must hold SUMMARY_PENDING (a nonzero sentinel), not all-zero bytes --
-        // see this method's own "SUMMARY_PENDING, not plain 0" doc paragraph above.
-        ByteBuffer summaryPending = MemoryUtil.memAlloc((int) BRICK_SUMMARY_BYTES_PER_SLOT);
-        summaryPending.putInt(0, SUMMARY_PENDING);
-        try {
-            synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
-                BufferInstance occupancy = registry.getBuffer(OCCUPANCY_TARGET);
-                if (occupancy == null) {
-                    return; // not allocated yet (or torn down) -- caller must ensureAllocated() first
-                }
-                // Summary is allocated in lockstep with occupancy by ensureAllocated -- if occupancy
-                // exists, summary does too, in every real code path. A null here means a genuinely
-                // torn-down/mid-teardown registry state; the summary write is then simply skipped
-                // (matching clearLightSlot's own no-op-when-unallocated precedent) rather than blocking
-                // the correctness-critical occupancy clear on it.
-                BufferInstance summary = registry.getBuffer(BRICK_SUMMARY_TARGET);
-                BufferInstance faceSeal = registry.getBuffer(FACE_SEAL_TARGET);
-                BufferInstance sectionState = registry.getBuffer(VoxelSectionState.TARGET);
-                BufferInstance sourceSummary = registry.getBuffer(VoxelSourceSummary.TARGET);
-                VulkanComputeBackend backend = VulkanComputeBackend.tryCreate();
-                if (backend == null) {
-                    return;
-                }
-                try {
-                    clearOccupancySlotsLocked(backend, occupancy.vkBuffer(), occupancy.sizeBytes(),
-                            faceSeal != null ? faceSeal.vkBuffer() : -1L,
-                            faceSeal != null ? faceSeal.sizeBytes() : 0L,
-                            summary != null ? summary.vkBuffer() : -1L, summary != null ? summary.sizeBytes() : 0L,
-                            sectionState != null ? sectionState.vkBuffer() : -1L,
-                            sectionState != null ? sectionState.sizeBytes() : 0L,
-                            sourceSummary != null ? sourceSummary.vkBuffer() : -1L,
-                            sourceSummary != null ? sourceSummary.sizeBytes() : 0L,
-                            zeros, faceSealZeros, summaryPending, slots);
-                } finally {
-                    backend.close();
-                }
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            BufferInstance occupancy = registry.getBuffer(OCCUPANCY_TARGET);
+            if (occupancy == null) {
+                return; // not set up yet, or being torn down. Caller must call ensureAllocated() first
             }
-        } finally {
-            MemoryUtil.memFree(zeros);
-            MemoryUtil.memFree(faceSealZeros);
-            MemoryUtil.memFree(summaryPending);
+            // ensureAllocated sets up summary at the same time as occupancy, so if occupancy exists,
+            // summary does too, in every real case. A null here only happens mid teardown. The summary
+            // write is then skipped, the same way clearLightSlot skips it, instead of holding up the
+            // occupancy clear, which must always happen.
+            BufferInstance summary = registry.getBuffer(BRICK_SUMMARY_TARGET);
+            BufferInstance faceSeal = registry.getBuffer(FACE_SEAL_TARGET);
+            BufferInstance sectionState = registry.getBuffer(VoxelSectionState.TARGET);
+            BufferInstance sourceSummary = registry.getBuffer(VoxelSourceSummary.TARGET);
+            VoxelClearResources resources = registry.voxelClearResources();
+            if (resources == null) {
+                return;
+            }
+            clearOccupancySlotsLocked(resources, occupancy.vkBuffer(), occupancy.sizeBytes(),
+                    faceSeal != null ? faceSeal.vkBuffer() : -1L,
+                    faceSeal != null ? faceSeal.sizeBytes() : 0L,
+                    summary != null ? summary.vkBuffer() : -1L, summary != null ? summary.sizeBytes() : 0L,
+                    sectionState != null ? sectionState.vkBuffer() : -1L,
+                    sectionState != null ? sectionState.sizeBytes() : 0L,
+                    sourceSummary != null ? sourceSummary.vkBuffer() : -1L,
+                    sourceSummary != null ? sourceSummary.sizeBytes() : 0L,
+                    slots);
         }
     }
 
-    /** One {@code vkCmdUpdateBuffer} per slot per buffer (occupancy, plus summary when allocated), all
-     * in a single command buffer/submit/fence -- see {@link #clearOccupancySlots}. {@code zeros}/
-     * {@code summaryPending} are single reused scratch buffers (each call only reads its
-     * address+remaining(), never mutates the buffer's position), so no per-slot allocation is needed;
-     * {@code summaryPending} holds the {@link #SUMMARY_PENDING} sentinel, not zero -- see {@link
-     * #clearOccupancySlots}'s own "SUMMARY_PENDING, not plain 0" doc paragraph. {@code summaryBuffer}
-     * of {@code -1L} means the summary buffer isn't allocated; its per-slot write is then skipped,
-     * matching {@link #uploadBatchLocked}'s own light-volume {@code -1L} convention. Caller holds
-     * {@code SHARED_QUEUE_LOCK}.
+    /** Writes one {@code vkCmdUpdateBuffer} per slot per buffer (occupancy, plus summary when set
+     * up), all in one command buffer and one submit. See {@link #clearOccupancySlots}. {@code
+     * resources} owns the reused scratch buffers, each call only reads them and never changes them,
+     * and it waits for this submission to finish only the next time it is used. See {@link
+     * VoxelClearResources}. {@code summaryBuffer} of {@code -1L} means the summary buffer is not set
+     * up, so its per-slot write is skipped, the same rule {@link #uploadBatchLocked} uses for the
+     * light volume. Caller holds {@code SHARED_QUEUE_LOCK}.
      *
-     * <p>Per-slot bounds guard: {@code slots} is the exposed
-     * shell {@link VoxelWindow#recenterAndResync} computed against the window state it JUST published,
-     * so in practice this call site's race window is far narrower than {@link #uploadSlot}'s/{@link
-     * #uploadBatchLocked}'s (no background-thread delay between computing a slot and writing it here).
-     * The guard is still applied -- see {@link #fitsInBuffer}'s own doc -- for the same reason every
-     * other write path in this class carries it: this is the only check that is not itself racy, and
-     * a synchronous caller today is not a guarantee against a future caller shape that isn't. */
-    private static void clearOccupancySlotsLocked(VulkanComputeBackend backend, long occupancyBuffer,
+     * <p>Bounds guard per slot: {@code slots} comes from the shell that {@link
+     * VoxelWindow#recenterAndResync} just built from the window state it just published, so this
+     * call is far less likely to race than {@link #uploadSlot} or {@link #uploadBatchLocked}, since
+     * there is no delay from a background thread between working out a slot and writing it here.
+     * The guard still runs anyway, see {@link #fitsInBuffer}, for the same reason every other write
+     * path in this class carries it: it is the only check here that cannot itself race, and a caller
+     * that runs in order today is not a promise every future caller will. */
+    private static void clearOccupancySlotsLocked(VoxelClearResources resources, long occupancyBuffer,
                                                    long occupancyBufferSize,
                                                    long faceSealBuffer, long faceSealBufferSize,
                                                    long summaryBuffer, long summaryBufferSize,
                                                    long sectionStateBuffer, long sectionStateBufferSize,
                                                    long sourceSummaryBuffer, long sourceSummaryBufferSize,
-                                                   ByteBuffer zeros, ByteBuffer faceSealZeros,
-                                                   ByteBuffer summaryPending,
                                                    Collection<Integer> slots) {
-        VulkanDevice device = backend.device();
-        VkCommandBuffer cmd = backend.commandPool().allocateBuffer();
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack).sType$Default();
-            VK13.vkBeginCommandBuffer(cmd, beginInfo);
-            if (sectionStateBuffer != -1L || sourceSummaryBuffer != -1L)
-                recordComputeReadToUploadBarrier(cmd, stack);
-            for (int slot : slots) {
-                long occupancyOffset = (long) slot * OCCUPANCY_BYTES_PER_SLOT;
-                if (!fitsInBuffer(occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize)) {
-                    logOobDrop(OCCUPANCY_TARGET, slot, occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize);
-                    continue;
-                }
-                if (sectionStateBuffer != -1L) {
-                    long sectionStateOffset = (long) slot * VoxelSectionState.BYTES_PER_SLOT;
-                    if (fitsInBuffer(sectionStateOffset, VoxelSectionState.BYTES_PER_SLOT, sectionStateBufferSize)) {
-                        VK13.vkCmdFillBuffer(cmd, sectionStateBuffer, sectionStateOffset,
-                                VoxelSectionState.BYTES_PER_SLOT, VoxelSectionState.PENDING);
-                    } else {
-                        logOobDrop(VoxelSectionState.TARGET, slot, sectionStateOffset, VoxelSectionState.BYTES_PER_SLOT, sectionStateBufferSize);
+        ByteBuffer zeros = resources.occupancyZeros;
+        ByteBuffer faceSealZeros = resources.faceSealZeros;
+        ByteBuffer summaryPending = resources.summaryPending;
+        resources.execute(cmd -> {
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                if (sectionStateBuffer != -1L || sourceSummaryBuffer != -1L)
+                    recordComputeReadToUploadBarrier(cmd, stack);
+                for (int slot : slots) {
+                    long occupancyOffset = (long) slot * OCCUPANCY_BYTES_PER_SLOT;
+                    if (!fitsInBuffer(occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize)) {
+                        logOobDrop(OCCUPANCY_TARGET, slot, occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancyBufferSize);
+                        continue;
+                    }
+                    if (sectionStateBuffer != -1L) {
+                        long sectionStateOffset = (long) slot * VoxelSectionState.BYTES_PER_SLOT;
+                        if (fitsInBuffer(sectionStateOffset, VoxelSectionState.BYTES_PER_SLOT, sectionStateBufferSize)) {
+                            VK13.vkCmdFillBuffer(cmd, sectionStateBuffer, sectionStateOffset,
+                                    VoxelSectionState.BYTES_PER_SLOT, VoxelSectionState.PENDING);
+                        } else {
+                            logOobDrop(VoxelSectionState.TARGET, slot, sectionStateOffset, VoxelSectionState.BYTES_PER_SLOT, sectionStateBufferSize);
+                        }
+                    }
+                    if (sourceSummaryBuffer != -1L) {
+                        long sourceSummaryOffset = VoxelSourceInventory.slotByteOffset(slot);
+                        if (fitsInBuffer(sourceSummaryOffset, VoxelSourceSummary.BYTES_PER_SLOT, sourceSummaryBufferSize)) {
+                            VK13.vkCmdFillBuffer(cmd, sourceSummaryBuffer, sourceSummaryOffset,
+                                    VoxelSourceSummary.BYTES_PER_SLOT, 0);
+                        } else {
+                            logOobDrop(VoxelSourceSummary.TARGET, slot, sourceSummaryOffset, VoxelSourceSummary.BYTES_PER_SLOT, sourceSummaryBufferSize);
+                        }
+                    }
+                    VK13.vkCmdUpdateBuffer(cmd, occupancyBuffer, occupancyOffset, zeros);
+                    if (faceSealBuffer != -1L) {
+                        long faceSealOffset = (long) slot * FACE_SEAL_BYTES_PER_SLOT;
+                        if (fitsInBuffer(faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize)) {
+                            VK13.vkCmdUpdateBuffer(cmd, faceSealBuffer, faceSealOffset, faceSealZeros);
+                        } else {
+                            logOobDrop(FACE_SEAL_TARGET, slot, faceSealOffset,
+                                    FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize);
+                        }
+                    }
+                    if (summaryBuffer != -1L) {
+                        long summaryOffset = (long) slot * BRICK_SUMMARY_BYTES_PER_SLOT;
+                        if (fitsInBuffer(summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize)) {
+                            VK13.vkCmdUpdateBuffer(cmd, summaryBuffer, summaryOffset, summaryPending);
+                        } else {
+                            logOobDrop(BRICK_SUMMARY_TARGET, slot, summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize);
+                        }
                     }
                 }
-                if (sourceSummaryBuffer != -1L) {
-                    long sourceSummaryOffset = VoxelSourceInventory.slotByteOffset(slot);
-                    if (fitsInBuffer(sourceSummaryOffset, VoxelSourceSummary.BYTES_PER_SLOT, sourceSummaryBufferSize)) {
-                        VK13.vkCmdFillBuffer(cmd, sourceSummaryBuffer, sourceSummaryOffset,
-                                VoxelSourceSummary.BYTES_PER_SLOT, 0);
-                    } else {
-                        logOobDrop(VoxelSourceSummary.TARGET, slot, sourceSummaryOffset, VoxelSourceSummary.BYTES_PER_SLOT, sourceSummaryBufferSize);
-                    }
-                }
-                VK13.vkCmdUpdateBuffer(cmd, occupancyBuffer, occupancyOffset, zeros);
-                if (faceSealBuffer != -1L) {
-                    long faceSealOffset = (long) slot * FACE_SEAL_BYTES_PER_SLOT;
-                    if (fitsInBuffer(faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize)) {
-                        VK13.vkCmdUpdateBuffer(cmd, faceSealBuffer, faceSealOffset, faceSealZeros);
-                    } else {
-                        logOobDrop(FACE_SEAL_TARGET, slot, faceSealOffset,
-                                FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize);
-                    }
-                }
-                if (summaryBuffer != -1L) {
-                    long summaryOffset = (long) slot * BRICK_SUMMARY_BYTES_PER_SLOT;
-                    if (fitsInBuffer(summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize)) {
-                        VK13.vkCmdUpdateBuffer(cmd, summaryBuffer, summaryOffset, summaryPending);
-                    } else {
-                        logOobDrop(BRICK_SUMMARY_TARGET, slot, summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summaryBufferSize);
-                    }
-                }
+                recordUploadToComputeReadBarrier(cmd, stack);
             }
-            recordUploadToComputeReadBarrier(cmd, stack);
-            VK13.vkEndCommandBuffer(cmd);
-
-            VkFenceCreateInfo fenceInfo = VkFenceCreateInfo.calloc(stack).sType$Default();
-            LongBuffer fenceOut = stack.mallocLong(1);
-            if (VK13.vkCreateFence(device.vkDevice(), fenceInfo, null, fenceOut) != VK13.VK_SUCCESS) {
-                FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkCreateFence failed for occupancy-slot clear");
-                return;
-            }
-            long fence = fenceOut.get(0);
-            try {
-                VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack).sType$Default()
-                        .pCommandBuffers(stack.pointers(cmd));
-                int submitResult = VK13.vkQueueSubmit(backend.computeQueue().vkQueue(), submitInfo, fence);
-                if (submitResult != VK13.VK_SUCCESS) {
-                    // Must not wait on a fence nothing was ever submitted against -- that would block this
-                    // (SHARED_QUEUE_LOCK-held) thread on FENCE_WAIT_TIMEOUT forever.
-                    FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkQueueSubmit failed with VkResult {} for occupancy-slot clear", submitResult);
-                    return;
-                }
-                int waitResult = VK13.vkWaitForFences(device.vkDevice(), fence, true, FENCE_WAIT_TIMEOUT);
-                if (waitResult != VK13.VK_SUCCESS) {
-                    FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkWaitForFences returned VkResult {} for occupancy-slot clear", waitResult);
-                }
-            } finally {
-                VK13.vkDestroyFence(device.vkDevice(), fence, null);
-            }
-        }
+        });
     }
 
     /** Uploads the occupancy, payload, palette, and summary byte ranges into their destination

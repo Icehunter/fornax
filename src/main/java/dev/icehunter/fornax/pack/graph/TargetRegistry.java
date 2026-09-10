@@ -10,6 +10,7 @@ import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.pack.GraphSpec;
 import dev.icehunter.fornax.pack.TargetSpec;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
+import dev.icehunter.fornax.voxel.VoxelClearResources;
 import dev.icehunter.fornax.voxel.VoxelUploadResources;
 import org.jspecify.annotations.Nullable;
 import org.joml.Vector4f;
@@ -55,6 +56,7 @@ public final class TargetRegistry implements AutoCloseable {
     private final StorageTextureInitialization storageTextureInitialization = new StorageTextureInitialization();
 
     private @Nullable VoxelUploadResources voxelUploadResources;
+    private @Nullable VoxelClearResources voxelClearResources;
     private boolean voxelUploadsClosed;
 
     /** Keeps only the upload scratch space and submission objects. Never keeps destination buffer handles. */
@@ -67,6 +69,15 @@ public final class TargetRegistry implements AutoCloseable {
         }
         if (voxelUploadResources == null) voxelUploadResources = VoxelUploadResources.tryCreate();
         return voxelUploadResources;
+    }
+
+    /** Long-lived GPU objects used by {@link BrickGridUpload#clearOccupancySlots}. Kept apart from
+     * {@link #voxelUploadResources()}; see {@link VoxelClearResources} for why. */
+    public @Nullable VoxelClearResources voxelClearResources() {
+        VoxelUploadResources.requireLock();
+        if (voxelUploadsClosed) return null;
+        if (voxelClearResources == null) voxelClearResources = VoxelClearResources.tryCreate();
+        return voxelClearResources;
     }
 
     /** Allocation-only batch completion; call before frame bindings or raw compute are recorded. */
@@ -552,6 +563,10 @@ public final class TargetRegistry implements AutoCloseable {
             if (voxelUploadResources != null) {
                 voxelUploadResources.close();
                 voxelUploadResources = null;
+            }
+            if (voxelClearResources != null) {
+                voxelClearResources.close();
+                voxelClearResources = null;
             }
         }
         VulkanComputeBackend.waitForGpuIdleBeforeDestroy();
