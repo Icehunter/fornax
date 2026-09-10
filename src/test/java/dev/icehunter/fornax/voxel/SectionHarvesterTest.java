@@ -29,6 +29,28 @@ class SectionHarvesterTest {
         Bootstrap.bootStrap();
     }
 
+    /**
+     * The harvest path must not call the live Fabric Rendering API quad-emission hook.
+     * {@code VoxelModelShape.Resolver}'s no-argument constructor goes through
+     * {@code Minecraft.getInstance().getModelManager()}, the same block model entry point a
+     * connected-texture mod hooks, and its {@code resolveGeometry} calls {@code emitQuads} with a
+     * live world and position from the background harvest thread, where it can land at the same
+     * moment as Sodium's own meshing and break the mod's render (see
+     * {@code docs/ARCHITECTURE.md} section 12). {@code VoxelModelShapeTest} still covers the
+     * geometry rebuild itself with fake renderer, model and sprite fixtures; this test pins only
+     * that the harvest path in this file does not wire the live constructor back in.
+     */
+    @Test
+    void harvestNeverConstructsTheLiveModelShapeResolver() throws java.io.IOException {
+        String source = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src/main/java/dev/icehunter/fornax/voxel/SectionHarvester.java"));
+        assertFalse(source.contains("new VoxelModelShape.Resolver()"),
+                "SectionHarvester must not build a live VoxelModelShape.Resolver(): its "
+                        + "no-argument constructor goes through the live model manager, the same "
+                        + "entry point a connected-texture mod hooks, from a background thread "
+                        + "that can land on top of Sodium's own meshing");
+    }
+
     @Test
     void effectiveEmissionCombinesCategoryStrengthWithVanillaLevel() {
         // Tagged block: category strength scaled by the vanilla level (torch: 1.0 x 14/15).

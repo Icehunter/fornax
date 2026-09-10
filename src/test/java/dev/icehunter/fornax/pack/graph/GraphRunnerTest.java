@@ -132,6 +132,38 @@ class GraphRunnerTest {
         assertFalse(GraphRunner.computePackDeclaresDepthCopyback(g));
     }
 
+    // --- computePackReferencesOpaqueDepth ---------------------------------------------------------
+
+    @Test
+    void falseWhenNoGeometryPassReadsOpaqueDepth() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("terrain", PassType.GEOMETRY,
+                        dev.icehunter.fornax.pack.GeometrySlot.DEFAULT, "terrain", null,
+                        List.of("builtin.blockAtlas"), List.of(), null, null, List.of(), null, null, null)));
+        assertFalse(GraphRunner.computePackReferencesOpaqueDepth(g));
+    }
+
+    @Test
+    void trueWhenAGeometryPassReadsOpaqueDepth() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("translucent", PassType.GEOMETRY,
+                        dev.icehunter.fornax.pack.GeometrySlot.DEFAULT, "translucent", null,
+                        List.of(dev.icehunter.fornax.pipeline.OpaqueDepth.NAME), List.of(), null, null,
+                        List.of(), null, null, null)));
+        assertTrue(GraphRunner.computePackReferencesOpaqueDepth(g));
+    }
+
+    @Test
+    void falseWhenANonGeometryPassNamesOpaqueDepth() {
+        // GraphValidator never allows this shape (builtin.depth_opaque is GEOMETRY only), but the
+        // check should still look at the pass type, not just match the input name.
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("resolve", PassType.FULLSCREEN, null, null, "shaders/post/resolve.fsh",
+                        List.of(dev.icehunter.fornax.pipeline.OpaqueDepth.NAME), List.of("builtin.output"),
+                        null, null, List.of(), null, null, null)));
+        assertFalse(GraphRunner.computePackReferencesOpaqueDepth(g));
+    }
+
     // --- Part A5: anyEnabledComputePassReadsVoxelGrid -------------------------------------------
 
     @Test

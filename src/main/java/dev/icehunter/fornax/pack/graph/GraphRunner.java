@@ -181,6 +181,10 @@ public final class GraphRunner {
     // runner remains valid. Name it once per pack session without flooding every frame/rebuild.
     private static final Set<String> runnerBuildFailureLogged = new HashSet<>();
     private static boolean packDeclaresDepthCopyback;
+    // Set once per rebuild next to packDeclaresDepthCopyback: whether any geometry pass asks for
+    // builtin.depth_opaque as an input. GraphValidator only allows this input on a GEOMETRY pass,
+    // so most packs never ask for it.
+    private static boolean packReferencesOpaqueDepth;
 
     // Pure-JVM rolling stats; the FrameProfiler OBJECT lives for the mod's whole session, independent
     // of which pack (if any) is loaded (like opaqueDepth below -- see that field's own doc). Its
@@ -778,6 +782,7 @@ public final class GraphRunner {
                 || registry.isEnabledBufferTarget(VoxelSourceWindow.TARGET));
         packTextureRegistry = PackTextureRegistry.create(pack.root(), pack.graph().textures());
         packDeclaresDepthCopyback = computePackDeclaresDepthCopyback(graphWithSceneHistory);
+        packReferencesOpaqueDepth = computePackReferencesOpaqueDepth(graphWithSceneHistory);
 
         pendingOptionsLayout = PackOptionsLayout.build(List.copyOf(pack.options().values()));
         Map<String, Float> defaults = new LinkedHashMap<>();
@@ -1049,7 +1054,14 @@ public final class GraphRunner {
 
         GBufferManager.ensureSize(width, height);
         GBufferManager.beginFrame();
-        opaqueDepth.ensureSize(width, height);
+        // Gated like VoxelWaterReflBuffer and AnalyticLightListBuffer: a pack that never asks for
+        // builtin.depth_opaque pays neither the full-size D32 VRAM allocation nor the per-frame
+        // depth copy below.
+        if (packReferencesOpaqueDepth) {
+            opaqueDepth.ensureSize(width, height);
+        } else if (opaqueDepth.getTexture() != null) {
+            opaqueDepth.free();
+        }
         if (packTextureRegistry != null) {
             packTextureRegistry.ensureLoaded();
         }
@@ -1494,7 +1506,9 @@ public final class GraphRunner {
         // the translucent draw that follows this method, so sampling it directly there is a Vulkan
         // hazard). Order relative to the fallback copy-back below is immaterial: both read the same
         // G-buffer depth this frame.
-        opaqueDepth.capture(gbuffer.getDepthTexture(), width, height);
+        if (packReferencesOpaqueDepth) {
+            opaqueDepth.capture(gbuffer.getDepthTexture(), width, height);
+        }
 
         if (!packDeclaresDepthCopyback) {
             // Fallback: a pack that declares no depth copy-back still gets correct vanilla translucent
@@ -1780,6 +1794,13 @@ public final class GraphRunner {
     static boolean computePackDeclaresDepthCopyback(GraphSpec graph) {
         return graph.passes().stream().anyMatch(p -> p.type() == PassType.COPY
                 && !p.outputs().isEmpty() && p.outputs().get(0).equals("builtin.sceneDepth"));
+    }
+
+    /** Whether any pass reads {@code builtin.depth_opaque}. {@link GraphValidator} only allows this
+     * input on a {@link PassType#GEOMETRY} pass, so that is the only pass type checked. */
+    static boolean computePackReferencesOpaqueDepth(GraphSpec graph) {
+        return graph.passes().stream().anyMatch(p -> p.type() == PassType.GEOMETRY
+                && p.inputs().contains(OpaqueDepth.NAME));
     }
 
     /**
@@ -2964,6 +2985,7 @@ public final class GraphRunner {
         // longer exists, and must not survive into whatever loads next.
         dev.icehunter.fornax.pipeline.DeferredGeometryPipelines.invalidate();
         packDeclaresDepthCopyback = false;
+        packReferencesOpaqueDepth = false;
         // Drop every rolling per-label sample: a pass whose enabled_if just went permanently false
         // this rebuild (option toggle, pack switch, "None" unload) must not leave its last avg/p95
         // frozen on the HUD forever -- see frameProfiler's own field doc. Losing the

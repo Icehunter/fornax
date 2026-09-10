@@ -813,7 +813,11 @@ hands all five G-buffer lanes `Optional.empty()` in a loop.
   far value (`FAR_CLEAR = 0.0`) at allocation, the same MoltenVK garbage-VRAM rule every
   `TargetRegistry` target follows, applied by hand, and `GraphRunner.closeCurrent()` frees it
   on every pack teardown (unload, pack switch, mid-session rebuild), reallocated fresh on the next
-  `prepare()` with a pack active.
+  `prepare()` with a pack active. `GraphRunner.computePackReferencesOpaqueDepth`, worked out once
+  per `rebuild()` next to `packDeclaresDepthCopyback`, gates both the allocation and the per-frame
+  capture below: a pack with no geometry pass asking for this input pays neither the full-size D32
+  allocation nor the per-frame copy. `VoxelWaterReflBuffer` and `AnalyticLightListBuffer` allocate
+  when a pack asks for them and free when it does not, the same way.
 - **Capture timing.** `GraphRunner.finish()`, which mirrors `FramePipeline.finishOpaque` and runs
   at the `RETURN` of Sodium's opaque `drawChunkLayer` (see §3), strictly before Sodium's own
   translucent draw, ends with `opaqueDepth.capture(gbuffer.getDepthTexture(), width, height)` as
@@ -2463,20 +2467,26 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
   to reset `WaterSurfaceTracker` on exactly this discontinuity; both accumulators' resets are called
   from that same guard so a portal trip or rejoining a world doesn't read as 20 seconds of drying
   out or a slow mist fade from yesterday's value.
-- **A voxel-harvest model query must never run inline on Sodium's own meshing thread, in the same
-  task that resolves the section's real quads.** `SectionHarvester`/`FaceColorResolver` resolve a
-  block's model via `BlockStateModel.collectParts`, the same query point a connected-texture mod
-  hooks. Running that query inline, in the same Sodium chunk-build task that later resolves the
-  section's real per-position quads through the same mod, breaks the mod's output for the real
-  render, on every freshly (re)meshed section. `ChunkBuilderMeshingTaskMixin` only queues the
-  harvest; `VoxelWindow.queueMeshTriggeredHarvest` runs it on the same dedicated background thread
-  the chunk-load-triggered harvest already uses (`DirectSectionReader.read`, whose own doc states
-  "a bootstrap read and a mesh-driven harvest must come out the same colour"), so the model query
-  never overlaps with Sodium's own resolve for the same section. Clearing a `BlockState`-keyed
-  color cache in `FaceColorResolver` is necessary but not sufficient on its own: it stops a stale
-  colour from replaying, but not the query from running inline on every fresh mesh.
-  `VoxelWindow.needsHarvest()` gates the harvest before it is queued, so the no-op default state
-  (no pack active) never queues one at all.
+- **A voxel-harvest model query breaks a connected-texture mod's render if it runs at the same
+  moment as that mod's own work, on any thread.** `SectionHarvester`/`FaceColorResolver` resolve a
+  block's model through `BlockStateModel.collectParts`, one of the query points such a mod hooks.
+  Keeping the harvest off Sodium's meshing thread makes the clash rarer, not impossible: Sodium runs
+  up to `Mth.clamp(Math.max(cores/3, cores-6), 1, 10)` meshing worker threads, nothing locks them
+  against Fornax's harvest thread, and a burst of chunk-load harvests (flying away and back) keeps
+  the harvest thread busy long enough for the two to land together often.
+  `ChunkBuilderMeshingTaskMixin` only queues the harvest; `VoxelWindow.queueMeshTriggeredHarvest`
+  runs it on the one background thread `DirectSectionReader.read` already uses, whose own doc states
+  "a bootstrap read and a mesh-driven harvest must come out the same colour".
+  `VoxelModelShape.Resolver` is the worse of the two query points, because it calls the Fabric
+  Rendering API quad-emission hook with a live world and position; `SectionHarvester` builds none,
+  so PARTIAL-shape cells keep their selection-shape geometry unrefined, a path `VoxelModelShape`'s
+  own class doc already covers. Clearing a `BlockState`-keyed colour cache in `FaceColorResolver`
+  stops a stale colour from replaying and does nothing about two queries landing together.
+  `VoxelWindow.needsHarvest()` gates the harvest before it is queued, so the no-op default state (no
+  pack active) never queues one at all. The remaining `collectParts` call sites
+  (`FaceColorResolver`, `VoxelFaceTexture`, `FoliageDensityResolver`) still run on the harvest
+  thread and can still land on top of Sodium's meshing threads. The full fix, resolving each
+  `BlockState` once while Sodium's build queue is known idle and caching it, is not written yet.
 
 ### When a voxel section counts as known
 

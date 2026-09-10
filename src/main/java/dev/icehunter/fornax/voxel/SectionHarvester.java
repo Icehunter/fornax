@@ -164,9 +164,13 @@ public final class SectionHarvester {
                     sourceIndex, sourceEntries, sourceEvidence));
         });
 
-        // Final model emission can depend on neighbors and position. Only PARTIAL cells pay this
-        // cost; reusable geometry keys and exact shape matching stay local to the section.
-        var modelShapes = new VoxelModelShape.Resolver();
+        // No VoxelModelShape.Resolver here. Building one with its no-argument constructor goes
+        // through Minecraft.getInstance().getModelManager(), the same block model entry point a
+        // connected-texture mod hooks, and calls the Fabric Rendering API emitQuads() hook with a
+        // live world and position from this background harvest thread. That query runs apart from
+        // Sodium's own per-position work and breaks the mod's render when the two land together
+        // (see docs/ARCHITECTURE.md section 12). PARTIAL-shape cells keep their selection-shape
+        // geometry unrefined, which is what VoxelPaletteShapes.refine does with a null box list.
         var shapeVariants = new VoxelPaletteShapes(entries, baseIndex -> {
             sourcePolicy.copy(baseIndex);
             if (sourceEntries != null) {
@@ -174,7 +178,6 @@ public final class SectionHarvester {
                 sourceEvidence.copy(baseIndex);
             }
         });
-        var modelAt = new BlockPos.MutableBlockPos();
         byte[] paletteIndices = new byte[16 * 16 * 16];
         for (int y = 0; y < 16; y++) {
             for (int z = 0; z < 16; z++) {
@@ -184,8 +187,10 @@ public final class SectionHarvester {
                     if (index == null) sourcePolicy.markIncomplete();
                     if (index != null && tintSource != null
                             && entries.get(index).shapeKind() == VoxelShapeKind.PARTIAL) {
-                        modelAt.set(originX + x, originY + y, originZ + z);
-                        index = shapeVariants.refine(index, modelShapes.resolve(state, tintSource, modelAt));
+                        // No live model query here, see the comment above shapeVariants. null
+                        // keeps the selection-shape fallback, like any other shape the code
+                        // cannot rebuild.
+                        index = shapeVariants.refine(index, null);
                     }
                     // A state that was skipped above (palette overflow past MAX_PALETTE_ENTRIES) has no
                     // entry here -- fall back to index 0 deterministically rather than unboxing null.
