@@ -145,6 +145,34 @@ class VoxelWindowStorageTest {
         assertFalse(VoxelWindow.hasValidData(32, 3, -55));
     }
 
+    @Test void olderBackfillReadCannotReplaceNewerMeshPublication() throws Exception {
+        TargetRegistry r = registry();
+        VoxelWindow.attachRegistry(r);
+        VoxelWindow.recenter(0, 0, 0, 1);
+        SectionPos position = SectionPos.of(0, 0, 0);
+        var newer = new SectionHarvester.Result(new byte[4096], new SectionPalette(List.of()));
+        var older = new SectionHarvester.Result(new byte[4096], new SectionPalette(List.of()));
+        var epoch = VoxelWindow.class.getDeclaredField("storageGeneration");
+        epoch.setAccessible(true);
+        var harvest = VoxelWindow.class.getDeclaredMethod("harvestAndUploadBatch",
+                net.minecraft.world.level.Level.class, List.class,
+                java.util.function.LongConsumer.class, Runnable.class, long.class, long.class, BiFunction.class, long.class);
+        harvest.setAccessible(true);
+
+        harvest.invoke(null, null, List.of(position), (java.util.function.LongConsumer) ignored -> { }, null,
+                epoch.getLong(null), VoxelHarvestLifecycle.generation(),
+                (BiFunction<Level, SectionPos, SectionHarvester.Result>) (level, readPosition) -> {
+                    VoxelWindow.onSectionHarvested(readPosition, newer);
+                    return older;
+                }, System.nanoTime());
+
+        int slot = VoxelWindow.slotFor(0, 0, 0);
+        var data = VoxelWindow.class.getDeclaredField("slotData");
+        data.setAccessible(true);
+        assertEquals(newer, ((Map<Integer, SectionHarvester.Result>) data.get(null)).get(slot),
+                "a backfill read that began first must not replace a newer live mesh result");
+    }
+
     @Test void reattachingTheSameStorageRetainsPublishedOwnership() throws Exception {
         TargetRegistry r = registry();
         VoxelWindow.attachRegistry(r);

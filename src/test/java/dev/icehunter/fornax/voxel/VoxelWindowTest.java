@@ -335,13 +335,13 @@ class VoxelWindowTest {
     }
 
     @Test
-    void priorityComparatorSortsFrontSlotsBeforeBackSlotsEvenWhenFartherAway() {
+    void nearbyBlockersBehindTheCameraPopulateBeforeDistantForwardSections() {
         SectionPos farFront = SectionPos.of(20, 0, 0);   // ahead, far
         SectionPos nearBack = SectionPos.of(-1, 0, 0);   // behind, near
         List<SectionPos> shell = new ArrayList<>(List.of(nearBack, farFront));
         shell.sort(VoxelWindow.priorityComparator(0, 0, 0, 1.0f, 0.0f, 0.0f));
-        assertEquals(List.of(farFront, nearBack), shell,
-                "a front slot must sort before a back slot even though it is farther away");
+        assertEquals(List.of(nearBack, farFront), shell,
+                "nearby lights and blockers behind the camera must not wait for a whole forward hemisphere");
     }
 
     @Test
@@ -354,11 +354,8 @@ class VoxelWindowTest {
     }
 
     @Test
-    void priorityComparatorOnARealShellIsALosslessReorderingThatIsFrontThenDistanceMonotonic() {
-        // Sort a real enumerateResyncShell output (the diagonal-move shell used elsewhere in this
-        // suite) and assert the two structural guarantees the harvest-throughput fix depends on:
-        // (1) nothing is lost or duplicated by sorting (same multiset), and (2) no back-facing slot
-        // ever precedes a front-facing one, with squared distance non-decreasing inside each group.
+    void priorityComparatorKeepsEverySectionInDistanceThenFacingOrder() {
+        // A camera turn must not push a next-door off-screen shadow caster behind far terrain.
         List<SectionPos> shell = new ArrayList<>();
         VoxelWindow.enumerateResyncShell(0, 0, 0, 2, 1, 1, 1, 2,
                 (x, y, z) -> shell.add(SectionPos.of(x, y, z)));
@@ -371,22 +368,16 @@ class VoxelWindowTest {
         assertEquals(beforeSort, new HashSet<>(shell), "sorting must not lose or duplicate any position");
         assertEquals(beforeSort.size(), shell.size(), "sorting must not lose or duplicate any position (size check)");
 
-        boolean sawBack = false;
-        long prevDistInGroup = -1;
-        Boolean prevFront = null;
+        long previousDistance = -1;
+        boolean previousFront = true;
         for (SectionPos p : shell) {
+            long distance = VoxelWindow.squaredDistance(p, cx, cy, cz);
             boolean front = VoxelWindow.isFront(p, cx, cy, cz, fx, fy, fz);
-            if (!front) {
-                sawBack = true;
-            }
-            assertFalse(front && sawBack, "a front slot must never appear after a back slot has been seen");
-            long dist = VoxelWindow.squaredDistance(p, cx, cy, cz);
-            if (prevFront != null && prevFront == front) {
-                assertTrue(dist >= prevDistInGroup,
-                        "squared distance must be non-decreasing within the same front/back group");
-            }
-            prevDistInGroup = dist;
-            prevFront = front;
+            assertTrue(distance >= previousDistance, "distance must increase regardless of camera facing");
+            if (distance == previousDistance)
+                assertFalse(front && !previousFront, "facing breaks equal-distance ties only");
+            previousDistance = distance;
+            previousFront = front;
         }
     }
 

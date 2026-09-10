@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class VoxelRefillTelemetryTest {
     @Test void completedTotalsSurviveIdleSnapshotsAndLightRemainsPartOfReaderTime() {
@@ -113,5 +114,40 @@ class VoxelRefillTelemetryTest {
         assertEquals(200, snapshot.count(VoxelRefillTelemetry.Count.READ));
         snapshot.counts()[VoxelRefillTelemetry.Count.READ.ordinal()] = -1;
         assertEquals(200, telemetry.snapshot().count(VoxelRefillTelemetry.Count.READ));
+    }
+    @Test void graphicsAndFenceWaitsDoNotShrinkCheapRefillBatches() {
+        var telemetry = new VoxelRefillTelemetry();
+        var clock = new AtomicLong();
+        var controller = new VoxelWindow.BatchSizeController();
+        var transfer = new SynchronousTransfer(new SynchronousTransfer.Backend() {
+            public void reset() { clock.addAndGet(2_000); }
+            public void submit() { clock.addAndGet(3_000); }
+            public void await() { clock.addAndGet(12_000_000); }
+            public void close() { }
+        });
+        // Made-up 20us per section, plus lock and fence waits that belong to other work. Timing
+        // the whole flush would read those waits as cost and drive this cheap batch down to eight.
+        try (var job = telemetry.begin(0, clock::get)) {
+            for (int i = 0; i < 4; i++) {
+                int batch = controller.currentTargetSize();
+                long before = VoxelRefillTelemetry.uploadWorkNanos();
+                long lock = VoxelRefillTelemetry.start();
+                clock.addAndGet(20_000_000);
+                VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.LOCK, lock);
+                long upload = VoxelRefillTelemetry.start();
+                transfer.execute(() -> clock.addAndGet(batch * 20_000L));
+                long commit = VoxelRefillTelemetry.start();
+                clock.addAndGet(7_000);
+                VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.COMMIT, commit);
+                VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.UPLOAD, upload);
+                long work = VoxelRefillTelemetry.uploadWorkNanos() - before;
+                assertEquals(batch * 20_000L + 12_000, work);
+                controller.recordBatch(batch, work);
+                assertTrue(controller.currentTargetSize() >= VoxelWindow.BatchSizeController.INITIAL_TARGET);
+            }
+            job.complete();
+        }
+        assertEquals(0, VoxelRefillTelemetry.uploadWorkNanos(), "an idle thread reports no work");
+        transfer.close();
     }
 }

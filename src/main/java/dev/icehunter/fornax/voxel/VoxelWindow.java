@@ -69,13 +69,27 @@ public final class VoxelWindow {
     // Take the upload lock so a checked batch cannot meet a resize before it writes.
     private static volatile long storageGeneration;
     private static final VoxelLightUpdates lightUpdates = new VoxelLightUpdates();
+    private record MeshChange(SectionPos owner, long revision) { }
+    // One entry per slot, so the window bounds them. A request bumps the count before any read, a
+    // CPU harvest records the count it saw, and only a finished GPU upload marks that count done.
+    // A filled CPU slot on its own cannot drop a queued edit while its upload has not landed.
+    private static final Map<Integer, MeshChange> meshChanges = new ConcurrentHashMap<>();
+    private static final Map<Integer, Long> slotReadRevision = new ConcurrentHashMap<>();
+    private static final Map<Integer, Long> slotCommittedReadRevision = new ConcurrentHashMap<>();
+    private static long meshChangeRevision;
+
+    private static long meshRevisionAt(SectionPos position) {
+        MeshChange change = meshChanges.get(slotFor(position.x(), position.y(), position.z()));
+        return change != null && change.owner().equals(position) ? change.revision() : 0;
+    }
     // Only queued columns are deduplicated. Once a reader starts, a new arrival must be
     // allowed to queue a follow-up in case the current read observed the chunk before arrival.
     private record ChunkLoad(long storageGeneration, long harvestGeneration, int x, int z) { }
     private static final Set<ChunkLoad> queuedChunkLoads = new HashSet<>();
     private record UnpublishedHarvest(int slot, SectionPos owner, SectionHarvester.Result result,
                                       @Nullable SectionPos previousOwner,
-                                      SectionHarvester.@Nullable Result previousData) { }
+                                      SectionHarvester.@Nullable Result previousData,
+                                      @Nullable Long previousReadRevision) { }
     private static final VoxelSectionState sectionStates = new VoxelSectionState();
     private static final VoxelSourceInventory sourceInventory = new VoxelSourceInventory();
     private static @Nullable VoxelEmitterPool emitterPool;
@@ -84,6 +98,10 @@ public final class VoxelWindow {
 
     private static void invalidateStorage() {
         storageGeneration = Math.incrementExact(storageGeneration);
+        meshUpdates.reset();
+        meshChanges.clear();
+        slotReadRevision.clear();
+        slotCommittedReadRevision.clear();
         sectionStates.reset(storageGeneration);
         sourceInventory.reset();
         sourceAtlasGeneration = -1;
@@ -220,6 +238,8 @@ public final class VoxelWindow {
         if (!isCurrentUpload(item) || !hasCurrentSourceSummary(item.result())
                 || (item.sectionState() != null && !isCurrentSectionState(item.slot(), item.sectionState()))) return;
         SectionPos owner = slotOwner.get(item.slot());
+        Long readRevision = slotReadRevision.get(item.slot());
+        if (readRevision != null) slotCommittedReadRevision.put(item.slot(), readRevision);
         if (item.clearLight() || !needsLightClear(item.slot(), owner)) slotLightOwner.put(item.slot(), owner);
         if (item.sectionState() != null) {
             sectionStates.commit(item.slot(), item.sectionState());
@@ -266,32 +286,23 @@ public final class VoxelWindow {
         return t;
     });
 
-    /** How many of a resync shell's highest-priority positions {@link #recenterAndResync} harvests
-     * SYNCHRONOUSLY, on the render thread, before handing the remainder to {@link #RESYNC_EXECUTOR}
-     * (see the harvest-throughput fix's own report for the full derivation). Rationale, in short:
-     * a fenced {@code vkQueueSubmit}/{@code vkWaitForFences} round trip -- whether {@link
-     * BrickGridUpload#uploadSlot}'s original one-slot-per-submit form, or {@link
-     * BrickGridUpload#uploadSlots}'s batched form this class now uses for both the synchronous slice
-     * and the async tail (see the batch-upload-throughput fix's own report) -- has a FIXED per-call
-     * overhead (vkCreateFence/vkQueueSubmit/vkWaitForFences/vkDestroyFence plus backend
-     * create/close) of roughly ~0.2ms on an already-warm queue (consistent with this class's
-     * steady-state fence-wait characterization elsewhere, e.g. {@code VoxelDebugRaymarchPass}'s ring
-     * recycle wait). Batching folds that fixed cost into ONE submit per {@link #harvestAndUploadBatch}
-     * flush rather than paying it once per slot, so {@code SYNC_BUDGET} itself no longer bounds
-     * render-thread fence-wait time directly (a 24-slot sync slice now costs roughly one flush's
-     * ~0.2ms, not {@code 24 * 0.2ms}) -- it still exists to bound how MUCH of a section-cross's shell
-     * is worth harvesting synchronously at all (packing + map bookkeeping for hundreds of slots is not
-     * free even without a GPU round trip per slot). On the priority side: a sprint-flying player (~20
-     * blocks/sec, a conservative middle between vanilla
-     * sprint-walk and rocket-boosted elytra) crosses a 16-block section boundary roughly every 0.8s
-     * (~48 frames at 60fps) on its dominant axis, so the ~24-slot synchronous pass only needs to cover
-     * the immediate, camera-forward-facing wedge of ONE newly-exposed shell face per cross -- typically
-     * far narrower than the whole face -- while the executor drains whatever the sync budget didn't
-     * reach during the (long, by comparison) interval before the next cross adds more work. This
-     * bound is independent of the batching cost above, since it bounds packing/bookkeeping cost, not
-     * fence-wait cost. See {@link
-     * #priorityComparator} for the ordering that decides which slots fall inside vs. outside the
-     * budget. */
+    /** Live mesh edits must not wait behind a full-window backfill or light-only refresh. */
+    private static final ExecutorService MESH_HARVEST_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "fornax-voxel-mesh-harvest");
+        t.setDaemon(true);
+        return t;
+    });
+
+    private static final VoxelMeshUpdates meshUpdates = new VoxelMeshUpdates(MESH_HARVEST_EXECUTOR,
+            (storageGeneration, harvestGeneration, level, position) ->
+                    harvestMeshRequest(storageGeneration, harvestGeneration, level, position, DirectSectionReader::read),
+            (position, error) ->
+            dev.icehunter.fornax.FornaxMod.LOGGER.error("Voxel mesh harvest failed for {}", position, error));
+
+    /** How many sections a recenter reads on the render thread before handing the rest to
+     * {@link #RESYNC_EXECUTOR}. Near sections come first in every direction. The rest share GPU
+     * uploads in batches sized from measured work. This caps how much work the frame does, not how
+     * long the GPU takes to finish. */
     private static final int SYNC_BUDGET = 24;
 
     /** Latest CPU section owner for each toroidal slot. Validity also requires populated membership;
@@ -489,8 +500,8 @@ public final class VoxelWindow {
                 sourceInventory.dropped();
                 return;
             }
-            // Same bookkeeping as the batched paths, see recordHarvest. Sodium's workers arrive one
-            // at a time, so this writes one slot per GPU call instead of batching.
+            // A live edit publishes right away on the mesh worker. A first mesh event whose
+            // newest count backfill already finished is dropped before the world read.
             boolean clearLight = recordHarvest(slot, position, result);
 
             TargetRegistry r = registry;
@@ -501,26 +512,64 @@ public final class VoxelWindow {
         }
     }
 
-    /** Queues a mesh-triggered harvest onto {@link #RESYNC_EXECUTOR} instead of running it inline on
-     * Sodium's own meshing thread. {@link SectionHarvester#harvestCurrent} resolves the section's real
-     * baked models: a plain per-{@code BlockState} query into the model manager, through whatever
-     * model provider is installed, including a connected-texture mod's. Running that query inline, on
-     * Sodium's own chunk-build task, in the same method that later resolves the section's real
-     * per-position quads through the same mod, breaks the mod's output for the real render, on every
-     * freshly (re)meshed section. {@link DirectSectionReader#read} performs the same harvest (its own
-     * doc: "a bootstrap read and a mesh-driven harvest must come out the same colour") from vanilla's
-     * own chunk storage, on this dedicated background thread, apart from Sodium's meshing task, so the
-     * query into the model manager never overlaps with Sodium's own resolve for the same section. */
+    /** Queues a mesh-triggered harvest on {@link #MESH_HARVEST_EXECUTOR}, away from the resync and
+     * light worker. Repeat events for one section share one request until a read starts, and an
+     * event during that read leaves one more behind it. New requests go ahead of the world-join
+     * backlog. The harvest reads vanilla's section storage and sorts the fixed baked parts it
+     * collects into the palette. It does not run from Sodium's meshing task, but makes no promise
+     * that Sodium or any block-model work on other threads is held apart. See
+     * {@code docs/ARCHITECTURE.md} section 12. */
     public static void queueMeshTriggeredHarvest(Level level, SectionPos position) {
-        if (!needsHarvest()) {
-            return; // matches onSectionHarvested's own gate: nothing will read the result
+        queueMeshTriggeredHarvest(level, position, meshUpdates);
+    }
+
+    /** Seam for the queueing gates: a test can pass its own worker without touching the real
+     * one. */
+    static void queueMeshTriggeredHarvest(Level level, SectionPos position, VoxelMeshUpdates updates) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            if (!needsHarvest() || !VoxelHarvestLifecycle.isAvailable()
+                    || slotFor(position.x(), position.y(), position.z()) < 0) {
+                return; // matches onSectionHarvested's own gate: nothing will read the result
+            }
+            int slot = slotFor(position.x(), position.y(), position.z());
+            meshChangeRevision = Math.incrementExact(meshChangeRevision);
+            meshChanges.put(slot, new MeshChange(position, meshChangeRevision));
+            updates.request(storageGeneration, VoxelHarvestLifecycle.generation(), level, position);
         }
-        RESYNC_EXECUTOR.execute(() -> {
-            SectionHarvester.Result result = DirectSectionReader.read(level, position);
-            if (result != null) {
+    }
+
+    /** Seam that keeps the real gates around a reader a queue test can supply. */
+    static void harvestMeshRequest(long expectedStorageGeneration, long expectedHarvestGeneration,
+                                   Level level, SectionPos position,
+                                   BiFunction<Level, SectionPos, SectionHarvester.Result> reader) {
+        final long revision;
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            if (!isCurrentMeshRequest(expectedStorageGeneration, expectedHarvestGeneration, position)) return;
+            revision = meshRevisionAt(position);
+            int slot = slotFor(position.x(), position.y(), position.z());
+            if (hasValidData(position.x(), position.y(), position.z())
+                    && Long.valueOf(revision).equals(slotCommittedReadRevision.get(slot))) return;
+        }
+        SectionHarvester.Result result;
+        try (var lease = VoxelHarvestLifecycle.tryAcquire(expectedHarvestGeneration)) {
+            if (lease == null || !isCurrentMeshRequest(expectedStorageGeneration, expectedHarvestGeneration, position)) return;
+            result = reader.apply(level, position);
+        }
+        if (result == null) return;
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            if (isCurrentMeshRequest(expectedStorageGeneration, expectedHarvestGeneration, position)
+                    && meshRevisionAt(position) == revision) {
                 onSectionHarvested(position, result);
             }
-        });
+        }
+    }
+
+    private static boolean isCurrentMeshRequest(long expectedStorageGeneration, long expectedHarvestGeneration,
+                                                SectionPos position) {
+        return storageGeneration == expectedStorageGeneration
+                && VoxelHarvestLifecycle.isCurrent(expectedHarvestGeneration)
+                && registry != null && state.radius() != 0
+                && slotFor(position.x(), position.y(), position.z()) >= 0;
     }
 
     /** A loaded column retries missing geometry even if the camera and terrain meshes stay still.
@@ -668,23 +717,12 @@ public final class VoxelWindow {
      * transient pop-to-sky for eliminating the displaced-geometry artifact. See {@link
      * DirectSectionReader}'s class doc for the read-side hazard this closes.
      *
-     * <p><b>Prioritized budgeted harvest.</b> A walking/flying player crosses sections continuously,
-     * and the shell a single incremental move exposes can be a whole {@code diameter x diameter} face
-     * (hundreds of sections for a large window radius) -- deferring that whole face to {@link
-     * #RESYNC_EXECUTOR}'s single background thread falls behind under continuous crossing (each
-     * per-slot GPU upload is its own fenced round trip; see {@link #SYNC_BUDGET}'s doc for the
-     * arithmetic). So the shell is enumerated once into a list and sorted by {@link
-     * #priorityComparator} (camera-forward-facing slots first, then nearest to the new window center);
-     * the top {@link #SYNC_BUDGET} slots are harvested synchronously, right here on the render thread,
-     * before this method returns -- so the area a full-window consumer like a pack's {@code
-     * celestial_shadow} fullscreen pass is most likely to sample this very frame is never left
-     * transiently empty. The remainder is handed to {@link #RESYNC_EXECUTOR} as the tail-drain for
-     * whatever doesn't fit the synchronous budget, preserving every eventual-consistency guarantee
-     * documented above (still single-threaded, still FIFO per call, still safe against a stale task
-     * corrupting a valid slot). The occupancy-clear above still covers the whole exposed shell
-     * regardless of budget, so the "cleared-until-harvested" invariant holds for slots outside the
-     * sync budget too -- they read as empty (sky fallback) until the executor's tail-drain reaches
-     * them.
+     * <p><b>Prioritized budgeted harvest.</b> Walk the shell once and sort nearest first; camera
+     * facing only breaks ties between sections the same distance away. A light or blocker close by
+     * but off screen still changes what is on screen. The first {@link #SYNC_BUDGET} sections read
+     * here on the render thread and the rest read on the background resync worker. Every newly
+     * exposed slot is cleared at once, and a section the game has not loaded yet stays waiting even
+     * when it fell inside that first group.
      *
      * <p><b>Batched harvest upload.</b> Both the synchronous slice and the async tail-drain
      * harvest+upload through {@link #harvestAndUploadBatch} rather than one fenced GPU round trip per
@@ -693,7 +731,7 @@ public final class VoxelWindow {
      * BatchSizeController} -- rather than a hardcoded count or one submit per slot. This lets the worst
      * case (the very first {@code recenterAndResync}, a full-window scan of thousands of sections, all
      * deferred to {@link #RESYNC_EXECUTOR} past the {@link #SYNC_BUDGET} slice) drain in large,
-     * GPU-time-budgeted batches instead of thousands of individually fenced round trips, while the
+     * CPU-work-budgeted batches instead of thousands of individually fenced round trips, while the
      * common steady-state case (a handful of slots per section-cross) still flushes promptly since the
      * deferred list's own end always triggers a final flush of whatever didn't reach the adaptive
      * target.
@@ -705,7 +743,8 @@ public final class VoxelWindow {
      * PalettedContainer} read path never trips a threading detector -- see {@link SectionHarvester} /
      * {@link DirectSectionReader}). {@code forwardX}/{@code forwardY}/{@code forwardZ} is the camera's
      * current look direction (need not be normalized -- only its sign relative to each candidate slot
-     * matters, see {@link #isFront}), used purely to order the shell; passing a zero vector degrades
+     * matters, see {@link #isFront}), used to break ties between sections the same distance away in
+     * the shell; passing a zero vector degrades
      * gracefully to nearest-first-only ordering ({@link #isFront} treats a zero dot product as front). */
     public static void recenterAndResync(int newCenterX, int newCenterY, int newCenterZ, int newRadius, Level level,
                                           float forwardX, float forwardY, float forwardZ) {
@@ -757,6 +796,8 @@ public final class VoxelWindow {
                     // Telemetry: these slots hold no real geometry (shell-clear) until the harvest
                     // below (sync or async) republishes them: see populatedSlots'/clearedTotal's own doc.
                     populatedSlots.removeAll(exposed);
+                    // A slot back on its old owner cannot reuse a done mark from before this clear.
+                    for (int slot : exposed) slotCommittedReadRevision.remove(slot);
                     clearedTotal.addAndGet(exposed.size());
                 }
             }
@@ -783,45 +824,20 @@ public final class VoxelWindow {
         }
     }
 
-    /** Adaptive batch-size controller for {@link #harvestAndUploadBatch}: starts conservative, then
-     * grows or shrinks the NEXT batch's target slot count from the MEASURED wall-clock cost of the
-     * batch just flushed, aiming to keep every {@link BrickGridUpload#uploadSlots} flush's fenced GPU
-     * round trip under {@link #BATCH_TIME_BUDGET_NANOS} -- "budget-bounded by measured milliseconds,
-     * not slot count" (the batch-upload-throughput fix's own brief). A single fenced round trip's
-     * FIXED overhead (fence create/submit/wait/destroy, plus {@code VulkanComputeBackend.tryCreate}/
-     * {@code close}) dominates at small batch sizes (~0.2ms, see {@link #SYNC_BUDGET}'s own
-     * derivation); the MARGINAL per-slot cost -- recording a few {@code vkCmdUpdateBuffer} calls and
-     * packing a few KB -- is far smaller, so growing the batch amortizes the fixed cost across more
-     * slots almost for free, up to whatever size actually keeps the round trip under budget. This
-     * naturally fast-ramps: the huge deferred tail of a first-enable/large-jump full-window scan
-     * quickly discovers it can flush thousands of slots per submit, while a steady-state trickle (a
-     * handful of slots per section-cross) never accumulates enough to leave {@link #INITIAL_TARGET}
-     * before the deferred list itself runs out and the final partial batch flushes anyway.
-     *
-     * <p>Per-call instance state (a {@code new} one per {@link #harvestAndUploadBatch}
-     * invocation), not a shared static field: concurrent callers on different threads (the
-     * render-thread synchronous slice and {@link #RESYNC_EXECUTOR}'s own thread) must not perturb each
-     * other's estimate, and one call's positions share no timing characteristics with another's (the
-     * async tail's queue may be draining a full GPU generation behind the sync slice's fresh one). */
+    /** Sets the next batch size from the measured reset, packing, submit and commit work. Waiting
+     * for the queue lock or the GPU fence holds other drawing work, so counting it as per-slot cost
+     * would drive the batch down to its floor on a busy GPU and pay the same waits far more often.
+     * Each harvest call has its own controller. */
     static final class BatchSizeController {
-        /** Target ceiling for a single batch's fenced round trip -- see class doc. A fraction of a
-         * 16.6ms (60fps) frame budget, matching {@link #SYNC_BUDGET}'s own frame-budget reasoning; the
-         * async tail-drain thread has no per-frame deadline of its own, but keeping each of its
-         * individual flushes bounded avoids one pathologically large batch starving
-         * {@code SHARED_QUEUE_LOCK} for other GPU work (e.g. a same-frame render-thread upload) for too
-         * long at once. */
-        static final long BATCH_TIME_BUDGET_NANOS = 4_000_000L; // 4ms
-        /** First batch's target size, before any real measurement exists -- small (well under a
-         * frame's worth of fence overhead even in the worst case) so the very first flush's
-         * measurement is cheap to obtain and cannot itself blow the budget. */
+        /** Four milliseconds of CPU upload work, a slice of a 60fps frame. It sizes the next
+         * batch; it does not bound how long the GPU fence or the thread scheduler takes. */
+        static final long BATCH_TIME_BUDGET_NANOS = 4_000_000L;
+        /** First batch size, before any measurement exists, and the floor a slow batch cannot fall
+         * below. */
         static final int INITIAL_TARGET = 64;
-        /** Floor for the adaptive target: even a batch that measured far over budget still flushes at
-         * least this many slots per round trip, so a single always-slow flush cannot regress all the
-         * way back to the pre-batching one-slot-per-submit behavior. */
         static final int MIN_TARGET = 8;
-        /** Ceiling for the adaptive target -- bounds one command buffer's total embedded byte count
-         * (each Standard-detail slot embeds up to ~23KB: 512 + 4096 + 16384 + 6144 bytes) and the native scratch churn
-         * of a single flush, independent of how favorable the measured per-slot cost looks. */
+        /** Caps one command buffer's embedded bytes: a Standard-detail slot embeds up to about 23KB
+         * (512 + 4096 + 16384 + 6144). */
         static final int MAX_TARGET = 4096;
 
         private int targetSize = INITIAL_TARGET;
@@ -861,6 +877,7 @@ public final class VoxelWindow {
         lightUpdates.meshPublished(position);
         slotOwner.put(slot, position);
         slotData.put(slot, result);
+        slotReadRevision.put(slot, meshRevisionAt(position));
         if (sourceWindow != null) sourceWindow.pending(slot);
         populatedSlots.add(slot); // harvest publish -- see the field's own doc
         return needsLightClear(slot, position);
@@ -904,6 +921,7 @@ public final class VoxelWindow {
                     boolean current = generation == storageGeneration && slotFor(pos.x(), pos.y(), pos.z()) >= 0;
                     boolean valid = current && hasValidData(pos.x(), pos.y(), pos.z());
                     if (current && !valid) {
+                        long readRevision = meshRevisionAt(pos);
                         SectionHarvester.Result result = null;
                         // Acquire before touching the captured world. Old queued jobs stay cancelled even
                         // after a later model publication reopens harvesting for a newer generation.
@@ -923,9 +941,11 @@ public final class VoxelWindow {
                             synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
                                 VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.LOCK, lockStart);
                                 int slot = slotFor(pos.x(), pos.y(), pos.z());
-                                if (generation == storageGeneration && r == registry && slot >= 0 && hasCurrentSourceSummary(result)) {
+                                if (generation == storageGeneration && r == registry && slot >= 0
+                                        && meshRevisionAt(pos) == readRevision
+                                        && !hasValidData(pos.x(), pos.y(), pos.z()) && hasCurrentSourceSummary(result)) {
                                     unpublished.add(new UnpublishedHarvest(slot, pos, result,
-                                            slotOwner.get(slot), slotData.get(slot)));
+                                            slotOwner.get(slot), slotData.get(slot), slotReadRevision.get(slot)));
                                     boolean clearLight = recordHarvest(slot, pos, result);
                                     var snapshot = r != null && sectionMetadataEnabled(r)
                                             ? sectionStates.geometry(slot, pos) : null;
@@ -991,6 +1011,8 @@ public final class VoxelWindow {
                 else slotOwner.put(slot, item.previousOwner());
                 if (item.previousData() == null) slotData.remove(slot);
                 else slotData.put(slot, item.previousData());
+                if (item.previousReadRevision() == null) slotReadRevision.remove(slot);
+                else slotReadRevision.put(slot, item.previousReadRevision());
                 populatedSlots.remove(slot);
                 sectionStates.invalidate(List.of(slot));
                 if (sourceWindow != null) sourceWindow.invalidate(List.of(slot));
@@ -1005,18 +1027,14 @@ public final class VoxelWindow {
                 && slotFor(snapshot.x(), snapshot.y(), snapshot.z()) == slot;
     }
 
-    /** Flushes {@code batch} as one {@link BrickGridUpload#uploadSlots} submission, measures its real
-     * wall-clock cost, and feeds that measurement into {@code controller} for the NEXT batch's target
-     * size -- see {@link BatchSizeController}. {@code System.nanoTime()} brackets the call rather than
-     * any GPU timestamp: the caller (the render thread's synchronous slice, or {@link
-     * #RESYNC_EXECUTOR}'s background thread) genuinely blocks on {@code uploadSlots}'s own fence wait
-     * for that duration, so this is a real measurement of this batch's cost, the same reasoning
-     * {@code GraphRunner}'s own CPU-side compute-pass timing already relies on for a synchronously
-     * fence-waited dispatch. Clears {@code batch} afterward so the caller's accumulator is empty for
-     * the next round regardless of size. */
+    /** Checks ownership again, uploads a batch, and feeds the CPU upload work to the controller.
+     * The fence still finishes before this returns, so leaving the wait out of the measure changes
+     * the batch size only, not ordering or when the GPU data is safe to use. */
     private static void flushBatch(TargetRegistry registry, List<BrickGridUpload.SlotUpload> batch,
                                     BatchSizeController controller, long generation) {
-        long start = System.nanoTime();
+        // harvestAndUploadBatch always holds a refill telemetry scope. Size from the work this
+        // code does, not time spent waiting on drawing or another uploader; zero leaves it alone.
+        long workBefore = VoxelRefillTelemetry.uploadWorkNanos();
         long lockStart = VoxelRefillTelemetry.start();
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
             VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.LOCK, lockStart);
@@ -1029,23 +1047,18 @@ public final class VoxelWindow {
                 finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.UPLOAD, uploadStart); }
             }
         }
-        long elapsedNanos = System.nanoTime() - start;
-        controller.recordBatch(batch.size(), elapsedNanos);
+        controller.recordBatch(batch.size(), VoxelRefillTelemetry.uploadWorkNanos() - workBefore);
         batch.clear();
     }
 
-    /** Orders resync-shell positions so the render thread's synchronous {@link #SYNC_BUDGET} slice
-     * covers what's most likely to matter THIS frame: camera-forward-facing slots first (see {@link
-     * #isFront}), then nearest to the window center ({@link #squaredDistance}) within each group. Pure
-     * -- no static state -- so it is unit-tested directly (VoxelWindowTest) without a live window or
-     * GPU. {@code centerX}/{@code centerY}/{@code centerZ} is the NEW window center (the camera's own
-     * section), the natural distance/direction origin since every position sorted here is a candidate
-     * slot in the just-published window. */
+    /** Nearest sections first in every direction: a light or blocker off screen still changes what
+     * is on screen. Camera facing only breaks ties between sections the same distance away, so a
+     * next-door section never waits for a ring of far sections in front. */
     static Comparator<SectionPos> priorityComparator(int centerX, int centerY, int centerZ,
                                                        float forwardX, float forwardY, float forwardZ) {
         return Comparator
-                .comparingInt((SectionPos p) -> isFront(p, centerX, centerY, centerZ, forwardX, forwardY, forwardZ) ? 0 : 1)
-                .thenComparingLong(p -> squaredDistance(p, centerX, centerY, centerZ));
+                .comparingLong((SectionPos p) -> squaredDistance(p, centerX, centerY, centerZ))
+                .thenComparingInt(p -> isFront(p, centerX, centerY, centerZ, forwardX, forwardY, forwardZ) ? 0 : 1);
     }
 
     /** Whether {@code p} lies in the camera's forward-facing hemisphere from {@code (centerX,

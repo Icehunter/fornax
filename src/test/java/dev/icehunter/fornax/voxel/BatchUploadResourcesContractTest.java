@@ -28,4 +28,13 @@ class BatchUploadResourcesContractTest {
         assertTrue(source.contains("voxelUploadResources.close()"));
         assertTrue(source.contains("voxelUploadsClosed = true"));
     }
+    @Test void refillControllerUsesUploadWorkRatherThanWaitingForTheQueue() throws Exception {
+        String source = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/VoxelWindow.java"));
+        int start = source.indexOf("private static void flushBatch(");
+        String body = source.substring(start, source.indexOf("\n    }", start));
+        assertTrue(body.contains("long workBefore = VoxelRefillTelemetry.uploadWorkNanos();"));
+        assertTrue(body.contains("controller.recordBatch(batch.size(), VoxelRefillTelemetry.uploadWorkNanos() - workBefore)"));
+        assertFalse(body.contains("System.nanoTime()"),
+                "clock time here would count waits that belong to other drawing work");
+    }
 }

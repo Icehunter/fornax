@@ -66,6 +66,16 @@ public final class VoxelRefillTelemetry {
         if (job != null) job.nanos[phase.ordinal()] += job.clock.getAsLong() - start;
     }
 
+    /** Running total of the current job's CPU upload work, leaving out the overlapping UPLOAD
+     * phase and every wait. Batching reads this before and after and uses the difference. Outside a
+     * refill it returns zero, which leaves the batch size alone rather than making up a number. */
+    static long uploadWorkNanos() {
+        Job job = CURRENT.get();
+        if (job == null) return 0;
+        return job.nanos[Phase.RESET.ordinal()] + job.nanos[Phase.RECORD.ordinal()]
+                + job.nanos[Phase.SUBMIT.ordinal()] + job.nanos[Phase.COMMIT.ordinal()];
+    }
+
     static void count(Count count) { add(count, 1); }
     static void add(Count count, long amount) {
         Job job = CURRENT.get();

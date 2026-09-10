@@ -76,6 +76,19 @@ public abstract class UniformBufferManagerMixin implements UniformBufferManagerE
     @Unique
     private boolean fornax$hasUpdatedPbrSettingsThisFrame;
 
+    // MappableRingBuffer.BUFFER_COUNT (private, not otherwise reachable): the ring turns through
+    // exactly 3 GPU buffers. A changed value must reach all 3 before the upload can be skipped.
+    // Skipping the write also skips moving past that buffer, so an old value would come back the
+    // next time the ring turns around to it.
+    @Unique
+    private static final int fornax$PBR_RING_SIZE = 3;
+
+    @Unique
+    private float[] fornax$lastPbrValues;
+
+    @Unique
+    private int fornax$pbrSettingsDirtyCount = fornax$PBR_RING_SIZE;
+
     @ModifyArg(
             method = "<init>",
             at = @At(
@@ -110,12 +123,11 @@ public abstract class UniformBufferManagerMixin implements UniformBufferManagerE
     // GlobalUniformsWriteMixin, which carries the identical append at the identical anchor there.
 
     /**
-     * Re-uploads the PBR settings uniform block. Cheap (tens of bytes), so simplest to re-upload
-     * every frame alongside {@code update(...)} rather than tracking dirty state. Guarded to run at
-     * most once per frame, mirroring {@code update(...)}'s own {@code hasUpdatedThisFrame} guard --
-     * {@code renderLayer} (see {@code SodiumWorldRendererRenderLayerMixin}) calls this once per pass
-     * (SOLID/CUTOUT/TRANSLUCENT), and rotating the ring buffer more than once a frame would race the
-     * GPU's consumption of the previous pass's mapping.
+     * Re-uploads the PBR settings uniform block only when a value changed. Guarded to run
+     * at most once per frame, mirroring {@code update(...)}'s own {@code hasUpdatedThisFrame} guard
+     * -- {@code renderLayer} (see {@code SodiumWorldRendererRenderLayerMixin}) calls this once per
+     * pass (SOLID/CUTOUT/TRANSLUCENT), and rotating the ring buffer more than once a frame would
+     * race the GPU's consumption of the previous pass's mapping.
      *
      * <p>Every value is the active pack's own runtime option, not an engine {@code FornaxSettings}
      * field -- terrain is a DEFERRED geometry-slot shader, so it binds Sodium's terrain bind group
@@ -135,6 +147,14 @@ public abstract class UniformBufferManagerMixin implements UniformBufferManagerE
      * there is no second ordering here to disagree with. The GLSL half is pinned by
      * {@code PbrSettingsLayoutTest} / {@code PlaguePackLoadsTest}, which parse the block out of the
      * shader source and assert it against that same list.
+     *
+     * <p><b>The skip must count against the ring, not just against "did the value change".</b>
+     * A changed value is written on {@link #fornax$PBR_RING_SIZE} frames in a row, one per buffer
+     * in the ring, before the upload can be skipped. Skipping the write also skips moving past that
+     * buffer, so an early skip would leave one of the 3 holding an older value that comes back the
+     * next time the ring turns around to it. This does not gate DATA behind STYLING (AGENTS.md):
+     * the value is still read and compared on every call, and only a GPU write of the same bytes is
+     * skipped.
      */
     @Override
     public void updatePbrSettings() {
@@ -145,14 +165,27 @@ public abstract class UniformBufferManagerMixin implements UniformBufferManagerE
 
         PackOptionsBuffer options = GraphRunner.optionsBuffer();
 
+        float[] current = new float[PbrSettingsLayout.MEMBERS.size()];
+        for (int i = 0; i < current.length; i++) {
+            PbrSettingsLayout.Member member = PbrSettingsLayout.MEMBERS.get(i);
+            current[i] = options != null ? options.get(member.option(), member.fallback()) : member.fallback();
+        }
+
+        if (this.fornax$lastPbrValues == null || !java.util.Arrays.equals(this.fornax$lastPbrValues, current)) {
+            this.fornax$lastPbrValues = current;
+            this.fornax$pbrSettingsDirtyCount = fornax$PBR_RING_SIZE;
+        }
+        if (this.fornax$pbrSettingsDirtyCount <= 0) {
+            return;
+        }
+        this.fornax$pbrSettingsDirtyCount--;
+
         this.fornax$pbrSettingsData.rotate();
 
         try (var data = this.fornax$pbrSettingsData.currentBuffer().map(false, true)) {
             Std140Builder builder = Std140Builder.intoBuffer(data.data());
-            for (PbrSettingsLayout.Member member : PbrSettingsLayout.MEMBERS) {
-                builder.putFloat(options != null
-                        ? options.get(member.option(), member.fallback())
-                        : member.fallback());
+            for (float value : current) {
+                builder.putFloat(value);
             }
             builder.get();
         }

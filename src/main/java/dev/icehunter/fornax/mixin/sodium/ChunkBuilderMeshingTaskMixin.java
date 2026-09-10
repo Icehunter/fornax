@@ -18,16 +18,15 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 /**
  * Queues each section's voxel-grid harvest the moment Sodium (re)builds it, reusing Sodium's own
  * change detection (a block edit already triggers a rebuild; this piggybacks on that event) rather
- * than building a second one. Runs {@link VoxelWindow#queueMeshTriggeredHarvest} on a dedicated
- * background thread, never inline on Sodium's own chunk-build worker thread.
+ * than building a second one. {@link VoxelWindow#queueMeshTriggeredHarvest} hands it to its own
+ * background worker, which groups repeat events for one section, never inline on Sodium's own
+ * chunk-build worker thread.
  *
- * <p><b>Must not harvest inline, on Sodium's own meshing thread, using Sodium's own build data.</b>
- * The harvest query goes into the block-state model manager, the same query point a connected-texture
- * mod hooks. The same Sodium chunk-build task, later in that same method, resolves the section's real
- * per-position quads through that same mod. Running the harvest query inline there breaks the mod's
- * output for the real render, on every section Sodium (re)meshes. Queuing onto {@link VoxelWindow}'s
- * dedicated thread instead keeps the harvest's model query from ever overlapping with Sodium's own
- * resolve for the same section; see that method's own doc and {@code docs/ARCHITECTURE.md} section 12.
+ * <p><b>Must not harvest inline on Sodium's own meshing thread.</b> The worker reads vanilla's
+ * section storage after the mesh event and sorts the fixed baked parts it collects into the voxel
+ * palette. The queue bounds that work and cleans it up, but makes no promise that block-model work
+ * on other threads is held apart; see {@link VoxelWindow}'s method doc and
+ * {@code docs/ARCHITECTURE.md} section 12.
  *
  * <p><b>Injection target note:</b> this method exists twice in the compiled class due to generic
  * erasure -- the real method returning {@code ChunkBuildOutput}, and a compiler-generated bridge

@@ -2467,26 +2467,22 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
   to reset `WaterSurfaceTracker` on exactly this discontinuity; both accumulators' resets are called
   from that same guard so a portal trip or rejoining a world doesn't read as 20 seconds of drying
   out or a slow mist fade from yesterday's value.
-- **A voxel-harvest model query breaks a connected-texture mod's render if it runs at the same
-  moment as that mod's own work, on any thread.** `SectionHarvester`/`FaceColorResolver` resolve a
-  block's model through `BlockStateModel.collectParts`, one of the query points such a mod hooks.
-  Keeping the harvest off Sodium's meshing thread makes the clash rarer, not impossible: Sodium runs
-  up to `Mth.clamp(Math.max(cores/3, cores-6), 1, 10)` meshing worker threads, nothing locks them
-  against Fornax's harvest thread, and a burst of chunk-load harvests (flying away and back) keeps
-  the harvest thread busy long enough for the two to land together often.
-  `ChunkBuilderMeshingTaskMixin` only queues the harvest; `VoxelWindow.queueMeshTriggeredHarvest`
-  runs it on the one background thread `DirectSectionReader.read` already uses, whose own doc states
-  "a bootstrap read and a mesh-driven harvest must come out the same colour".
-  `VoxelModelShape.Resolver` is the worse of the two query points, because it calls the Fabric
-  Rendering API quad-emission hook with a live world and position; `SectionHarvester` builds none,
-  so PARTIAL-shape cells keep their selection-shape geometry unrefined, a path `VoxelModelShape`'s
-  own class doc already covers. Clearing a `BlockState`-keyed colour cache in `FaceColorResolver`
-  stops a stale colour from replaying and does nothing about two queries landing together.
+- **A mesh-triggered voxel harvest must never run inside Sodium's meshing task.** The harvest reads
+  vanilla's own section storage and sorts the fixed baked block parts it collects; it never asks a
+  live block-and-position path to fill in PARTIAL cells. `ChunkBuilderMeshingTaskMixin` only puts
+  the work in a queue. `VoxelWindow.queueMeshTriggeredHarvest` runs it on its own mesh worker, away
+  from backfill and light work. Repeat events for one section share one waiting request, and an edit
+  that lands while that request is being read leaves one more behind it. The worker takes the most
+  recently asked-for section first, and asking again for a waiting section moves it to the front, so
+  joining a world queues a short list of sections rather than thousands of tasks sitting in front of
+  live edits. The worker drops its own lock before it reads the world or takes the shared GPU lock.
+  Each request carries the storage and model generation numbers, and is thrown away before the
+  costly read if either one moved on or the section left the window; a reset cannot let an old job
+  wipe out the request that replaced it. That is a promise about queue order and clean-up, not a
+  promise that block-model work on other threads is held apart. `DirectSectionReader.read`'s own doc
+  states "a bootstrap read and a mesh-driven harvest must come out the same colour".
   `VoxelWindow.needsHarvest()` gates the harvest before it is queued, so the no-op default state (no
-  pack active) never queues one at all. The remaining `collectParts` call sites
-  (`FaceColorResolver`, `VoxelFaceTexture`, `FoliageDensityResolver`) still run on the harvest
-  thread and can still land on top of Sodium's meshing threads. The full fix, resolving each
-  `BlockState` once while Sodium's build queue is known idle and caching it, is not written yet.
+  pack active) never queues one at all.
 
 ### When a voxel section counts as known
 
@@ -2505,7 +2501,16 @@ generation under the shared upload lock. So a reload at the same camera spot can
 pending buffers under stale owners, and a late harvest cannot write into new storage.
 A queued section that has moved outside the current window is dropped before any world read, even
 when storage has not changed. A dropped entry still counts toward the pending total. The lock still
-checks ownership again after each harvest, since the camera can move while a read is in flight.
+checks ownership again after each harvest, since the camera can move while a read is in flight. A
+backfill result also refuses to overwrite a section that a newer mesh harvest published while that
+backfill was still reading the world. Every accepted mesh event bumps a per-slot edit count before
+its world read. Backfill notes that count and drops its result if an edit arrived during the read.
+A CPU result keeps the count it read, and only a finished GPU upload marks that count as done. A
+queued mesh event skips its repeat read and upload only when the same owner still holds the slot
+and the newest edit count is already on the GPU; an upload still waiting, or one that failed, does
+not count. New storage wipes the counts, and a shell clear drops the done marks, so moving away and
+back to the same section cannot reuse an old one. There is one record per slot, so the window
+bounds them.
 Right before transfer, the batch is filtered once more under the same lock: each entry must still
 be marked populated, hold the same result, and be owned by that slot in the current window. This
 stops a stale write from going through after a move or a newer harvest, with or without optional
@@ -2527,6 +2532,16 @@ restored, and their populated/metadata state cleared, without touching a newer o
 storage. A successful flush throws away its rollback records. Sections that arrive before the
 first window is set are handled by the first resync; sections outside the window are handled once
 a later window covers them.
+
+The shell sorts by distance first and by camera facing second, so a light or a blocker close behind
+the camera does not wait for a whole ring of far sections in front. The first 24 sections read on
+the render thread and the rest read on the resync worker. Batch size follows the measured reset,
+packing, submit and commit work against the four-millisecond work target. Time spent waiting for
+the shared lock or the GPU fence is left out of that measure: those waits hold other drawing work,
+and counting them drives a cheap batch down to eight sections and pays the same waits far more
+often. The waits still happen before any buffer is reused or published, so neither ordering nor
+light quality changes. The measure sizes the next batch; it does not bound frame time or how long
+an upload takes.
 
 Batch voxel uploads reuse one scratch space, command pool and fence, all owned by the registry and
 held under the shared queue lock. Each batch reads the current destination handles and sizes fresh,
