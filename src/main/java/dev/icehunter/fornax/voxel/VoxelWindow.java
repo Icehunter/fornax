@@ -421,6 +421,14 @@ public final class VoxelWindow {
         return registry;
     }
 
+    /** Same emptiness test {@link #onSectionHarvested} applies to its result, exposed so a caller can
+     * skip the harvest itself rather than discard it afterward: two volatile reads, cheap enough to
+     * call from Sodium's meshing hot path before paying for a real model/texel walk that nothing will
+     * ever consume. */
+    public static boolean needsHarvest() {
+        return registry != null && state.radius() != 0;
+    }
+
     /** Moves the window's origin. Does no allocation/harvesting work -- just one atomic volatile
      * publish of the new geometry snapshot (see class javadoc). Stale slots are discovered lazily by
      * {@link #slotFor}/{@link #hasValidData} comparing {@code slotOwner} against the section each slot
@@ -491,6 +499,28 @@ public final class VoxelWindow {
             // Every mesh publication shares the fenced payload/light completion boundary.
             BrickGridUpload.uploadSlots(r, List.of(new BrickGridUpload.SlotUpload(slot, result, clearLight, snapshot)));
         }
+    }
+
+    /** Queues a mesh-triggered harvest onto {@link #RESYNC_EXECUTOR} instead of running it inline on
+     * Sodium's own meshing thread. {@link SectionHarvester#harvestCurrent} resolves the section's real
+     * baked models: a plain per-{@code BlockState} query into the model manager, through whatever
+     * model provider is installed, including a connected-texture mod's. Running that query inline, on
+     * Sodium's own chunk-build task, in the same method that later resolves the section's real
+     * per-position quads through the same mod, breaks the mod's output for the real render, on every
+     * freshly (re)meshed section. {@link DirectSectionReader#read} performs the same harvest (its own
+     * doc: "a bootstrap read and a mesh-driven harvest must come out the same colour") from vanilla's
+     * own chunk storage, on this dedicated background thread, apart from Sodium's meshing task, so the
+     * query into the model manager never overlaps with Sodium's own resolve for the same section. */
+    public static void queueMeshTriggeredHarvest(Level level, SectionPos position) {
+        if (!needsHarvest()) {
+            return; // matches onSectionHarvested's own gate: nothing will read the result
+        }
+        RESYNC_EXECUTOR.execute(() -> {
+            SectionHarvester.Result result = DirectSectionReader.read(level, position);
+            if (result != null) {
+                onSectionHarvested(position, result);
+            }
+        });
     }
 
     /** A loaded column retries missing geometry even if the camera and terrain meshes stay still.

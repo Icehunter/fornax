@@ -1237,7 +1237,7 @@ be restated here.
 | `BlockRendererMaterialIdMixin` | `BlockRenderer` | Set/clear the per-thread material ID around each block's model meshing call | Inject (HEAD/RETURN) |
 | `ChunkVertexFactsMixin` | `ChunkVertexEncoder.Vertex` | Stamp each copied vertex with its block's packed facts (`VertexFacts`) so quads split by translucent sorting keep them past the context clear | Inject |
 | `ClientChunkCacheVoxelLightMixin` | `ClientChunkCache.onLightUpdate` | Queue a voxel world-light refresh for light-only changes, whether or not the section is meshed or visible; does nothing with no pack active | Inject |
-| `ChunkBuilderMeshingTaskMixin` | `ChunkBuilderMeshingTask` | Harvest each section's block data for the voxel grid the moment Sodium (re)builds it, piggybacking on Sodium's own change detection (background worker thread, per rebuild, never per frame) | Inject |
+| `ChunkBuilderMeshingTaskMixin` | `ChunkBuilderMeshingTask` | Queue each section's voxel-grid harvest the moment Sodium (re)builds it, piggybacking on Sodium's own change detection; the harvest itself runs on a dedicated background thread (`VoxelWindow.queueMeshTriggeredHarvest`), never inline on Sodium's own meshing thread | Inject |
 | `FluidRendererMaterialIdMixin` | `DefaultFluidRenderer` | Set/clear the per-thread material ID around each block's fluid-surface meshing call (the `renderModel`-parallel path for water/lava quads) | Inject (HEAD/RETURN) |
 | `CompactChunkVertexMixin` | `ChunkMeshFormats` | Substitute the engine's own vertex format for the stock compact format | Redirect |
 | `DefaultChunkRendererGeometryStorageMixin` | `DefaultChunkRenderer` | Route shadow-pass draws to read the already-built SOLID/CUTOUT geometry storage instead of the Fornax-only shadow pass's own (which Sodium never meshes) | Redirect x2 |
@@ -2463,6 +2463,20 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
   to reset `WaterSurfaceTracker` on exactly this discontinuity; both accumulators' resets are called
   from that same guard so a portal trip or rejoining a world doesn't read as 20 seconds of drying
   out or a slow mist fade from yesterday's value.
+- **A voxel-harvest model query must never run inline on Sodium's own meshing thread, in the same
+  task that resolves the section's real quads.** `SectionHarvester`/`FaceColorResolver` resolve a
+  block's model via `BlockStateModel.collectParts`, the same query point a connected-texture mod
+  hooks. Running that query inline, in the same Sodium chunk-build task that later resolves the
+  section's real per-position quads through the same mod, breaks the mod's output for the real
+  render, on every freshly (re)meshed section. `ChunkBuilderMeshingTaskMixin` only queues the
+  harvest; `VoxelWindow.queueMeshTriggeredHarvest` runs it on the same dedicated background thread
+  the chunk-load-triggered harvest already uses (`DirectSectionReader.read`, whose own doc states
+  "a bootstrap read and a mesh-driven harvest must come out the same colour"), so the model query
+  never overlaps with Sodium's own resolve for the same section. Clearing a `BlockState`-keyed
+  color cache in `FaceColorResolver` is necessary but not sufficient on its own: it stops a stale
+  colour from replaying, but not the query from running inline on every fresh mesh.
+  `VoxelWindow.needsHarvest()` gates the harvest before it is queued, so the no-op default state
+  (no pack active) never queues one at all.
 
 ### When a voxel section counts as known
 

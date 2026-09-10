@@ -45,9 +45,11 @@ class VoxelHarvestLifecycleContractTest {
                 "src/main/java/dev/icehunter/fornax/voxel/SectionHarvester.java"));
         assertTrue(harvester.contains("updated, sourceSummary, harvestGeneration, sourceEvidence"),
                 "light-only refresh must retain geometry evidence and its captured generations");
-        String sodium = Files.readString(Path.of(
-                "src/main/java/dev/icehunter/fornax/mixin/sodium/ChunkBuilderMeshingTaskMixin.java"));
-        assertTrue(sodium.contains("if (result != null)"), "expected cancellation is not a harvest failure");
+        // ChunkBuilderMeshingTaskMixin queues the harvest onto VoxelWindow.queueMeshTriggeredHarvest
+        // instead of calling harvestCurrent inline; the null-check lives in that method's callback.
+        String voxelWindow = Files.readString(Path.of(
+                "src/main/java/dev/icehunter/fornax/voxel/VoxelWindow.java"));
+        assertTrue(voxelWindow.contains("if (result != null) {"), "expected cancellation is not a harvest failure");
     }
 
     @Test

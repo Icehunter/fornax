@@ -1,17 +1,14 @@
 package dev.icehunter.fornax.mixin.sodium;
 
-import dev.icehunter.fornax.FornaxMod;
-import dev.icehunter.fornax.voxel.SectionHarvester;
 import dev.icehunter.fornax.voxel.VoxelWindow;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildContext;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.tasks.ChunkBuilderMeshingTask;
 import net.caffeinemc.mods.sodium.client.util.task.CancellationToken;
 import net.caffeinemc.mods.sodium.client.world.cloned.ChunkRenderContext;
-import net.caffeinemc.mods.sodium.client.world.cloned.ClonedChunkSection;
+import net.minecraft.client.Minecraft;
 import net.minecraft.core.SectionPos;
-import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.chunk.PalettedContainerRO;
+import net.minecraft.world.level.Level;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -19,12 +16,18 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Harvests each section's real block data for the voxel grid the moment Sodium (re)builds it --
- * reusing Sodium's own change-detection (a block edit already triggers a rebuild; this just piggybacks
- * on that event) rather than building a second one. Runs on Sodium's background chunk-build worker
- * thread, once per section (re)build, never per frame. It sits just after BlockRenderCache.init:
- * at the head of execute the slice still holds the previous task, and the tint and light need this
- * one.
+ * Queues each section's voxel-grid harvest the moment Sodium (re)builds it, reusing Sodium's own
+ * change detection (a block edit already triggers a rebuild; this piggybacks on that event) rather
+ * than building a second one. Runs {@link VoxelWindow#queueMeshTriggeredHarvest} on a dedicated
+ * background thread, never inline on Sodium's own chunk-build worker thread.
+ *
+ * <p><b>Must not harvest inline, on Sodium's own meshing thread, using Sodium's own build data.</b>
+ * The harvest query goes into the block-state model manager, the same query point a connected-texture
+ * mod hooks. The same Sodium chunk-build task, later in that same method, resolves the section's real
+ * per-position quads through that same mod. Running the harvest query inline there breaks the mod's
+ * output for the real render, on every section Sodium (re)meshes. Queuing onto {@link VoxelWindow}'s
+ * dedicated thread instead keeps the harvest's model query from ever overlapping with Sodium's own
+ * resolve for the same section; see that method's own doc and {@code docs/ARCHITECTURE.md} section 12.
  *
  * <p><b>Injection target note:</b> this method exists twice in the compiled class due to generic
  * erasure -- the real method returning {@code ChunkBuildOutput}, and a compiler-generated bridge
@@ -50,37 +53,16 @@ public abstract class ChunkBuilderMeshingTaskMixin {
                     shift = At.Shift.AFTER))
     private void fornax$harvestSection(ChunkBuildContext buildContext, CancellationToken cancellationToken,
                                         CallbackInfoReturnable<ChunkBuildOutput> cir) {
-        SectionPos origin = this.renderContext.getOrigin();
-        ClonedChunkSection[] neighborhood = this.renderContext.getSections();
-        ClonedChunkSection center = findCenter(neighborhood, origin);
-        if (center == null) {
-            return; // shouldn't happen (the task's own origin section is always present), but never throw from a mixin hook
+        // No pack has attached a voxel-grid registry, or the window has zero radius: nothing will
+        // ever read this section's harvest, so skip queuing it entirely. This is also the only way
+        // to keep this hook a true no-op in the documented "no pack active" default state.
+        if (!VoxelWindow.needsHarvest()) {
+            return;
         }
-
-        PalettedContainerRO<BlockState> blockData = center.getBlockData();
-        // Never throw from this hook. It runs inside Sodium's own execute(), so a throw leaves the
-        // section undrawn and its depth reads 0, like open sky. harvest() walks real baked models
-        // through Minecraft's model APIs and can throw on a block state this code has not seen; a
-        // caught failure costs one section's voxel data until the next rebuild.
-        try {
-            // Sodium's own world slice. Without it grass, leaves and vines are stored atlas-grey.
-            SectionHarvester.Result result = SectionHarvester.harvestCurrent(blockData,
-                    buildContext.cache.getWorldSlice(),
-                    origin.minBlockX(), origin.minBlockY(), origin.minBlockZ());
-            if (result != null) VoxelWindow.onSectionHarvested(origin, result);
-        } catch (Throwable t) {
-            FornaxMod.LOGGER.error("Voxel harvest failed for section {} -- Sodium's own mesh build "
-                    + "still proceeds, but this section's voxel occupancy/shadow data stays stale "
-                    + "until the next successful (re)harvest", origin, t);
+        Level level = Minecraft.getInstance().level;
+        if (level == null) {
+            return; // never reached mid-frame in practice; never throw from a mixin hook regardless
         }
-    }
-
-    private static ClonedChunkSection findCenter(ClonedChunkSection[] neighborhood, SectionPos origin) {
-        for (ClonedChunkSection section : neighborhood) {
-            if (section.getPosition().equals(origin)) {
-                return section;
-            }
-        }
-        return null;
+        VoxelWindow.queueMeshTriggeredHarvest(level, this.renderContext.getOrigin());
     }
 }

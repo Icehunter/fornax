@@ -14,10 +14,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
-import java.util.EnumMap;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.ToIntFunction;
 
 /**
@@ -25,28 +22,21 @@ import java.util.function.ToIntFunction;
  * atlas texel data -- not a single representative sprite, and not a shader-side sample. This is the
  * expensive part of voxel harvesting, and per the harvest algorithm's design, only ever called for
  * faces {@link FaceExposure#isExposed} has already said are worth resolving.
+ *
+ * <p><b>Never cache a result here keyed only by {@link BlockState}.</b> {@link
+ * net.minecraft.client.renderer.block.dispatch.BlockStateModel#collectParts} resolves through
+ * whatever model provider is installed, including a connected-texture mod's: the same state can
+ * legally bake different quads (different atlas sprite) at different world positions, depending on
+ * neighbor context. A cache keyed by state alone freezes the first resolution, right or wrong,
+ * whatever context happened to be live for that call, and replays it everywhere that state occurs
+ * for the rest of the session, which is wrong for exactly the packs and mods this class must stay
+ * correct for. Resolve fresh on every call instead.
  */
 public final class FaceColorResolver {
     private static final long HARVEST_SEED = 0L; // fixed seed: harvesting must be deterministic
                                                    // frame-to-frame for the same block, not re-rolled
 
-    /** One quad's real average color per texel, with no tint, plus whether it takes the layer-0
-     * biome tint. This is the full cost {@link #averageQuadColor} pays, cached so re-harvesting the
-     * same block state never walks its sprite's texels again. Tint changes by harvest spot (biome),
-     * so it is added after the cache lookup, not stored in the cached value. */
-    private record QuadColor(int color, boolean tinted) { }
-
-    /** Per-state, per-face cached quad colors. Cleared on block-atlas retirement (reload or close) by
-     * {@link VoxelHarvestLifecycle#onBlockAtlasRetired}, since a cached color is only valid for the
-     * exact atlas texels it was sampled from. */
-    private static final ConcurrentHashMap<BlockState, Map<Direction, List<QuadColor>>> COLOR_CACHE =
-            new ConcurrentHashMap<>();
-
     private FaceColorResolver() {
-    }
-
-    static void clearCache() {
-        COLOR_CACHE.clear();
     }
 
     /** Returns a packed {@code 0xAARRGGBB} average over every quad this block's real model bakes for
@@ -58,63 +48,10 @@ public final class FaceColorResolver {
 
     /** Layer-zero biome tint is applied only to quads that request that layer, before averaging. */
     public static int resolve(BlockState state, Direction face, int tint) {
-        List<QuadColor> quads = COLOR_CACHE
-                .computeIfAbsent(state, FaceColorResolver::computeQuadColors)
-                .getOrDefault(face, List.of());
-        return combine(quads, tint);
-    }
-
-    /** Walks {@code state}'s real baked model once for all six faces, instead of once per face,
-     * which is what six separate {@link #resolve} calls from {@link SectionHarvester#buildEntry}
-     * would cost. Reads every quad's real atlas texels, the work {@code averageQuadColor} does,
-     * paid once per block state for as long as the atlas lasts. */
-    private static Map<Direction, List<QuadColor>> computeQuadColors(BlockState state) {
         BlockStateModel model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
         List<BlockStateModelPart> parts = new ArrayList<>();
         model.collectParts(RandomSource.create(HARVEST_SEED), parts);
-
-        Map<Direction, List<QuadColor>> byFace = new EnumMap<>(Direction.class);
-        for (Direction face : Direction.values()) {
-            List<QuadColor> quads = new ArrayList<>();
-            for (BlockStateModelPart part : parts) {
-                for (BakedQuad quad : part.getQuads(face)) {
-                    quads.add(new QuadColor(averageQuadColor(quad), quad.materialInfo().tintIndex() == 0));
-                }
-                for (BakedQuad quad : part.getQuads(null)) {
-                    if (quad.direction() == face) {
-                        quads.add(new QuadColor(averageQuadColor(quad), quad.materialInfo().tintIndex() == 0));
-                    }
-                }
-            }
-            byFace.put(face, quads);
-        }
-        return byFace;
-    }
-
-    /** Combines cached, untinted quad colors into the same weighted average {@link #resolve} used
-     * to return directly. This is the cheap half of the math, per quad rather than per texel, and
-     * still runs every call since {@code tint} changes by harvest spot (biome). */
-    private static int combine(List<QuadColor> quads, int tint) {
-        long sumA = 0, weightedSumR = 0, weightedSumG = 0, weightedSumB = 0;
-        int quadCount = 0;
-        for (QuadColor quad : quads) {
-            int avg = quad.color();
-            if (tint != -1 && quad.tinted()) {
-                avg = (avg & 0xFF000000)
-                        | ((((avg >>> 16) & 0xFF) * ((tint >>> 16) & 0xFF) / 255) << 16)
-                        | ((((avg >>> 8) & 0xFF) * ((tint >>> 8) & 0xFF) / 255) << 8)
-                        | ((avg & 0xFF) * (tint & 0xFF) / 255);
-            }
-            int a = (avg >>> 24) & 0xFF;
-            weightedSumR += (long) ((avg >> 16) & 0xFF) * a;
-            weightedSumG += (long) ((avg >> 8) & 0xFF) * a;
-            weightedSumB += (long) (avg & 0xFF) * a;
-            sumA += a;
-            quadCount++;
-        }
-        if (quadCount == 0 || sumA == 0) return 0;
-        return ((int) (sumA / quadCount) << 24) | ((int) (weightedSumR / sumA) << 16)
-                | ((int) (weightedSumG / sumA) << 8) | (int) (weightedSumB / sumA);
+        return resolve(parts, face, tint, FaceColorResolver::averageQuadColor);
     }
 
     // Leaves and inside faces are unculled, so walk both lists and sort the unculled ones into the

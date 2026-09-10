@@ -89,7 +89,10 @@ class VoxelLightingPolicyTest {
         int acquire = harvester.indexOf("VoxelHarvestLifecycle.tryAcquire()", active);
         int snapshot = harvester.indexOf("MaterialScalarsHolder.current()", active);
         assertTrue(active >= 0 && acquire > active && snapshot > acquire);
-        for (String filename : List.of("voxel/DirectSectionReader.java", "mixin/sodium/ChunkBuilderMeshingTaskMixin.java")) {
+        // ChunkBuilderMeshingTaskMixin queues onto VoxelWindow.queueMeshTriggeredHarvest instead of
+        // calling harvestCurrent directly. DirectSectionReader.read is the only remaining external
+        // caller.
+        for (String filename : List.of("voxel/DirectSectionReader.java")) {
             String caller = Files.readString(Path.of("src/main/java/dev/icehunter/fornax", filename));
             assertTrue(caller.contains("SectionHarvester.harvestCurrent("));
             assertFalse(caller.contains("MaterialScalarsHolder.current()"));

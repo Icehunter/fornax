@@ -66,22 +66,25 @@ class SectionHarvestTintTest {
     }
 
     /**
-     * The Sodium hook has to hand the harvest a world slice.
+     * The mesh-triggered harvest has to hand the harvester a real tint source.
      *
      * <p>Without one the harvest still runs and still succeeds, and every grass block, leaf and vine
      * is stored as the grey the atlas holds. Nothing fails, nothing logs; the colours are simply
      * wrong wherever they are later read. The two-argument overload exists for callers that have no
-     * world to ask, so a hand back to it here would be silent. Checked as source text because the
-     * call needs a live client to run.
+     * world to ask, so a hand back to it here would be silent. {@code ChunkBuilderMeshingTaskMixin}
+     * queues onto {@code VoxelWindow.queueMeshTriggeredHarvest} instead of calling {@code
+     * harvestCurrent} itself; {@code DirectSectionReader.read} is the actual call site this test
+     * pins. Checked as source text because the call needs a live client to run.
      */
     @Test
-    void theSodiumHookSuppliesAWorldSlice() throws IOException {
-        String hook = Files.readString(Path.of(
-                "src/main/java/dev/icehunter/fornax/mixin/sodium/ChunkBuilderMeshingTaskMixin.java"));
-        org.junit.jupiter.api.Assertions.assertTrue(hook.contains("getWorldSlice()"),
-                "the harvest call must pass Sodium's world slice, or every tinted block is stored grey");
+    void theMeshTriggeredHarvestSuppliesARealTintSource() throws IOException {
+        String reader = Files.readString(Path.of(
+                "src/main/java/dev/icehunter/fornax/voxel/DirectSectionReader.java"));
         org.junit.jupiter.api.Assertions.assertTrue(
-                hook.contains("origin.minBlockX(), origin.minBlockY(), origin.minBlockZ()"),
+                reader.contains("level instanceof BlockAndTintGetter tint ? tint : null"),
+                "the harvest call must pass a real tint source, or every tinted block is stored grey");
+        org.junit.jupiter.api.Assertions.assertTrue(
+                reader.contains("position.minBlockX(), position.minBlockY(), position.minBlockZ()"),
                 "the harvest call must pass the section corner, or the tint is read at the wrong place");
     }
 
