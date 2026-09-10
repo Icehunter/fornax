@@ -406,6 +406,9 @@ public final class BrickGridUpload {
         if (tier == 0 && registry.isEnabledBufferTarget(VoxelSourceSummary.TARGET)) {
             registry.ensureBufferSize(VoxelSourceSummary.TARGET, VoxelSourceInventory.bufferBytes(diameter));
         }
+        if (tier == 0 && registry.isEnabledBufferTarget(VoxelSourceWindow.TARGET)) {
+            registry.ensureBufferSize(VoxelSourceWindow.TARGET, VoxelSourceWindow.BYTE_SIZE);
+        }
         if (tier == 0 && registry.isEnabledBufferTarget(VoxelEmitterPool.TARGET)) {
             registry.ensureBufferSize(VoxelEmitterPool.TARGET, VoxelEmitterPool.BYTE_SIZE);
         }

@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Pins the queue-family sharing prerequisite for graph storage-image synchronization. */
+/** Pins how the constructor builds a sampled/storage image, so a later change that breaks it is caught. */
 final class VulkanGpuTextureStorageSharingMixinContractTest {
     private static final Path MIXINS = Path.of("src/main/resources/fornax.mixins.json");
     private static final Path SOURCE = Path.of("src/main/java/dev/icehunter/fornax/mixin/vulkan/"
@@ -35,7 +35,7 @@ final class VulkanGpuTextureStorageSharingMixinContractTest {
                 "removing the load-bearing mixin registration must fail the contract");
 
         String disconnectedComputeFamily = source.replace(
-                "ints(graphicsFamily, computeFamily)", "ints(graphicsFamily, graphicsFamily)");
+                "graphicsFamily, computeFamily)", "graphicsFamily, graphicsFamily)");
         assertFalse(validate(mixins, disconnectedComputeFamily, registry).isEmpty(),
                 "disconnecting the compute-family index must fail the contract");
 
@@ -69,21 +69,12 @@ final class VulkanGpuTextureStorageSharingMixinContractTest {
         if (body == null) {
             return errors;
         }
-        require(errors, Pattern.compile(
-                "if\\s*\\(.*?usage\\(\\)\\s*&\\s*FornaxTextureUsage\\.STORAGE.*?==\\s*0\\s*\\)"
-                        + "\\s*\\{\\s*return\\s+info\\s*;\\s*\\}", Pattern.DOTALL)
-                .matcher(body).find(), "non-storage images are not excluded by the STORAGE usage bit");
         require(errors, body.contains("int graphicsFamily = device.graphicsQueue().queueFamilyIndex();"),
                 "graphics family is not read from the owning VulkanDevice");
         require(errors, body.contains("int computeFamily = device.computeQueue().queueFamilyIndex();"),
                 "compute family is not read from the owning VulkanDevice");
-        require(errors, Pattern.compile(
-                "if\\s*\\(\\s*graphicsFamily\\s*!=\\s*computeFamily\\s*\\)\\s*\\{"
-                        + ".*?info\\.sharingMode\\(VK13\\.VK_SHARING_MODE_CONCURRENT\\)"
-                        + "\\s*\\.pQueueFamilyIndices\\(MemoryStack\\.stackGet\\(\\)"
-                        + "\\.ints\\(graphicsFamily,\\s*computeFamily\\)\\)\\s*;.*?\\}",
-                Pattern.DOTALL).matcher(body).find(),
-                "distinct families are not connected to CONCURRENT sharing with both indices");
+        require(errors, body.contains("return VulkanTextureSharing.configure(info, ((GpuTexture) (Object) this).usage(), graphicsFamily, computeFamily);"),
+                "sampled/storage allocation policy is not connected to actual image usage and both device families");
 
         String reconcile = functionBody(registry, "private void reconcile");
         require(errors, reconcile != null, "TargetRegistry.reconcile body is missing");

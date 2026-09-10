@@ -11,8 +11,12 @@ public final class VoxelSourceEvidence {
     public static final VoxelSourceEvidence UNAVAILABLE = new VoxelSourceEvidence(null, 0, 0, false, false);
     public static final VoxelSourceEvidence EMPTY = new VoxelSourceEvidence(new int[]{0}, 0, 0, false, false);
     // Four raw vanilla emission bits, one non-empty bit, then four masks in direction-ID order.
-    // Each mask needs six bits, one per direction. The whole layout uses 29 bits.
+    // Each mask needs six bits, one per direction. The direction layout fills 29 bits; bit 29
+    // marks a known-zero source on its own.
     private static final int NONEMPTY = 1 << 4;
+    // Bit 29 records proof that a raw quad is absent, without touching the direction masks used
+    // for diagnostics.
+    private static final int KNOWN_ZERO_SOURCE = 1 << 29;
     private static final int SUPPORTED_SHIFT = 5, AUTHORED_SHIFT = 11, MISSING_SHIFT = 17, UNKNOWN_SHIFT = 23;
     private static final int FACE_MASK = (1 << 6) - 1;
     private final int[] palette;
@@ -33,6 +37,7 @@ public final class VoxelSourceEvidence {
     public boolean incompletePalette() { return this.incompletePalette; }
     public int paletteSize() { return available() ? this.palette.length : 0; }
     public int paletteBytes() { return paletteSize() * Integer.BYTES; }
+    public boolean knownZeroSource(int entry) { return (word(entry) & NONEMPTY) == 0 || (word(entry) & KNOWN_ZERO_SOURCE) != 0; }
     public int intrinsicEmission(int entry) { return word(entry) & 15; }
     public int supportedMask(int entry) { return mask(word(entry), SUPPORTED_SHIFT); }
     public int authoredMask(int entry) { return mask(word(entry), AUTHORED_SHIFT); }
@@ -83,6 +88,20 @@ public final class VoxelSourceEvidence {
                 if (summary.unknown()) word |= 1 << (UNKNOWN_SHIFT + face);
             }
             palette[size++] = word;
+        }
+
+        void add(boolean nonempty, int intrinsic, List<MaterialSourceIndex.Summary> faces, boolean knownZero) {
+            if (knownZero && intrinsic != 0)
+                throw new IllegalArgumentException("known-zero source proof requires zero raw intrinsic emission");
+            add(nonempty, intrinsic, faces);
+            if (knownZero) palette[size - 1] |= KNOWN_ZERO_SOURCE;
+        }
+
+        /** A geometry-only variant keeps the raw source evidence; cells are counted on their own. */
+        void copy(int entry) {
+            if (entry < 0 || entry >= size) throw new IllegalArgumentException("missing source evidence entry");
+            if (size == palette.length) throw new IllegalArgumentException("voxel source palette exceeds the index cap");
+            palette[size++] = palette[entry];
         }
 
         void addCell(boolean nonempty, int entry) {

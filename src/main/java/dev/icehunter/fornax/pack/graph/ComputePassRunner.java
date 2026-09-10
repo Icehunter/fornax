@@ -1,6 +1,8 @@
 package dev.icehunter.fornax.pack.graph;
 
 import dev.icehunter.fornax.FornaxMod;
+import dev.icehunter.fornax.voxel.VoxelSourceWindow;
+import dev.icehunter.fornax.voxel.VoxelWindow;
 import dev.icehunter.fornax.pack.PassSpec;
 import dev.icehunter.fornax.pipeline.FrameUniformValues;
 import dev.icehunter.fornax.pack.RawShaderImports;
@@ -512,6 +514,8 @@ public final class ComputePassRunner implements AutoCloseable {
                     boolean synchronousWait, long graphicsWaitStageMask,
                     @Nullable ComputeGraphicsWaits graphicsWaits) {
         registry.requireStorageTextureInitializationComplete(spec.name());
+        // Reject a late atlas publication before allocating/recording this raw compute submission.
+        GraphRunner.requireComputeAtlasTexturesPrepared(spec.name(), bindingOrder, registry);
         if ((globals == null && bindingOrder.contains(ParticlePassRunner.GLOBALS_INPUT))
                 || (reuseState != null && !spec.reuseWhenUnchanged().globals().isEmpty()
                 && !FrameUniformValues.CURRENT.ready())) {
@@ -561,6 +565,7 @@ public final class ComputePassRunner implements AutoCloseable {
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack).sType$Default();
                 VK13.vkBeginCommandBuffer(cmd, beginInfo);
+                if (bindingOrder.contains(VoxelSourceWindow.TARGET)) VoxelWindow.refreshSourceWindow(registry);
                 EngineBufferUploadQueue.recordForBindings(cmd, stack, registry, bindingOrder);
                 VK13.vkCmdBindPipeline(cmd, VK13.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline());
                 updateAndBindDescriptorSet(registry, cmd, descriptorSets[slotIndex], options, globals);

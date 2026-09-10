@@ -67,6 +67,21 @@ class GraphRunnerTest {
                 writer, graph, Map.of("ADVANCED_EFFECTS", 1)));
     }
 
+    @Test void computeBufferOutputsWaitForGraphicsButReadOnlyInputsDoNot() {
+        var writer = new PassSpec("writer", PassType.COMPUTE, null, null, "shaders/write.comp",
+                List.of(), List.of("field"), null, null, List.of(1, 1, 1), null, null, null);
+        for (PassType type : List.of(PassType.FULLSCREEN, PassType.PARTICLES)) {
+            var reader = new PassSpec("reader", type, null, null, "shaders/read",
+                    List.of("field"), List.of("builtin.output"), null, null, List.of(), null, null, null);
+            var graph = new GraphSpec(Map.of("field", TargetSpec.buffer("field", null,
+                    new BufferSize(4, 16))), List.of(writer, reader));
+            assertTrue(GraphRunner.computeStorageWriteNeedsGraphicsCompletion(writer, graph, Map.of()));
+            var readOnly = new PassSpec("read_only", PassType.COMPUTE, null, null, "shaders/read.comp",
+                    List.of("field"), List.of(), null, null, List.of(1, 1, 1), null, null, null);
+            assertFalse(GraphRunner.computeStorageWriteNeedsGraphicsCompletion(readOnly, graph, Map.of()));
+        }
+    }
+
     /**
      * A pass belongs here only if it never reads what graphics writes later in the same frame: the
      * shared semaphore is signalled before opaque terrain. {@code voxel_water_refl} qualifies

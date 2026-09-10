@@ -5,6 +5,7 @@ import dev.icehunter.fornax.pack.PackModel;
 import dev.icehunter.fornax.pack.graph.GraphRunner;
 import dev.icehunter.fornax.pipeline.BlockClassResolver;
 import dev.icehunter.fornax.pipeline.BlockClasses;
+import dev.icehunter.fornax.voxel.VoxelHarvestLifecycle;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
@@ -50,13 +51,14 @@ public final class MaterialResolution {
                 classes.values().stream().filter(f -> (f & BlockClasses.COAL) != 0).count());
 
         PackModel pack = GraphRunner.currentPack();
-        if (pack == null) {
-            BlockMaterials.clear();
-            MaterialScalarsHolder.install(MaterialScalars.build(List.of()));
-            return;
-        }
-        BlockMaterials.install(BlockMaterialResolver.resolve(pack.blocks(), pack.categories(), LOOKUP));
-        MaterialScalarsHolder.install(MaterialScalars.build(pack.categories().ordered()));
+        var materials = pack == null ? java.util.Map.<Block, Integer>of()
+                : BlockMaterialResolver.resolve(pack.blocks(), pack.categories(), LOOKUP);
+        var scalars = pack == null ? MaterialScalars.build(List.of())
+                : MaterialScalars.build(pack.categories().ordered(), pack.blocks().voxelLightingDefault());
+        VoxelHarvestLifecycle.publishMaterials(() -> {
+            BlockMaterials.install(materials);
+            MaterialScalarsHolder.install(scalars);
+        });
     }
 
     private static final BlockMaterialResolver.Lookup LOOKUP = new BlockMaterialResolver.Lookup() {

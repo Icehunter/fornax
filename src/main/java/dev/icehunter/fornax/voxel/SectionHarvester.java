@@ -3,6 +3,7 @@ package dev.icehunter.fornax.voxel;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.pack.material.BlockMaterials;
 import dev.icehunter.fornax.pack.material.MaterialScalars;
+import dev.icehunter.fornax.pack.material.MaterialScalarsHolder;
 import net.minecraft.client.Minecraft;
 import dev.icehunter.fornax.atlas.MaterialSourceIndex;
 import net.minecraft.client.color.block.BlockTintSource;
@@ -19,15 +20,17 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Builds one section's {@link SectionPalette} + per-voxel palette-index array from its real block
- * data. The expensive per-block-state work (shape classification, per-face color resolution) runs
- * once per DISTINCT state actually present in the section (via {@code forEachInPalette}), not once
- * per of the 4096 cells -- the cheap final pass just assigns each cell's palette index.
+ * Builds one section's {@link SectionPalette} plus a per-voxel palette-index array from its real
+ * block data. The costly per-block-state work (shape classification, per-face color pick) runs
+ * once per DISTINCT state present in the section (via {@code forEachInPalette}), not once per each
+ * of the 4096 cells. Partial opaque geometry is resolved at the real cell position: model emission
+ * can differ for two cells with the same state, once position is taken into account. Equal proven
+ * shapes share one palette entry, within the fixed cap.
  *
- * <p>Takes a {@code PalettedContainerRO<BlockState>} rather than a Sodium- or vanilla-specific type
- * deliberately: both {@code ClonedChunkSection.getBlockData()} (the edit/load trigger, Task 8) and
- * vanilla's own {@code LevelChunkSection.getStates()} (the bootstrap/resync trigger, Task 9) satisfy
- * this interface, so both triggers share this exact harvest logic with zero duplication.
+ * <p>Takes a {@code PalettedContainerRO<BlockState>} instead of a Sodium- or vanilla-specific type
+ * on purpose: both {@code ClonedChunkSection.getBlockData()} (the edit/load path) and vanilla's own
+ * {@code LevelChunkSection.getStates()} (the bootstrap/resync path) satisfy this interface, so both
+ * paths share this harvest logic with no duplication.
  */
 public final class SectionHarvester {
     /**
@@ -54,19 +57,25 @@ public final class SectionHarvester {
     private static final java.util.Set<String> CUTOUT_DROP_LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public record Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
-                         VoxelSourceSummary sourceSummary, long harvestGeneration, VoxelSourceEvidence sourceEvidence) {
+                         VoxelSourceSummary sourceSummary, long harvestGeneration, VoxelSourceEvidence sourceEvidence,
+                         VoxelSourcePolicy sourcePolicy) {
         public Result {
             java.util.Objects.requireNonNull(sourceSummary, "sourceSummary");
             java.util.Objects.requireNonNull(sourceEvidence, "sourceEvidence");
+            java.util.Objects.requireNonNull(sourcePolicy, "sourcePolicy");
             if (lightmap.length != VoxelLightmap.BYTES_PER_SLOT)
                 throw new IllegalArgumentException("voxel lightmap must contain one byte per section cell");
+        }
+        public Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
+                      VoxelSourceSummary sourceSummary, long harvestGeneration, VoxelSourceEvidence sourceEvidence) {
+            this(paletteIndices, palette, lightmap, sourceSummary, harvestGeneration, sourceEvidence, VoxelSourcePolicy.ALL);
         }
         public Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
                       VoxelSourceSummary sourceSummary, long harvestGeneration) {
             this(paletteIndices, palette, lightmap, sourceSummary, harvestGeneration, VoxelSourceEvidence.UNAVAILABLE);
         }
         public Result withLightmap(byte[] updated) {
-            return new Result(paletteIndices, palette, updated, sourceSummary, harvestGeneration, sourceEvidence);
+            return new Result(paletteIndices, palette, updated, sourceSummary, harvestGeneration, sourceEvidence, sourcePolicy);
         }
         public Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
                       VoxelSourceSummary sourceSummary) {
@@ -81,6 +90,19 @@ public final class SectionHarvester {
     }
 
     private SectionHarvester() {
+    }
+
+    /** The production entry point reads the active material policy only after it gets its lease.
+     * Reading it in the caller instead would let old scalars pick up a new generation after a tag
+     * reload. */
+    public static @Nullable Result harvestCurrent(PalettedContainerRO<BlockState> blockData,
+                                                  @Nullable BlockAndTintGetter tintSource,
+                                                  int originX, int originY, int originZ) {
+        try (var lease = VoxelHarvestLifecycle.tryAcquire()) {
+            if (lease == null) return null;
+            return harvestLeased(blockData, MaterialScalarsHolder.current(), tintSource,
+                    originX, originY, originZ, lease.generation());
+        }
     }
 
     /** No tint: grass, leaves, vines and water come back atlas-grey. Pass a tint if you have one. */
@@ -111,6 +133,7 @@ public final class SectionHarvester {
                 ? null : new BlockPos(originX + 8, originY + 8, originZ + 8);
         Map<BlockState, Integer> indexByState = new IdentityHashMap<>();
         List<SectionPalette.Entry> entries = new ArrayList<>();
+        VoxelSourcePolicy.Builder sourcePolicy = new VoxelSourcePolicy.Builder();
         boolean[] overflowLogged = {false};
         // One immutable material generation per harvest. Upload readers reject it after a reload.
         boolean sourceDiagnostics = VoxelSourceSummary.isEnabled();
@@ -136,16 +159,34 @@ public final class SectionHarvester {
                 return;
             }
             indexByState.put(state, entries.size());
+            sourcePolicy.add(materialScalars.voxelLighting(BlockMaterials.idForState(state)));
             entries.add(buildEntry(state, materialScalars, biomeTint(state, tintSource, tintAt),
                     sourceIndex, sourceEntries, sourceEvidence));
         });
 
+        // Final model emission can depend on neighbors and position. Only PARTIAL cells pay this
+        // cost; reusable geometry keys and exact shape matching stay local to the section.
+        var modelShapes = new VoxelModelShape.Resolver();
+        var shapeVariants = new VoxelPaletteShapes(entries, baseIndex -> {
+            sourcePolicy.copy(baseIndex);
+            if (sourceEntries != null) {
+                sourceEntries.add(sourceEntries.get(baseIndex));
+                sourceEvidence.copy(baseIndex);
+            }
+        });
+        var modelAt = new BlockPos.MutableBlockPos();
         byte[] paletteIndices = new byte[16 * 16 * 16];
         for (int y = 0; y < 16; y++) {
             for (int z = 0; z < 16; z++) {
                 for (int x = 0; x < 16; x++) {
                     BlockState state = blockData.get(x, y, z);
                     Integer index = indexByState.get(state);
+                    if (index == null) sourcePolicy.markIncomplete();
+                    if (index != null && tintSource != null
+                            && entries.get(index).shapeKind() == VoxelShapeKind.PARTIAL) {
+                        modelAt.set(originX + x, originY + y, originZ + z);
+                        index = shapeVariants.refine(index, modelShapes.resolve(state, tintSource, modelAt));
+                    }
                     // A state that was skipped above (palette overflow past MAX_PALETTE_ENTRIES) has no
                     // entry here -- fall back to index 0 deterministically rather than unboxing null.
                     paletteIndices[(y << 8) | (z << 4) | x] = (byte) (index != null ? index : 0);
@@ -166,13 +207,18 @@ public final class SectionHarvester {
         // overflowLogged[0] is the harvester's real "more than MAX_PALETTE_ENTRIES distinct states
         // were present" signal, not just entries.size() == MAX_PALETTE_ENTRIES (a section that
         // happens to have EXACTLY MAX_PALETTE_ENTRIES distinct states with no overflow would also report).
-        PaletteSizeHistogram.record(entries.size(), overflowLogged[0]);
+        if (shapeVariants.overflowed()) {
+            FornaxMod.LOGGER.warn("[Fornax] Section ({}, {}, {}) exhausted its {} voxel palette entries; "
+                    + "additional contextual shapes retain their selection-shape fallback",
+                    originX, originY, originZ, MAX_PALETTE_ENTRIES);
+        }
+        PaletteSizeHistogram.record(entries.size(), overflowLogged[0] || shapeVariants.overflowed());
 
         return new Result(paletteIndices, new SectionPalette(entries),
                 VoxelLightmap.capture(tintSource, originX, originY, originZ),
                 sourceInventory == null ? VoxelSourceSummary.EMPTY : sourceInventory.finish(overflowLogged[0]),
                 harvestGeneration, sourceEvidence == null ? VoxelSourceEvidence.UNAVAILABLE
-                        : sourceEvidence.finish(overflowLogged[0]));
+                        : sourceEvidence.finish(overflowLogged[0]), sourcePolicy.finish(overflowLogged[0]));
     }
 
     /**
@@ -311,7 +357,8 @@ public final class SectionHarvester {
             var sourceFaces = VoxelFaceTexture.resolveSources(state, effectiveKind, tint, sourceIndex);
             faceTextures = sourceFaces.textureWords();
             sourceEntries.add(VoxelSourceSummary.Entry.from(sourceFaces.summaries()));
-            sourceEvidence.add(true, state.getLightEmission(), sourceFaces.summaries());
+            sourceEvidence.add(true, state.getLightEmission(), sourceFaces.summaries(),
+                    state.getLightEmission() == 0 && sourceFaces.materialsKnownNonpositive());
         }
         return new SectionPalette.Entry(effectiveKind, effectiveBoxes, faceColors, emissiveStrength,
                 lightTransmissive, emissionColor, cutout, uvRect, extinction,

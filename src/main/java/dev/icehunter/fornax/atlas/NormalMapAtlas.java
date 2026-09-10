@@ -114,6 +114,10 @@ public final class NormalMapAtlas implements AutoCloseable {
 
     /**
      * GPU lifetime is owned by {@link LabPbrAtlasPair}; neither lane can be installed separately.
+     * Graphics and compute can read a published lane. The code that moves to the next generation
+     * waits for both queues to finish before this pair is retired, so this close method does not
+     * wait again. An unpublished, half-built atlas can close right away: no draw or compute pass
+     * can use it yet.
      */
     @Override
     public void close() {

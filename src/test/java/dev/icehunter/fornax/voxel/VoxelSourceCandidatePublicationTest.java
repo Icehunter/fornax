@@ -145,7 +145,8 @@ class VoxelSourceCandidatePublicationTest {
         String harvest = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/SectionHarvester.java"));
         assertTrue(harvest.contains("sourceDiagnostics ? new VoxelSourceEvidence.Builder() : null"));
         assertTrue(harvest.contains("sourceEvidence.addCell(!state.isAir(), index == null ? -1 : index)"));
-        assertTrue(harvest.contains("sourceEvidence.add(true, state.getLightEmission(), sourceFaces.summaries())"));
+        assertTrue(harvest.contains("sourceEvidence.add(true, state.getLightEmission(), sourceFaces.summaries(),"));
+        assertTrue(harvest.contains("state.getLightEmission() == 0 && sourceFaces.materialsKnownNonpositive()"));
         String window = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/VoxelWindow.java"));
         assertTrue(window.contains("previous.withLightmap(sample.getValue())"));
         String debug = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/pass/voxel/VoxelDebugRaymarchPass.java"));

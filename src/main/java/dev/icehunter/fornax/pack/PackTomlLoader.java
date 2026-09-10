@@ -383,7 +383,8 @@ public final class PackTomlLoader {
 
     public static BlocksSpec loadBlocks(Reader reader, String file) {
         Config root = parse(reader, file);
-        TomlSupport.rejectUnknownKeys(root, Set.of("categories"), file);
+        TomlSupport.rejectUnknownKeys(root, Set.of("categories", "lighting"), file);
+        Boolean voxelLighting = parseVoxelLighting(root, "lighting", file);
         Map<String, CategorySpec> cats = new LinkedHashMap<>();
         if (root.contains("categories")) {
             Config c = requireTable(root.get("categories"), "categories", file);
@@ -398,7 +399,7 @@ public final class PackTomlLoader {
                 }
                 TomlSupport.rejectUnknownKeys(spec,
                         Set.of("blocks", "smoothness", "f0", "emissive", "force_override", "glsl",
-                                "cutout", "cross"), file);
+                                "cutout", "cross", "lighting"), file);
                 String f0 = TomlSupport.getStringOrNull(spec, "f0", file);
                 if (f0 != null && !"metal_albedo".equals(f0)) {
                     throw new FornaxPackError(file, "categories." + name + ".f0",
@@ -413,10 +414,26 @@ public final class PackTomlLoader {
                         f0,
                         parseEmissive(spec, name, file),
                         TomlSupport.getBoolean(spec, "cutout", false, file),
-                        TomlSupport.getBoolean(spec, "cross", false, file)));
+                        TomlSupport.getBoolean(spec, "cross", false, file),
+                        parseVoxelLighting(spec, "categories." + name + ".lighting", file)));
             }
         }
-        return new BlocksSpec(cats);
+        return new BlocksSpec(cats, voxelLighting == null || voxelLighting);
+    }
+
+    private static @Nullable Boolean parseVoxelLighting(Config owner, String keyPath, String file) {
+        if (!owner.contains("lighting")) return null;
+        Config table = requireTable(owner.get("lighting"), keyPath, file);
+        for (Config.Entry entry : table.entrySet()) {
+            if (!"voxel".equals(entry.getKey())) {
+                throw new FornaxPackError(file, keyPath + "." + entry.getKey(), "unknown lighting key");
+            }
+        }
+        if (!table.contains("voxel")) return null;
+        if (!(table.get("voxel") instanceof Boolean value)) {
+            throw new FornaxPackError(file, keyPath + ".voxel", "must be a boolean");
+        }
+        return value;
     }
 
     private static SmoothnessSpec parseSmoothness(Config cat, String name, String file) {

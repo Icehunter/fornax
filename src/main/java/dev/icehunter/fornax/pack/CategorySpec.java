@@ -23,4 +23,12 @@ import java.util.List;
 public record CategorySpec(String name, List<String> blocks, boolean forceOverride,
                            @Nullable String glsl, @Nullable SmoothnessSpec smoothness,
                            @Nullable String f0, @Nullable EmissiveSpec emissive,
-                           boolean cutout, boolean cross) {}
+                           boolean cutout, boolean cross, @Nullable Boolean voxelLighting) {
+    /** Absent source policy inherits the pack-level lighting.voxel default. */
+    public CategorySpec(String name, List<String> blocks, boolean forceOverride,
+                        @Nullable String glsl, @Nullable SmoothnessSpec smoothness,
+                        @Nullable String f0, @Nullable EmissiveSpec emissive,
+                        boolean cutout, boolean cross) {
+        this(name, blocks, forceOverride, glsl, smoothness, f0, emissive, cutout, cross, null);
+    }
+}

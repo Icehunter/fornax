@@ -45,6 +45,7 @@ import dev.icehunter.fornax.pass.voxel.VoxelDebugRaymarchPass;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
 import dev.icehunter.fornax.atlas.MaterialSourceIndex;
 import dev.icehunter.fornax.voxel.VoxelSourceSummary;
+import dev.icehunter.fornax.voxel.VoxelSourceWindow;
 import dev.icehunter.fornax.voxel.VoxelSectionState;
 import dev.icehunter.fornax.voxel.BrickGridUpload;
 import dev.icehunter.fornax.voxel.PrecipClipmapUpload;
@@ -122,6 +123,7 @@ public final class GraphRunner {
     // graph pass is allowed to bind that field until its complete current window reached the GPU.
     private static boolean coarsePrecipitationRequired;
     private static boolean coarsePrecipitationReady = true;
+    private static final AtlasTextureInitialization<GpuTextureView> computeAtlasTextures = new AtlasTextureInitialization<>();
     // Pack-shipped static texture assets ([textures.*] in graph.toml, e.g. waterWaveNormal) --
     // bookkeeping-only at rebuild() (mirrors `registry` above: rebuild() can run before any GPU
     // device exists), actual decode+upload deferred to ensureLoaded() in prepare(), torn down
@@ -772,7 +774,8 @@ public final class GraphRunner {
         // history target. Idempotent: harmless if called again on a graph that already has it.
         GraphSpec graphWithSceneHistory = SceneHistory.injectInto(pack.graph());
         registry = TargetRegistry.create(graphWithSceneHistory, compileValues);
-        VoxelSourceSummary.setEnabled(registry.isEnabledBufferTarget(VoxelSourceSummary.TARGET));
+        VoxelSourceSummary.setEnabled(registry.isEnabledBufferTarget(VoxelSourceSummary.TARGET)
+                || registry.isEnabledBufferTarget(VoxelSourceWindow.TARGET));
         packTextureRegistry = PackTextureRegistry.create(pack.root(), pack.graph().textures());
         packDeclaresDepthCopyback = computePackDeclaresDepthCopyback(graphWithSceneHistory);
 
@@ -1062,6 +1065,9 @@ public final class GraphRunner {
         coarsePrecipitationReady = !coarsePrecipitationRequired;
         if (r != null) {
             r.ensureSize(width, height, outputWidth, outputHeight);
+            // Atlas rebuilds and lazy neutral views only RECORD graphics uploads. Finish any
+            // changed atlas here, before compute takes over pre-opaque work or a terrain pass runs.
+            prepareComputeAtlasTextures(r);
             // New storage images still have transitions/clears recorded on graphics. Finish that
             // batch before frame bindings or compute handoffs; unchanged frames do not submit/wait.
             r.completeStorageTextureInitialization();
@@ -1178,7 +1184,9 @@ public final class GraphRunner {
         if (runnersBuilt && registry != null && VoxelSourceSummary.isEnabled()) {
             VoxelWindow.synchronizeSourceGeneration(registry, MaterialSourceIndex.current().generation());
         }
-        if (runnersBuilt && registry != null) VoxelWindow.prepareEmitterPool(registry);
+        if (runnersBuilt && registry != null) {
+            VoxelWindow.prepareEmitterPool(registry);
+        }
         // AFTER ensureRunnersBuilt, which is what lazily creates optionsBuffer, and BEFORE any pass
         // binds u_PackOptions this frame. This is the only safe point to rotate the ring.
         flushPendingRuntimeValues();
@@ -1194,6 +1202,34 @@ public final class GraphRunner {
         refreshGeometryInputViews();
 
         runPreOpaqueLightingCompute(matrices, x, y, z, width, height);
+    }
+
+    private static void prepareComputeAtlasTextures(TargetRegistry targets) {
+        PackModel pack = currentPack;
+        if (pack == null) {
+            computeAtlasTextures.clear();
+            return;
+        }
+        // Prepare every compile-enabled declaration, even passes gated at runtime, so a runtime
+        // gate never has to build its neutral descriptor for the first time mid-pass.
+        List<String> inputs = pack.graph().passes().stream()
+                .filter(pass -> pass.type() == PassType.COMPUTE && enabledAtCompile(pass))
+                .flatMap(pass -> pass.inputs().stream()).distinct().toList();
+        computeAtlasTextures.prepare(inputs, name -> {
+                    GraphInputResolver.materializeAtlasFallback(name);
+                    return GraphInputResolver.resolveView(name, targets, Map.of());
+                },
+                () -> RenderSystem.getDevice().createCommandEncoder());
+    }
+
+    static void requireComputeAtlasTexturesPrepared(String passName, List<String> inputs, TargetRegistry targets) {
+        for (String name : inputs) {
+            if (AtlasTextureInitialization.requiresPreparation(name)) {
+                computeAtlasTextures.requireDeclared(passName, name);
+                computeAtlasTextures.requirePrepared(passName, name,
+                        GraphInputResolver.resolveView(name, targets, Map.of()));
+            }
+        }
     }
 
     /**
@@ -1858,7 +1894,8 @@ public final class GraphRunner {
             }
             for (String in : p.inputs()) {
                 if (in.equals(BrickGridUpload.OCCUPANCY_TARGET)
-                        || in.equals(VoxelSectionState.TARGET) || in.equals(VoxelSourceSummary.TARGET)) {
+                        || in.equals(VoxelSectionState.TARGET) || in.equals(VoxelSourceSummary.TARGET)
+                        || in.equals(VoxelSourceWindow.TARGET)) {
                     return true;
                 }
             }
@@ -2027,7 +2064,7 @@ public final class GraphRunner {
     }
 
     /**
-     * Whether a compute pass writes a storage image whose physical allocation can still be in use by
+     * Whether a compute pass writes a buffer or storage image whose allocation can still be in use by
      * an enabled graphics-queue pass. Inputs do not count: graph inputs are read-only, so concurrent
      * reads need no dependency. History suffixes intentionally collapse to the base target here:
      * after the end-of-frame swap, next frame's current image is the physical image graphics sampled
@@ -2041,7 +2078,7 @@ public final class GraphRunner {
         for (String output : writer.outputs()) {
             String base = targetBaseName(output);
             TargetSpec target = graph.targets().get(base);
-            if (target == null || !target.storage()) {
+            if (target == null || (!target.storage() && target.kind() != TargetKind.BUFFER)) {
                 continue;
             }
             for (PassSpec graphicsPass : graph.passes()) {
@@ -2065,10 +2102,10 @@ public final class GraphRunner {
     }
 
     /**
-     * Appends graphics-completion timeline signals for storage images that a compute pass may reuse
-     * next frame. Called from the single renderLevel RETURN boundary after scene-history and debug
-     * presentation have recorded their final reads. This method only records signal operations into
-     * Blaze3D's persistent encoder; it neither submits nor host-waits a queue.
+     * Adds graphics-completion timeline signals for buffers/images a compute pass may reuse next
+     * frame. Called once, at the renderLevel RETURN point, after scene-history and debug
+     * presentation have made their last reads. This only records signal operations into Blaze3D's
+     * own encoder; it does not submit or wait on a queue.
      */
     public static void recordGraphicsStorageReadsComplete() {
         VulkanCommandEncoder graphics = null;
@@ -2803,6 +2840,7 @@ public final class GraphRunner {
     }
 
     private static void closeCurrent() {
+        computeAtlasTextures.clear();
         // Detach the voxel window from this soon-to-be-closed registry BEFORE freeing its buffers, so a
         // late Sodium-worker onSectionHarvested can't pick up a registry whose buffers are being torn
         // down (TargetRegistry.close and BrickGridUpload.uploadSlot already share SHARED_QUEUE_LOCK, so

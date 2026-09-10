@@ -73,6 +73,17 @@ public final class VoxelSectionState {
         if (isCurrent(slot, snapshot)) committed.put(slot, snapshot);
     }
 
+    /** A pending replacement cannot certify the old payload. Light-only work still leaves its
+     * geometry usable, because source data does not depend on the lightmap's own content version. */
+    public @Nullable Snapshot committedGeometry(int slot) {
+        Snapshot current = latest.get(slot), uploaded = committed.get(slot);
+        return current != null && uploaded != null
+                && current.storageGeneration() == uploaded.storageGeneration()
+                && current.geometryRevision() == uploaded.geometryRevision()
+                && current.x() == uploaded.x() && current.y() == uploaded.y() && current.z() == uploaded.z()
+                ? uploaded : null;
+    }
+
     public void invalidate(Collection<Integer> slots) {
         for (int slot : slots) latest.remove(slot);
     }

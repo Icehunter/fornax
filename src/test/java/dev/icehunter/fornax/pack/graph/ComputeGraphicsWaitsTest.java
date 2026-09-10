@@ -115,7 +115,7 @@ class ComputeGraphicsWaitsTest {
         }
         assertEquals(List.of(1L, 2L, 1L, 2L), waits);
     }
-    @Test void actualPackAerialWaitFollowsIndependentFiltersAndPrecedesResolve() throws Exception {
+    @Test void actualPackAerialWaitFollowsIndependentFiltersAndStopsAtComputeOrResolve() throws Exception {
         var path = java.nio.file.Path.of("../plague/graph.toml");
         org.junit.jupiter.api.Assumptions.assumeTrue(java.nio.file.Files.isRegularFile(path));
         dev.icehunter.fornax.pack.GraphSpec graph;
@@ -128,7 +128,10 @@ class ComputeGraphicsWaitsTest {
         int start = passes.indexOf(aerial), end = passes.indexOf(resolve);
         assertTrue(end > start);
         for (PassSpec intermediate : passes.subList(start + 1, end)) {
-            assertFalse(ComputeGraphicsWaits.conflicts(aerial, intermediate), intermediate.name());
+            // A newly inserted compute stage keeps the existing conservative handoff boundary;
+            // only independent graphics filters can defer the aerial semaphore further.
+            assertEquals(intermediate.type() == PassType.COMPUTE,
+                    ComputeGraphicsWaits.conflicts(aerial, intermediate), intermediate.name());
         }
         assertTrue(ComputeGraphicsWaits.conflicts(aerial, resolve));
     }

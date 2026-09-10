@@ -1,0 +1,3 @@
+[categories.lamp]
+blocks = ["test:lamp"]
+lighting = true

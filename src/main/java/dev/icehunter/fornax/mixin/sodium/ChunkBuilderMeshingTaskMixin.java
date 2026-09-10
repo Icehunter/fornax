@@ -1,7 +1,6 @@
 package dev.icehunter.fornax.mixin.sodium;
 
 import dev.icehunter.fornax.FornaxMod;
-import dev.icehunter.fornax.pack.material.MaterialScalarsHolder;
 import dev.icehunter.fornax.voxel.SectionHarvester;
 import dev.icehunter.fornax.voxel.VoxelWindow;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildContext;
@@ -65,8 +64,7 @@ public abstract class ChunkBuilderMeshingTaskMixin {
         // caught failure costs one section's voxel data until the next rebuild.
         try {
             // Sodium's own world slice. Without it grass, leaves and vines are stored atlas-grey.
-            SectionHarvester.Result result = SectionHarvester.harvest(blockData,
-                    MaterialScalarsHolder.current(),
+            SectionHarvester.Result result = SectionHarvester.harvestCurrent(blockData,
                     buildContext.cache.getWorldSlice(),
                     origin.minBlockX(), origin.minBlockY(), origin.minBlockZ());
             if (result != null) VoxelWindow.onSectionHarvested(origin, result);

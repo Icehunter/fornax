@@ -12,10 +12,15 @@ import net.minecraft.world.level.block.state.BlockState;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Optional exact UV mapping for a cell face made of one quad. Any other shape stays zero. This
- * extra buffer leaves the 16-word palette layout alone. */
+/** Holds exact per-quad UV mapping plus a separate opaque-face-coverage flag.
+ * This buffer sits beside the 16-word palette layout and does not change it. */
 public final class VoxelFaceTexture {
     public static final String TARGET = "voxelFaceTexture";
+    /** Header bit 26: the second flag bit in the top byte, separate from the usable-UV and
+     * alpha-test bits. */
+    public static final int OPAQUE_COVERAGE = 1 << 26;
+    // Header bits 27..28 carry the atlas's existing 1-based static overflow page (0 is base).
+    public static final int ATLAS_PAGE_SHIFT = 27;
     // One header word for RGB and flags, then six raw float words for UV. Tint alpha is not read.
     public static final int FACE_WORDS = 7;
     public static final int ENTRY_WORDS = 6 * FACE_WORDS;
@@ -24,7 +29,7 @@ public final class VoxelFaceTexture {
     private VoxelFaceTexture() { }
 
     public record SourceFaces(int[] textureWords, List<MaterialSourceIndex.Summary> summaries,
-                              long atlasGeneration) {
+                              long atlasGeneration, boolean materialsKnownNonpositive) {
         public SourceFaces {
             if (textureWords.length != ENTRY_WORDS || summaries.size() != Direction.values().length)
                 throw new IllegalArgumentException("source faces require 42 texture words and six summaries");
@@ -52,6 +57,7 @@ public final class VoxelFaceTexture {
                                    MaterialSourceIndex index) {
         int[] words = kind == VoxelShapeKind.FULL ? pack(parts, tint) : new int[ENTRY_WORDS];
         List<MaterialSourceIndex.Summary> summaries = new ArrayList<>();
+        boolean knownNonpositive = true, hasQuad = false;
         for (Direction face : Direction.values()) {
             List<BakedQuad> candidates = new ArrayList<>();
             for (var part : parts) {
@@ -65,9 +71,16 @@ public final class VoxelFaceTexture {
             for (var quad : candidates) {
                 var sprite = quad.materialInfo().sprite();
                 var candidate = index.lookup(sprite);
-                // Page-zero ghost strips are reduced previews; this source diagnostic binds the base
-                // atlases and cannot certify the full-resolution source without overflow-page bindings.
-                if (sprite instanceof dev.icehunter.fornax.atlas.BlockAtlasGhostSprite)
+                hasQuad = true;
+                // Whether a source is missing has nothing to do with face geometry: check every
+                // real quad before applying any crop/shape/page limit. Missing material data is
+                // never proof of zero.
+                knownNonpositive &= candidate.flags() == MaterialSourceIndex.MISSING_MAP
+                        || (candidate.supported() && candidate.texelCount() > 0 && !candidate.authoredCandidate());
+                // A static ghost carries its full-resolution page through the face header. An
+                // animated ghost has no full-copy page, so it cannot claim static source coverage.
+                if (sprite instanceof dev.icehunter.fornax.atlas.BlockAtlasGhostSprite ghost
+                        && !ghost.hasOverflowCopy())
                     candidate = candidate.withFlags(MaterialSourceIndex.UNSUPPORTED_ATLAS_PAGE);
                 combinedFlags |= candidate.flags();
                 // Unsupported stacked faces retain one positive source's raw evidence, not a
@@ -84,7 +97,7 @@ public final class VoxelFaceTexture {
             }
             summaries.add(summary.withFlags(combinedFlags));
         }
-        return new SourceFaces(words, summaries, index.generation());
+        return new SourceFaces(words, summaries, index.generation(), hasQuad && knownNonpositive);
     }
 
     private static boolean coversWholeSprite(BakedQuad quad) {
@@ -124,13 +137,21 @@ public final class VoxelFaceTexture {
                 System.arraycopy(mapping(candidates.getFirst(), face, tint), 0, words,
                         face.get3DDataValue() * FACE_WORDS, FACE_WORDS);
             }
+            for (var quad : candidates) {
+                if (VoxelFaceOpacity.covers(quad, face)) {
+                    words[face.get3DDataValue() * FACE_WORDS] |= OPAQUE_COVERAGE;
+                    break;
+                }
+            }
         }
         return words;
     }
 
-    /** words: RGB tint in header bits 0..23, flags(valid=1, alpha-tested=2) in bits 24..31,
-     * then raw float u0,v0,du/ds,dv/ds,du/dt,dv/dt. Readers must use this seven-word layout.
-     * Tint alpha is dropped; alpha testing uses the atlas alpha instead.
+    /** Layout: RGB tint in header bits 0..23, flags (valid=1, alpha-tested=2) in bits 24..31, then
+     * the raw floats u0, v0, du/ds, dv/ds, du/dt, dv/dt. Readers must use this seven-word layout.
+     * pack() also sets flag 4 for opaque-face coverage on its own, even with no usable UV map.
+     * Header bits 27..28 hold a static overflow page; UVs stay in base/ghost space.
+     * Tint alpha is dropped; alpha testing uses the atlas's own alpha instead.
      * Local st uses (y,z) for X faces, (x,z) for Y faces and (x,y) for Z faces. */
     static int[] mapping(BakedQuad quad, Direction face, int tint) {
         int[] words = new int[FACE_WORDS];
@@ -161,8 +182,12 @@ public final class VoxelFaceTexture {
         }
         int flags = 1 | (quad.materialInfo().layer() == ChunkSectionLayer.CUTOUT ? 2 : 0);
         int rgb = quad.materialInfo().tintIndex() == 0 ? tint : -1;
-        // RGB takes three bytes; the top byte holds the two flag bits.
+        // RGB takes three bytes; the top byte holds flags and the static atlas page.
         words[0] = (flags << 24) | (rgb & 0x00ffffff);
+        if (quad.materialInfo().sprite() instanceof dev.icehunter.fornax.atlas.BlockAtlasGhostSprite ghost
+                && ghost.hasOverflowCopy()) {
+            words[0] |= ghost.overflowPage() << ATLAS_PAGE_SHIFT;
+        }
         words[1] = Float.floatToRawIntBits(uv[0][0]); words[2] = Float.floatToRawIntBits(uv[0][1]);
         words[3] = Float.floatToRawIntBits(uv[1][0]-uv[0][0]); words[4] = Float.floatToRawIntBits(uv[1][1]-uv[0][1]);
         words[5] = Float.floatToRawIntBits(uv[2][0]-uv[0][0]); words[6] = Float.floatToRawIntBits(uv[2][1]-uv[0][1]);

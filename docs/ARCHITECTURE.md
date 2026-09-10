@@ -542,6 +542,37 @@ those decisions and writes a pack texture for later cloud, sky, shadow, and refl
 
 ### Builtin resource names (`builtin.*`)
 
+`builtin.normalAtlas` and `builtin.materialAtlas` resolve to their device-owned semantic-neutral
+textures while sidecar generation retirement leaves no atlas published. This applies to both view
+and raw-texture resolution, so compute and fullscreen consumers remain valid during the same
+multi-poll rebuild window already handled by geometry bindings. Each resolution reads the current
+atlas again; publishing the replacement restores its handles immediately. Other unallocated or
+undeclared targets still fail resolution.
+
+`builtin.blockAtlasPages` and `builtin.materialAtlasPages` expose the existing overflow allocations
+as `sampler2DArray` inputs, with zero-based layers. During retirement or on an unpaged atlas they
+resolve to device-owned 1x1x1 neutral arrays, retaining the array view type. Consumers that require
+real source pixels must reject that extent and a requested layer outside the published depth.
+Static source faces carry their 1-based page in face-header bits 27..28, with zero meaning base
+atlas. Their UVs retain the existing ghost coordinates: page `k` remaps to full-page UV through
+`(uv - ((k-1)/4, 3/4)) * 4`. Albedo and material pages may differ in pixel dimensions; their UV
+layout matches. Animated ghosts have no full-copy page and remain unsupported static sources.
+
+Before any graph compute or terrain work, `GraphRunner.prepare` resolves every atlas builtin declared
+by a compile-enabled compute pass, including the potential neutral fallbacks even for published lanes, then completes the recorded graphics
+batch once when those view identities change. The fence is created before submit, and compute admission
+remains closed on timeout or completion failure. Unchanged identities incur no submission or wait;
+checking each albedo, sidecar and overflow view independently also covers resource reloads that reuse
+sidecar content while replacing albedo pages. Compute entry rejects any identity published after prepare.
+This orders initial and replacement uploads; it does not synchronize animation writes to the same image.
+
+The registered Vulkan texture-allocation mixin applies concurrent graphics/compute family access to
+all `TEXTURE_BINDING` or Fornax `STORAGE` images when the device uses distinct families. This includes
+vanilla base atlases, engine sidecars, overflow arrays and their neutral fallbacks from first allocation,
+without relying on a loaded graph or resource labels. A single shared family retains exclusive mode.
+Concurrent sharing supplies legal queue-family access; the prepare fence above still supplies upload
+completion before raw compute reads.
+
 `GraphValidator.BUILTINS` is the complete set of engine-resolved names a pass may reference without
 declaring a target: `builtin.depth`, `builtin.blockAtlas`, `builtin.materialAtlas`,
 `builtin.normalAtlas`, `builtin.lightmap`, `builtin.output`, the G-buffer attachments
@@ -1253,6 +1284,7 @@ be restated here.
 | `TextureAtlasMaterialHookMixin` | `TextureAtlas` | Rebuild the material-map atlas whenever the block atlas is (re)uploaded | Inject |
 | `TextureAtlasVoxelLifetimeMixin` | `TextureAtlas.clearTextureData()V` | Before the block atlas closes sprite CPU images, cancel new voxel model reads, drain active leases and retire cached/queued harvests; reload and shutdown share this boundary | Inject (HEAD) |
 | `ModelManagerVoxelLifetimeMixin` | `ModelManager.apply(ModelManager$ReloadState)V` | Reopen voxel model reads only after successful model publication and request a stationary-camera resync | Inject (RETURN) |
+| `MultiPartModelAccessor` | `MultiPartModel.models` | Read selected children to prove deterministic model geometry; no rendering mutation | Accessor |
 | `TextureAtlasReleaseGenerationMixin` | `TextureAtlas` | At `upload` HEAD, select a rebuild scope and hand it to `AtlasGenerationSchedule`: changed block = sidecars + overflow/grid, unchanged block = retain sidecars but retire overflow/grid, changed non-block mirrored atlas = sidecars only, unchanged non-block = no-op. Released resources rebuild only after three render-loop-separated polls | Inject (HEAD) |
 | `VulkanRenderPipelineMixin` | `VulkanRenderPipeline` | Declare the widened 60-byte push-constant range on every terrain-family Vulkan pipeline layout | WrapOperation |
 | `WindowMixin` | `Window` | Report the supersampled dimensions while a scaled frame is in flight, so downstream size queries stay consistent | ModifyReturnValue x2 |
@@ -1289,6 +1321,32 @@ reference in either is silent, so `BiomeClimateAccessContractTest` pins both.
 (`#namespace:path`). Categories are compacted into dense integer IDs, 1-based, in file declaration
 order; ID 0 is reserved for "uncategorized" (pure LabPBR, no synthesis). IDs are capped so they fit
 the 16-bit vertex channel that carries them.
+
+**Voxel source selection.** Optional root `[lighting] voxel = false` makes local voxel lighting
+opt-in; a category's `lighting.voxel = true` or `false` overrides that default. Uncategorized
+blocks and categories without an override inherit the root value. With neither declaration,
+existing packs retain all sources. Only boolean `voxel` is accepted inside either lighting table;
+unknown keys and incorrect types fail pack loading. Membership is independent of emissive
+synthesis, intrinsic block emission, LabPBR emission, and geometry: opting out removes the block
+from `voxelSourceWindow`'s source set, without removing self emission or its ability to occlude.
+It does not identify or subtract that source's contribution from Minecraft's merged lightmap.
+
+`MaterialResolution` resolves the default and category overrides into `MaterialScalars`. Each
+section harvest stores a separate immutable, two-word `VoxelSourcePolicy` palette mask, even
+when source diagnostics are disabled. Overflow or an unmapped cell marks that policy incomplete
+rather than trusting an aliased palette index. Raw `VoxelSourceEvidence`, summary and diagnostic
+emitter-pool data remain unchanged. `withLightmap` preserves policy identity. A blocks-manifest
+reload follows graph rebuild: `closeCurrent()` detaches voxel storage. Category/tag resolution
+also has its own `VoxelHarvestLifecycle.publishMaterials` boundary, so a datapack tag reload with
+an unchanged `TargetRegistry` immediately retires cached rows and queued old-policy harvests.
+It cancels and drains CPU read leases, invalidates voxel storage, then publishes block membership
+and scalars together. A successful update reopens harvesting only if models were already available;
+resolving tags cannot reopen a retired atlas. Production harvest callers read the scalar snapshot
+inside their lease, avoiding an old snapshot being paired with a new generation. The radius-zero
+sentinel forces same-camera refill and the next source-generation synchronization invalidates GPU
+section states. No harvest lock is held while acquiring the GPU queue lock; callers already holding
+either a queue lock or read lease are rejected before a drain. Newly harvested sections carry the
+refreshed category policy.
 
 **Resolution and thread safety.** Resolving categories against the live block/tag registry runs
 only on the client thread (at pack (re)activation and again whenever datapack tags rebind). The
@@ -2593,8 +2651,9 @@ Admission retains references to committed snapshots and one scalar cursor per se
 per-section candidate arrays. It takes turns through owner-coordinate order with a budget of 4096
 cell-index reads per frame, including repeated directional reads. A full pool stops scanning.
 Lightmap-only updates preserve admission; geometry replacement, slot recycling, atlas change and
-storage reset remove the affected rows. Atlas overflow placeholders are unsupported source mappings:
-their UVs address fallback strips, not the original page's pixels.
+storage reset remove the affected rows. Static overflow faces carry their page in the mapping header;
+page-aware consumers sample the original layer. Animated ghosts without a full-copy page remain
+unsupported static source mappings.
 
 Only dirty pool snapshots enter `EngineBufferUploadQueue`, in aligned chunks no larger than
 65,536 bytes. A queued publication contains the complete zero-padded buffer; its publication counter
@@ -2603,6 +2662,77 @@ with no new queue wait or fence. Consumers must validate owner, committed state,
 and atlas generation before any atlas read. The buffer provides neither integrated energy nor
 exposed-face selection: deferred faces remain explicitly counted, and this subset is neither nearest
 nor an unbiased transport sample. The pack decides how to evaluate source colour and display it.
+
+`voxelSourceWindow` is an optional engine-owned sparse source-cell inventory for compute
+consumers. It covers committed sections throughout the loaded voxel window, with no camera-distance
+admission or ordering. Consumers must bind an actual `voxelSectionState` buffer; graph validation
+refuses graphics readers and pack writers. Enabling this target enables source harvesting and
+atlas-generation synchronization even with the diagnostic summary and reflections disabled. No
+additional live-world reads are made.
+
+Its 418,632-byte scalar-uint ABI2 has a 16-word header, 35,937 two-word section ranges, and space
+for 4096 eight-word cell records. The range count is the maximum 33³ tier-zero section window;
+the cell capacity is one section's 16³ cells. Only source cells with complete eligible evidence
+and an enabled palette source policy enter the rows. A full inventory preserves every existing
+admitted world identity; newly eligible cells remain deferred until a source retires. This is a
+complete eligible source set only when the overflow and unknown counts are zero. These counts
+cover committed sections only; pending and unloaded sections remain unavailable even when both
+counts are zero.
+
+| Header words | Meaning |
+|---|---|
+| 0..3 | ABI 2, capacity 4096, admitted committed cell count, storage generation |
+| 4..7 | Atlas generation low/high, publication revision low/high |
+| 8..9 | Eligible source cells deferred by capacity, unknown source cells |
+| 10..15 | Reserved zero |
+
+The range table starts at word 16. Each current toroidal section slot owns two words: the first
+cell-row index and the row count. Empty and unused slots contain `(0, 0)`. Rows start at word
+71,890 and are grouped by slot, then local Y/Z/X cell order. Compaction changes row indices without
+changing admitted world identities; a row index is not a persistent source identifier.
+
+| Cell words | Meaning |
+|---|---|
+| 0..2 | Signed absolute block xyz |
+| 3 | Global palette entry: slot × 96 + local entry |
+| 4 | Eligible face mask bits 0..5; intrinsic bits 8..11; missing-map mask bits 16..21 |
+| 5..7 | Geometry revision, committed validity (1), reserved zero |
+
+An explicitly excluded entry never enters the source inventory, including unsupported mappings.
+The original palette, emission evidence, occupancy and occluder geometry stay unchanged. Included
+entries require complete policy mapping and the original source-evidence checks. Incomplete or
+overflowed palette policy cannot certify an aliased entry as excluded. Unknown cells are counted,
+not admitted; consumers can preserve known independent source contributions rather than reject
+the entire estimate. Known-zero evidence also omits a cell. Non-source foliage may be certified
+zero despite unsupported geometry only when intrinsic emission is zero and every actual baked
+quad has known nonpositive material evidence. An unreadable material map never proves zero.
+
+`VoxelWindow` feeds this inventory from the existing successful section-transfer callback. A new
+geometry result scans its 4096 already-harvested palette indices once, then retains compact eligible
+and admitted bitsets per section. Lightmap-only commits do not change membership or publication.
+Queued replacement geometry suppresses that section's old source rows while reserving admission
+for unchanged world identities; successful replacement reconciles the membership. Slot retirement,
+failed-batch rollback, atlas retirement and storage reset invalidate the corresponding records.
+No camera capture, per-frame voxel scan, additional world read, wait or fence is required.
+
+Only changed publications allocate immutable staging. A complete publication uses seven aligned
+inline updates: six of 65,536 bytes and a final 25,416 bytes in the existing compute submission.
+Each consuming compute refreshes the publication under its existing queue lock before recording
+updates. Queue acceptance is not GPU completion. Derived buffers must carry their own coherent
+header, ranges and rows; each source must still validate its current section owner, geometry,
+storage and atlas before atlas evaluation or transport. A changed source need not invalidate
+unrelated sources. Capacity and unknown counts describe omitted contributions, not an instruction
+to zero all known light.
+
+This ABI supports exact full-cube source mappings from the representative fixed-seed palette model.
+It does not represent partial lamp emitting surfaces or certify position-randomized render-model
+variants. Existing selection boxes do not establish emitting area. The pack chooses influence,
+visibility, receiver treatment and evaluation cost; the engine publishes evidence and ownership.
+
+Pack-owned buffers written by compute and read by graphics carry the same reverse
+graphics-completion timeline dependency as storage images. Only outputs create that dependency;
+concurrent read-only compute/graphics inputs need none. This sits alongside the forward
+compute-to-graphics handoff and protects persistent buffer reuse on the next frame.
 
 An unchanged block reload skips sidecar builders. The successful vanilla atlas upload RETURN
 therefore rebinds the retained source index before the pending overflow/grid early return. The
@@ -2670,6 +2800,43 @@ layer zero, before the average; other faces keep their atlas colours. Bootstrap 
 client world's tint view and the section corner, so they colour like a mesh-driven harvest. These
 are average colours and rough shapes, not lit surfaces and not the model's triangles.
 
+### Exact opaque partial model geometry
+
+`VoxelModelShape` refines PARTIAL cells when final model emission proves a union of opaque
+axis-aligned cuboids on the existing 1/16-block grid. Selection shapes remain the fallback: they
+can be wider than visible rails and fill the gaps between them. Refinement uses geometry and
+material data, never block identities. Cube and CROSS handling remain unchanged.
+
+The public Fabric model-emission API runs with the actual cell position, supplied world view,
+vanilla position seed and a predicate that keeps every face. Custom wrappers remain in the chain;
+`collectParts` and unwrapped delegates do not prove their final geometry. Non-null geometry keys
+reuse exact emitted results only within the current harvest; null keys require a fresh emission.
+The resolver snapshots immutable rectangle/opacity facts rather than retaining mutable quads.
+Position-offset, off-grid, rotated, open or alpha-uncertain geometry retains the existing fallback.
+
+Opposed rectangular faces propose candidate cuboids. Six rendered faces certify a closed body;
+a missing face may close only when its entire rectangle lies strictly inside an already certified
+body. This admits a rail end buried inside a post without inventing closure from a touching or
+unrelated surface. SOLID materials are opaque by layer; CUTOUT materials need complete
+original/frame/mip alpha evidence. Uncertain overlays cannot close a cuboid and may be ignored
+only where a certified opaque face already covers their entire rectangle.
+
+Proof work is bounded by the existing eight-box ABI. Only containment removal and exact unions
+with identical cross-sections reduce the result. More than eight remaining boxes rejects
+refinement; nothing is inflated or truncated. The existing palette box words, CUTOUT/CROSS flags,
+GPU buffer sizes and shader traversal stay unchanged.
+
+`VoxelPaletteShapes` deduplicates exact results by original state entry and packed boxes within
+the existing 96-entry section palette. Original entries remain available for unsupported cells.
+Each appended variant copies material/source metadata and recomputes its face-seal mask.
+Exhausting the cap logs geometry pressure and keeps the original selection fallback; it never
+aliases a cell to a different contextual shape or invalidates unchanged source evidence.
+Only PARTIAL cells run final emission, at most once per cell during harvesting, never each frame.
+Resolvers and geometry keys die with the harvest lease; atlas opacity evidence clears after
+reader drain. Tests cover wrapper emission, key reuse and null keys, all 16 fence connections,
+cardinal model baking, receiving/gap/casting rays, unsupported geometry and palette/source
+consistency. These fixtures do not prove the final shadow appearance in a running modded client.
+
 ### Optional voxel face texture mapping
 
 A pack that declares and enables the `voxelFaceTexture` buffer gets exact atlas UVs beside the
@@ -2677,13 +2844,28 @@ A pack that declares and enables the `voxelFaceTexture` buffer gets exact atlas 
 same wrap-around slot and 96-entry addressing as `voxelPalette`:
 `(slot * 96 + entry) * 42 + face * 7`, faces in DOWN, UP, NORTH, SOUTH, WEST, EAST order. Each face
 has one header word, then six raw float words `u0,v0,du/ds,dv/ds,du/dt,dv/dt`. The header packs
-biome RGB into bits 0..23 and flags into bits 24..31 (flag bit 0 usable, bit 1 alpha-tested). Tint
-alpha is not stored; alpha comes from the atlas sample instead. Local `(s,t)` is `(y,z)` on X faces,
+biome RGB into bits 0..23 and flags into bits 24..31 (flag bit 0 usable UV mapping, bit 1
+alpha-tested mapping, bit 2 rendered opaque-face coverage, bits 3..4 the 1-based static overflow
+page). Page zero uses the base atlas; page 1..3 requires the matching array layer after ghost-UV
+remapping. The seven-word stride and existing UVs are unchanged. Tint alpha is not stored; alpha comes
+from the atlas sample instead. Local `(s,t)` is `(y,z)` on X faces,
 `(x,z)` on Y faces and `(x,y)` on Z faces, so a turned or mirrored baked UV still comes out right. A
 face is usable only when one opaque or alpha-tested quad covers the whole cell face with UVs
 running straight across it. See-through materials, stacked faces, part cells, crosses, loose leaf
 quads and higher tint layers mark it unusable, and a reader must fall back on the average face
 colour.
+
+Rendered opaque coverage is independent of UV mapping and source eligibility. A face receives
+flag bit 2 when at least one actual baked quad covers its complete unit-square boundary in
+perimeter order, using a solid material or an alpha-tested sprite whose original pixels and every
+uploaded mip are fully opaque. All animation frames in those images are checked. Translucent
+materials, partial/rotated planes, crossing corner order, missing pixels and any nonopaque texel
+cannot prove coverage. A solid backing can therefore prove a layered face opaque while its stacked
+UV mapping remains unavailable. Collision shape, average alpha, tint and vanilla light blocking
+alone never establish this fact. Whole-sprite alpha results are cached by sprite-content identity;
+block-atlas retirement clears them after CPU harvest leases drain, before native pixels close.
+Source evaluation continues to require the independent usable-mapping bit and its existing source
+checks, so opaque coverage does not admit a stacked face as an emitter.
 
 The buffer holds 16,128 bytes per slot: about 11.2 MiB at diameter 9, 75.6 MiB at 17. Readers must
 use this seven-word face layout and reject a buffer of the wrong size. A new buffer starts at zero.

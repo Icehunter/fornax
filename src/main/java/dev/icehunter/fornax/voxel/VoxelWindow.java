@@ -79,6 +79,7 @@ public final class VoxelWindow {
     private static final VoxelSectionState sectionStates = new VoxelSectionState();
     private static final VoxelSourceInventory sourceInventory = new VoxelSourceInventory();
     private static @Nullable VoxelEmitterPool emitterPool;
+    private static @Nullable VoxelSourceWindow sourceWindow;
     private static long sourceAtlasGeneration = -1; // No synchronized atlas generation yet.
 
     private static void invalidateStorage() {
@@ -93,6 +94,10 @@ public final class VoxelWindow {
         slotLightOwner.clear();
         slotData.clear();
         populatedSlots.clear();
+        if (sourceWindow != null) {
+            sourceWindow.reset(Math.toIntExact(storageGeneration), 0);
+            EngineBufferUploadQueue.discard(VoxelSourceWindow.TARGET);
+        }
         if (emitterPool != null) {
             emitterPool.reset(Math.toIntExact(storageGeneration), 0);
             EngineBufferUploadQueue.discard(VoxelEmitterPool.TARGET);
@@ -125,7 +130,8 @@ public final class VoxelWindow {
      * radius-zero sentinel makes the next streaming update resync even at an unchanged camera. */
     public static boolean synchronizeSourceGeneration(TargetRegistry newRegistry, long atlasGeneration) {
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
-            if (!newRegistry.isEnabledBufferTarget(VoxelSourceSummary.TARGET)) return false;
+            if (!newRegistry.isEnabledBufferTarget(VoxelSourceSummary.TARGET)
+                    && !newRegistry.isEnabledBufferTarget(VoxelSourceWindow.TARGET)) return false;
             if (registry == newRegistry && sourceAtlasGeneration == atlasGeneration) return false;
             invalidateStorage();
             registry = newRegistry;
@@ -133,6 +139,7 @@ public final class VoxelWindow {
             // Publish the synchronized CPU generation only after the reset transfer succeeds.
             // A failed reset leaves the sentinel so the next frame retries instead of accepting it.
             sourceAtlasGeneration = atlasGeneration;
+            if (sourceWindow != null) sourceWindow.reset(Math.toIntExact(storageGeneration), atlasGeneration);
             if (emitterPool != null) {
                 emitterPool.reset(Math.toIntExact(storageGeneration), atlasGeneration);
                 publishEmitterPoolLocked();
@@ -164,7 +171,26 @@ public final class VoxelWindow {
         }
     }
 
+    /** Publish changed source membership before any compute pass that reads it records its upload
+     * and dispatch, under the same queue lock it already holds. Each consumer keeps a matching
+     * range/row snapshot and checks every source against current section ownership before using it. */
+    public static void refreshSourceWindow(TargetRegistry currentRegistry) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            if (registry != currentRegistry || sourceWindow == null
+                    || currentRegistry.getBuffer(VoxelSourceWindow.TARGET) == null) return;
+            var publication = sourceWindow.preparePublication();
+            if (publication == null) return;
+            EngineBufferUploadQueue.publish(VoxelSourceWindow.TARGET, false,
+                    VoxelEmitterPoolUpload.ranges(publication.bytes()));
+            sourceWindow.markPublished(publication);
+        }
+    }
+
     private static void configureEmitterPool(@Nullable TargetRegistry currentRegistry) {
+        EngineBufferUploadQueue.discard(VoxelSourceWindow.TARGET);
+        sourceWindow = currentRegistry != null && currentRegistry.isEnabledBufferTarget(VoxelSourceWindow.TARGET)
+                ? new VoxelSourceWindow() : null;
+        if (sourceWindow != null) sourceWindow.reset(Math.toIntExact(storageGeneration), Math.max(0, sourceAtlasGeneration));
         EngineBufferUploadQueue.discard(VoxelEmitterPool.TARGET);
         emitterPool = currentRegistry != null && currentRegistry.isEnabledBufferTarget(VoxelEmitterPool.TARGET)
                 ? new VoxelEmitterPool() : null;
@@ -185,7 +211,8 @@ public final class VoxelWindow {
         // CPU model lifetime is mandatory even when both diagnostic buffers are disabled.
         if (!VoxelHarvestLifecycle.isCurrent(result.harvestGeneration())) return false;
         TargetRegistry r = registry;
-        return r == null || !r.isEnabledBufferTarget(VoxelSourceSummary.TARGET)
+        return r == null || (!r.isEnabledBufferTarget(VoxelSourceSummary.TARGET)
+                && !r.isEnabledBufferTarget(VoxelSourceWindow.TARGET))
                 || result.sourceSummary().atlasGeneration() == sourceAtlasGeneration;
     }
 
@@ -199,6 +226,7 @@ public final class VoxelWindow {
             if (registry != null && registry.isEnabledBufferTarget(VoxelSourceSummary.TARGET))
                 sourceInventory.commit(item.slot(), item.result().sourceSummary(), item.result().sourceEvidence());
             if (emitterPool != null) emitterPool.commit(item.slot(), item.result(), item.sectionState());
+            if (sourceWindow != null) sourceWindow.commit(item.slot(), item.result(), item.sectionState());
         }
         VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.COMMITTED);
     }
@@ -693,6 +721,7 @@ public final class VoxelWindow {
                     sectionStates.invalidate(exposed);
                     sourceInventory.invalidate(exposed);
                     if (emitterPool != null) emitterPool.invalidate(exposed);
+                    if (sourceWindow != null) sourceWindow.invalidate(exposed);
                     BrickGridUpload.clearOccupancySlots(r, exposed);
                     publishEmitterPoolLocked();
                     // Telemetry: these slots hold no real geometry (shell-clear) until the harvest
@@ -802,6 +831,7 @@ public final class VoxelWindow {
         lightUpdates.meshPublished(position);
         slotOwner.put(slot, position);
         slotData.put(slot, result);
+        if (sourceWindow != null) sourceWindow.pending(slot);
         populatedSlots.add(slot); // harvest publish -- see the field's own doc
         return needsLightClear(slot, position);
     }
@@ -933,6 +963,7 @@ public final class VoxelWindow {
                 else slotData.put(slot, item.previousData());
                 populatedSlots.remove(slot);
                 sectionStates.invalidate(List.of(slot));
+                if (sourceWindow != null) sourceWindow.invalidate(List.of(slot));
             }
         }
     }

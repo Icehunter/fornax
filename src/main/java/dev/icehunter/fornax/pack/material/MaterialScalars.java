@@ -21,21 +21,32 @@ public final class MaterialScalars {
     private final double[] emissiveStrengthById; // index 0 unused (uncategorized), sized 1 + category count
     private final int[] emissiveColorById;        // 0x00RRGGBB, or 0 when uncategorized/uncolored
     private final boolean[] cutoutById;            // CategorySpec.cutout(), index 0 unused
+    private final boolean[] voxelLightingById;
+    private final boolean voxelLightingDefault;
     private final boolean[] crossById;             // CategorySpec.cross(), index 0 unused
 
     private MaterialScalars(double[] emissiveStrengthById, int[] emissiveColorById,
-            boolean[] cutoutById, boolean[] crossById) {
+            boolean[] cutoutById, boolean[] crossById,
+            boolean[] voxelLightingById, boolean voxelLightingDefault) {
         this.emissiveStrengthById = emissiveStrengthById;
         this.emissiveColorById = emissiveColorById;
         this.cutoutById = cutoutById;
         this.crossById = crossById;
+        this.voxelLightingById = voxelLightingById;
+        this.voxelLightingDefault = voxelLightingDefault;
     }
 
     public static MaterialScalars build(List<CategorySpec> orderedCategories) {
+        return build(orderedCategories, true);
+    }
+
+    public static MaterialScalars build(List<CategorySpec> orderedCategories, boolean voxelLightingDefault) {
         double[] strengths = new double[orderedCategories.size() + 1];
         int[] colors = new int[orderedCategories.size() + 1];
         boolean[] cutout = new boolean[orderedCategories.size() + 1];
         boolean[] cross = new boolean[orderedCategories.size() + 1];
+        boolean[] voxelLighting = new boolean[orderedCategories.size() + 1];
+        voxelLighting[0] = voxelLightingDefault;
         for (int i = 0; i < orderedCategories.size(); i++) {
             CategorySpec cat = orderedCategories.get(i);
             EmissiveSpec emissive = cat.emissive();
@@ -44,8 +55,15 @@ public final class MaterialScalars {
             colors[i + 1] = color == null ? 0 : color.packedRgb();
             cutout[i + 1] = cat.cutout();
             cross[i + 1] = cat.cross();
+            voxelLighting[i + 1] = cat.voxelLighting() == null ? voxelLightingDefault : cat.voxelLighting();
         }
-        return new MaterialScalars(strengths, colors, cutout, cross);
+        return new MaterialScalars(strengths, colors, cutout, cross, voxelLighting, voxelLightingDefault);
+    }
+
+    /** Source membership only; emission, material channels and geometry are independent. */
+    public boolean voxelLighting(int categoryId) {
+        return categoryId >= 0 && categoryId < voxelLightingById.length
+                ? voxelLightingById[categoryId] : voxelLightingDefault;
     }
 
     public boolean hasEmissive(int categoryId) {

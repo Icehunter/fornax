@@ -58,7 +58,9 @@ class VoxelFaceTextureTest {
             public net.minecraft.client.resources.model.sprite.Material.Baked particleMaterial() { return null; }
             public int materialFlags() { return 0; }
         };
-        assertArrayEquals(new int[42],VoxelFaceTexture.pack(java.util.List.of(part),-1));
+        int[] expected = new int[42];
+        expected[14] = VoxelFaceTexture.OPAQUE_COVERAGE; // Coverage does not invent a stacked UV map.
+        assertArrayEquals(expected,VoxelFaceTexture.pack(java.util.List.of(part),-1));
     }
     @Test void absentMappingPacksZerosAndExistingPaletteStillHasSixteenWords() {
         var entry = new SectionPalette.Entry(VoxelShapeKind.FULL,java.util.List.of(),new int[6],0,false,0);

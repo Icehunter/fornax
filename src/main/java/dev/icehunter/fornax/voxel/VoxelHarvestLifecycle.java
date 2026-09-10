@@ -19,6 +19,7 @@ public final class VoxelHarvestLifecycle {
     /** Called before the block atlas frees any sprite pixels, on either reload or close. */
     public static void onBlockAtlasRetired() {
         GATE.retireAndDrain();
+        VoxelFaceOpacity.clear();
         // No read/write lease remains held when storage takes the GPU queue lock.
         VoxelWindow.invalidateModelData();
     }
@@ -28,6 +29,24 @@ public final class VoxelHarvestLifecycle {
         // A paused frame must not leave a stationary camera believing its shell was harvested.
         VoxelWindow.invalidateModelData();
         GATE.modelsPublished();
+    }
+
+    /** Publishes resolved category membership and scalars as one harvest-visible update.
+     * Render-thread callers must not hold the GPU queue lock while draining CPU leases.
+     * A tag reload retains the registry but must retire old results and queued harvests. */
+    public static void publishMaterials(Runnable publish) {
+        if (Thread.holdsLock(dev.icehunter.fornax.pass.compute.VulkanComputeBackend.SHARED_QUEUE_LOCK)
+                || GATE.lock.getReadHoldCount() != 0) {
+            throw new IllegalStateException("material publication must run outside GPU locks and harvest leases");
+        }
+        boolean reopen = GATE.isAvailable();
+        GATE.retireAndDrain();
+        // retireAndDrain releases its write lock before storage takes the GPU queue lock.
+        VoxelWindow.invalidateModelData();
+        publish.run();
+        // Tag resolution is not model publication: never reopen a retired atlas here.
+        // A failed publication stays unavailable until a later successful model publication.
+        if (reopen) GATE.modelsPublished();
     }
 
     static final class Gate {
@@ -63,12 +82,15 @@ public final class VoxelHarvestLifecycle {
             write.unlock();
         }
 
-        synchronized void modelsPublished() {
+        void modelsPublished() { modelsPublished(() -> { }); }
+
+        synchronized void modelsPublished(Runnable beforeOpen) {
             long generation = Math.incrementExact(this.state.generation());
             this.state = new State(generation, false);
             var write = this.lock.writeLock();
             write.lock();
             try {
+                beforeOpen.run();
                 this.state = new State(generation, true);
             } finally {
                 write.unlock();

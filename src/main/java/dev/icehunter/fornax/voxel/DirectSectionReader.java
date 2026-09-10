@@ -1,6 +1,5 @@
 package dev.icehunter.fornax.voxel;
 
-import dev.icehunter.fornax.pack.material.MaterialScalarsHolder;
 import dev.icehunter.fornax.atlas.MaterialSourceIndex;
 import net.minecraft.core.SectionPos;
 import net.minecraft.client.renderer.block.BlockAndTintGetter;
@@ -84,7 +83,7 @@ public final class DirectSectionReader {
         }
         LevelChunkSection section = chunk.getSection(sectionIndex);
         // A bootstrap read and a mesh-driven harvest must come out the same colour.
-        return SectionHarvester.harvest(section.getStates(), MaterialScalarsHolder.current(),
+        return SectionHarvester.harvestCurrent(section.getStates(),
                 level instanceof BlockAndTintGetter tint ? tint : null,
                 position.minBlockX(), position.minBlockY(), position.minBlockZ());
     }

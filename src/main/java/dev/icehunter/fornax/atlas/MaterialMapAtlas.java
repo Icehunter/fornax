@@ -124,16 +124,10 @@ public final class MaterialMapAtlas implements AutoCloseable {
 
     /**
      * GPU lifetime is owned by {@link LabPbrAtlasPair}; neither lane can be installed separately.
-     *
-     * <p>Document-safe: unlike OpaqueDepth/GBufferManager/ShadowMapManager/WaterSurfaceManager/
-     * MipchainRunner/TargetRegistry's texture-teardown paths (see VulkanComputeBackend
-     * .waitForGpuIdleBeforeDestroy's own doc), this atlas texture is never bound as an input to any
-     * COMPUTE-queue submission (ComputePassRunner/VoxelDebugRaymarchPass only ever bind pack-declared
-     * TargetRegistry/OpaqueDepth/ShadowMapManager/WaterSurfaceManager targets, never this atlas) --
-     * only ever sampled by the terrain fragment shader, a graphics-queue draw. Blaze3D's own
-     * per-GRAPHICS-submission destruction ring already fully
-     * covers that case; the hazard the other classes above guard against is specifically a destroy
-     * racing a COMPUTE-queue submission the ring never rotates for. No wait-idle needed here.
+     * Graphics and compute can read a published lane. The code that moves to the next generation
+     * waits for both queues to finish before this pair is retired, so this close method does not
+     * wait again. An unpublished, half-built atlas can close right away: no draw or compute pass
+     * can use it yet.
      */
     @Override
     public void close() {

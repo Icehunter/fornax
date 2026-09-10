@@ -4,6 +4,8 @@ import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.icehunter.fornax.atlas.BlockAtlasView;
+import dev.icehunter.fornax.atlas.BlockAtlasOverflow;
+import dev.icehunter.fornax.atlas.LabPbrNeutralTextures;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
 import dev.icehunter.fornax.pipeline.CelestialSprites;
@@ -123,6 +125,18 @@ final class GraphInputResolver {
         return wantsHistory ? instance.historyTexture() : instance.texture();
     }
 
+    static void materializeAtlasFallback(String ref) {
+        // A published lane can still retire later. Building its fallback here, during prepare,
+        // keeps compute from recording that first neutral upload while a pass is already running.
+        switch (ref) {
+            case "builtin.normalAtlas" -> LabPbrNeutralTextures.normalView();
+            case "builtin.materialAtlas" -> LabPbrNeutralTextures.materialView();
+            case "builtin.blockAtlasPages" -> BlockAtlasOverflow.neutralArrayView(BlockAtlasOverflow.NEUTRAL_BLACK_RGBA);
+            case "builtin.materialAtlasPages" -> BlockAtlasOverflow.neutralArrayView(BlockAtlasOverflow.NEUTRAL_MATERIAL_RGBA);
+            default -> { }
+        }
+    }
+
     @Nullable
     private static GpuTextureView resolveBuiltinView(String ref) {
         GBuffer gbuffer = GBufferManager.getInstance();
@@ -136,6 +150,16 @@ final class GraphInputResolver {
             case "builtin.output" -> mainRenderTarget().getColorTextureView();
             case "builtin.celestials" -> CelestialSprites.atlasView();
             case "builtin.blockAtlas" -> BlockAtlasView.view();
+            // This stays an array texture even when retirement removes the real pages.
+            case "builtin.blockAtlasPages" -> {
+                GpuTextureView view = BlockAtlasOverflow.albedoView();
+                yield view != null ? view : BlockAtlasOverflow.neutralArrayView(BlockAtlasOverflow.NEUTRAL_BLACK_RGBA);
+            }
+            case "builtin.materialAtlasPages" -> {
+                MaterialMapAtlas atlas = MaterialMapAtlas.getInstance();
+                GpuTextureView view = atlas == null ? null : atlas.pagesView();
+                yield view != null ? view : BlockAtlasOverflow.neutralArrayView(BlockAtlasOverflow.NEUTRAL_MATERIAL_RGBA);
+            }
             // Sprite rectangles, indexed by the sprite ID a terrain vertex carries in a_Position.w.
             // Refreshed on access as sprites are interned during meshing, so a pass reading it early
             // in world load sees whatever has registered so far rather than a stale snapshot.
@@ -147,16 +171,17 @@ final class GraphInputResolver {
             // time of day, weather, dimension and night vision, so a pack sampling it gets vanilla's
             // exact light response for free instead of approximating it with hand-picked constants.
             case "builtin.lightmap" -> Minecraft.getInstance().gameRenderer.levelLightmap();
-            // The labPBR atlases Fornax stitches alongside the block atlas. Null until a resource
-            // reload has built them (or when the resource pack ships no _n/_s textures at all), which
-            // the caller already treats as "not resolvable this frame" rather than an error.
+            // Atlas retirement leaves these lanes absent for several animation polls, on purpose.
+            // In that window graph consumers need the same semantic-neutral fallback that geometry gets;
+            // returning null here would point at a target that does not exist and crash compute
+            // binding.
             case "builtin.normalAtlas" -> {
                 NormalMapAtlas atlas = NormalMapAtlas.getInstance();
-                yield atlas == null ? null : atlas.getTextureView();
+                yield atlas == null ? LabPbrNeutralTextures.normalView() : atlas.getTextureView();
             }
             case "builtin.materialAtlas" -> {
                 MaterialMapAtlas atlas = MaterialMapAtlas.getInstance();
-                yield atlas == null ? null : atlas.getTextureView();
+                yield atlas == null ? LabPbrNeutralTextures.materialView() : atlas.getTextureView();
             }
             case "builtin.noise" -> NoiseTexture.getView();
             case OpaqueDepth.NAME -> GraphRunner.opaqueDepth().getView();
@@ -183,6 +208,10 @@ final class GraphInputResolver {
             case "builtin.output" -> mainRenderTarget().getColorTexture();
             case "builtin.celestials" -> CelestialSprites.atlasTexture();
             case "builtin.blockAtlas" -> BlockAtlasView.texture();
+            case "builtin.blockAtlasPages", "builtin.materialAtlasPages" -> {
+                GpuTextureView view = resolveBuiltinView(ref);
+                yield view == null ? null : view.texture();
+            }
             // The bounds table is only ever sampled, never a copy source or mipchain target, and its
             // texture is created lazily inside SpriteBoundsTexture. Nothing needs the raw handle.
             case "builtin.spriteBounds" -> null;
@@ -193,11 +222,11 @@ final class GraphInputResolver {
             case "builtin.lightmap" -> null;
             case "builtin.normalAtlas" -> {
                 NormalMapAtlas atlas = NormalMapAtlas.getInstance();
-                yield atlas == null ? null : atlas.getTexture();
+                yield atlas == null ? LabPbrNeutralTextures.normalView().texture() : atlas.getTexture();
             }
             case "builtin.materialAtlas" -> {
                 MaterialMapAtlas atlas = MaterialMapAtlas.getInstance();
-                yield atlas == null ? null : atlas.getTexture();
+                yield atlas == null ? LabPbrNeutralTextures.materialView().texture() : atlas.getTexture();
             }
             case "builtin.noise" -> NoiseTexture.getTexture();
             case OpaqueDepth.NAME -> GraphRunner.opaqueDepth().getTexture();

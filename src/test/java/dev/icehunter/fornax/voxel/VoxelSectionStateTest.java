@@ -87,4 +87,18 @@ class VoxelSectionStateTest {
         assertTrue(states.needsLightClear(0, pendingA), "slot clear leaves the propagated GPU light owner intact");
     }
 
+    @Test void sourceReadersSeeOnlyCommittedGeometryAndIgnorePendingLightOnlyChanges() {
+        var states = new VoxelSectionState(); states.reset(5);
+        var first = states.geometry(3, SectionPos.of(0, 0, 0));
+        org.junit.jupiter.api.Assertions.assertNull(states.committedGeometry(3));
+        states.commit(3, first);
+        assertEquals(first, states.committedGeometry(3));
+        states.content(3);
+        assertEquals(first, states.committedGeometry(3));
+        states.geometry(3, SectionPos.of(0, 0, 0));
+        org.junit.jupiter.api.Assertions.assertNull(states.committedGeometry(3));
+        states.invalidate(java.util.List.of(3));
+        org.junit.jupiter.api.Assertions.assertNull(states.committedGeometry(3));
+    }
+
 }
