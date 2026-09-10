@@ -56,4 +56,22 @@ class EnabledIfExprTest {
     void malformedExpressionThrows() {
         assertThrows(FornaxPackError.class, () -> EnabledIfExpr.parse("A ==="));
     }
+
+    /** The same string must give back the same object. Text that differs by a byte is a different key. */
+    @Test
+    void parseReusesResultForTheSameString() {
+        EnabledIfExpr first = EnabledIfExpr.parse("SSAO_ENABLED && A == 1");
+        EnabledIfExpr second = EnabledIfExpr.parse("SSAO_ENABLED && A == 1");
+        assertSame(first, second, "the same string must reuse the stored parse");
+        EnabledIfExpr differentSpacing = EnabledIfExpr.parse("SSAO_ENABLED  &&  A == 1");
+        assertNotSame(first, differentSpacing,
+                "the key is the exact string, not a tidied-up form of it");
+    }
+
+    /** A bad string must throw every time. The failure is not kept. */
+    @Test
+    void malformedExpressionThrowsOnEveryCall() {
+        assertThrows(FornaxPackError.class, () -> EnabledIfExpr.parse("BROKEN ==="));
+        assertThrows(FornaxPackError.class, () -> EnabledIfExpr.parse("BROKEN ==="));
+    }
 }

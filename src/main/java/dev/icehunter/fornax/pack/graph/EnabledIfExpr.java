@@ -7,6 +7,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * A boolean expression over compile-option values: integer/boolean literals and option names, with
@@ -14,6 +15,12 @@ import java.util.Set;
  * Recursive-descent; no runtime state, safe to run against any value map.
  */
 public final class EnabledIfExpr {
+    // parse() depends only on the string it is given: the same text always gives the same tree,
+    // and evaluate() takes the option values from the caller, so nothing here is tied to the pack
+    // in use. GraphRunner and TargetPlan parse the same enabled_if strings many times a second, so
+    // the result is kept and handed back. It cannot go stale, and never needs clearing.
+    private static final ConcurrentHashMap<String, EnabledIfExpr> PARSE_CACHE = new ConcurrentHashMap<>();
+
     private final Node root;
     private final Set<String> names;
 
@@ -23,6 +30,10 @@ public final class EnabledIfExpr {
     }
 
     public static EnabledIfExpr parse(String source) {
+        return PARSE_CACHE.computeIfAbsent(source, EnabledIfExpr::doParse);
+    }
+
+    private static EnabledIfExpr doParse(String source) {
         Parser p = new Parser(tokenize(source), source);
         Node n = p.parseOr();
         p.expectEnd();
