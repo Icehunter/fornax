@@ -60,7 +60,10 @@ public class FluidRendererMaterialIdMixin {
         // see the class doc. Guarded for an empty FluidState only out of caution; this renderer is
         // not called without one.
         BlockState fluidKey = fluidState.isEmpty() ? blockState : fluidState.createLegacyBlock();
-        MaterialIdContext.set(BlockMaterials.idForState(fluidKey));
+        // Every fact below is set in one MaterialIdContext.setAll call, in place of five separate
+        // setters. Each of those read thread storage on its own. This runs once per fluid surface,
+        // in the busiest part of building the world's mesh.
+        //
         // Fluids are meshed HERE, not by BlockRenderer, so the precipitation lane has to be set on
         // this path too -- water is a fluid, and setting it only on the block path left every water
         // quad carrying whatever flag the previous BLOCK happened to leave behind. That reads as
@@ -76,11 +79,7 @@ public class FluidRendererMaterialIdMixin {
         // This carries the TYPE (none/rain/snow), same as the block path. Water in a snowy biome must
         // report SNOW and not merely "precipitates", or the water pre-pass writes a positive alpha
         // sign and water_composite rings a frozen lake with rain splashes.
-        Minecraft client = Minecraft.getInstance();
-        MaterialIdContext.setPrecipitation(client.level == null
-                ? Biome.Precipitation.RAIN
-                : client.level.getPrecipitationAt(blockPos));
-
+        //
         // Light emission on the fluid path too, and this one is not a formality: LAVA is level 15,
         // the brightest emitter in the game, and it is meshed HERE and never by BlockRenderer. A
         // block-path-only lane would leave every lava surface carrying whatever the previous BLOCK
@@ -88,8 +87,7 @@ public class FluidRendererMaterialIdMixin {
         // same seam. Keyed on fluidKey so getLightEmission() answers for the FLUID (Blocks.LAVA /
         // Blocks.WATER) and never for whatever contains it -- a waterlogged lantern's water quads
         // must not carry the lantern's level 15.
-        MaterialIdContext.setLightEmission(fluidKey.getLightEmission());
-
+        //
         // Set EXPLICITLY on this path too, and not left to the block path's clear(). Every lane on
         // this seam that was set on one path and inherited on the other has been a shipped bug once
         // already -- water carrying the previous block's precipitation flag is the recorded case --
@@ -97,14 +95,17 @@ public class FluidRendererMaterialIdMixin {
         // whatever block was meshed before it. No fluid is in the coal tag, so this resolves to
         // NONE today; the point is that it resolves from the fluid's own BlockState rather than
         // from history -- or from a waterlogged host block's flags.
-        MaterialIdContext.setBlockClass(BlockClasses.flagsForBlock(fluidKey.getBlock()));
-
+        //
         // Page lookup keyed on fluidKey too, and not the (possibly waterlogged) host blockState --
         // same rationale as every other lane above. BlockAtlasPages.pageForState(BlockState) is
         // called directly with the already-resolved fluidKey rather than through the
         // pageForFluidState(FluidState) overload, avoiding a second createLegacyBlock() resolution
         // in this hot path -- see BlockAtlasPages' own doc on that overload.
-        MaterialIdContext.setAtlasPage(BlockAtlasPages.pageForState(fluidKey));
+        Minecraft client = Minecraft.getInstance();
+        MaterialIdContext.setAll(BlockMaterials.idForState(fluidKey),
+                client.level == null ? Biome.Precipitation.RAIN : client.level.getPrecipitationAt(blockPos),
+                fluidKey.getLightEmission(), BlockClasses.flagsForBlock(fluidKey.getBlock()),
+                BlockAtlasPages.pageForState(fluidKey));
     }
 
     @Inject(method = "render(Lnet/caffeinemc/mods/sodium/client/world/LevelSlice;"

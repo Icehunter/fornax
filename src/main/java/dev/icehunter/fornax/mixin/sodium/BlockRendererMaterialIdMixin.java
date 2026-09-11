@@ -28,7 +28,10 @@ public class BlockRendererMaterialIdMixin {
             + "Lnet/minecraft/core/BlockPos;)V", at = @At("HEAD"))
     private void fornax$setMaterialId(BlockStateModel model, BlockState state, BlockPos pos,
                                       BlockPos origin, CallbackInfo ci) {
-        MaterialIdContext.set(BlockMaterials.idForState(state));
+        // Every fact below is set in one MaterialIdContext.setAll call, in place of five separate
+        // setters. Each of those read thread storage on its own. This runs once per block, in the
+        // busiest part of building the world's mesh.
+        //
         // Biome precipitation TYPE -- none/rain/snow, not a boolean -- captured per BLOCK while its
         // position is in hand. Read from the client level on a chunk-build thread: a read-only biome
         // lookup against chunk data that is already resident (this block is being meshed, so its
@@ -46,20 +49,14 @@ public class BlockRendererMaterialIdMixin {
         // Defaults to RAIN if the level is gone mid-reload, matching the pre-lane behaviour rather
         // than stamping a permanently dry patch into a mesh that then persists until the chunk is
         // rebuilt. NOT NONE: dryness is the visible change, not the neutral one.
-        Minecraft client = Minecraft.getInstance();
-        MaterialIdContext.setPrecipitation(client.level == null
-                ? Biome.Precipitation.RAIN
-                : client.level.getPrecipitationAt(pos));
-
+        //
         // How much light this block emits, straight off the BlockState already in hand. No lookup,
         // no allocation and no level access -- getLightEmission() reads a field cached on the
         // BlockState (SectionHarvester already calls it on the voxel path, javap-confirmed against
         // the 26.2 jar), which is what makes it affordable in the hottest loop in terrain meshing.
-        //
         // Vanilla's own number for a vanilla question. See MaterialIdContext.setLightEmission for
         // why this is not the per-block-id material table Fornax refuses to host.
-        MaterialIdContext.setLightEmission(state.getLightEmission());
-
+        //
         // Which vanilla CATEGORIES this block is in -- today just "is it a coal ore", per
         // Minecraft's own #minecraft:coal_ores tag. A map lookup keyed by Block, exactly like the
         // material id above and rebuilt on the same tag-load pass, so it costs one hash probe per
@@ -67,13 +64,16 @@ public class BlockRendererMaterialIdMixin {
         // collection, and asking that in the hottest loop in terrain meshing is the kind of cost
         // this encoder has already been burned by once (see FornaxChunkVertex's note on the
         // per-quad sprite lookup that dropped the frame rate to single digits).
-        MaterialIdContext.setBlockClass(BlockClasses.flagsForBlock(state.getBlock()));
-
+        //
         // Which block-atlas PAGE this block's quads should sample from (M13's paged block atlas).
         // BlockAtlasPages.pageForState answers 0 for every block until a later phase populates its
         // cache (see that class's own doc), so this is currently a no-op write of the value every
         // block already implicitly had -- wiring the lookup path now costs nothing behaviorally.
-        MaterialIdContext.setAtlasPage(BlockAtlasPages.pageForState(state));
+        Minecraft client = Minecraft.getInstance();
+        MaterialIdContext.setAll(BlockMaterials.idForState(state),
+                client.level == null ? Biome.Precipitation.RAIN : client.level.getPrecipitationAt(pos),
+                state.getLightEmission(), BlockClasses.flagsForBlock(state.getBlock()),
+                BlockAtlasPages.pageForState(state));
     }
 
     @Inject(method = "renderModel(Lnet/minecraft/client/renderer/block/dispatch/BlockStateModel;"

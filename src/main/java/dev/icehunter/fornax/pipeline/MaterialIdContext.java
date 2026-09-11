@@ -41,6 +41,46 @@ public final class MaterialIdContext {
         CURRENT.get()[ID_SLOT] = id & 0xFFFF;
     }
 
+    /**
+     * Sets every fact about a block in one step, in place of the five separate calls
+     * {@link #set}/{@link #setPrecipitation(Biome.Precipitation)}/{@link #setLightEmission}/
+     * {@link #setBlockClass}/{@link #setAtlasPage} would each make. Each of those reads thread
+     * storage on its own; this reads it once. Runs once for every block drawn, in the busiest
+     * part of building the world's mesh. Keeps the same checks as the single setters: light level
+     * 0 to 15, block class flags within {@link BlockClasses#MASK}, atlas page not negative.
+     */
+    public static void setAll(int id, Biome.Precipitation precipitation, int lightEmission,
+                              int blockClassFlags, int atlasPage) {
+        if (lightEmission < 0 || lightEmission > MAX_LIGHT_EMISSION) {
+            throw new IllegalArgumentException(
+                    "light emission " + lightEmission + " outside vanilla's 0.." + MAX_LIGHT_EMISSION);
+        }
+        if (blockClassFlags < 0 || blockClassFlags > BlockClasses.MASK) {
+            throw new IllegalArgumentException(
+                    "block class flags " + blockClassFlags + " outside 0.." + BlockClasses.MASK);
+        }
+        if (atlasPage < 0) {
+            throw new IllegalArgumentException("atlas page " + atlasPage + " must not be negative");
+        }
+        int[] slots = CURRENT.get();
+        slots[ID_SLOT] = id & 0xFFFF;
+        slots[PRECIPITATION_SLOT] = precipitationCode(precipitation) & 0xFF;
+        slots[LIGHT_EMISSION_SLOT] = lightEmission;
+        slots[BLOCK_CLASS_SLOT] = blockClassFlags;
+        slots[PAGE_SLOT] = atlasPage;
+    }
+
+    /** Holds every fact {@link dev.icehunter.fornax.pipeline.VertexFacts#snapshot} needs, read in
+     * one step instead of four. Package-private: {@code VertexFacts} is the only caller, and it
+     * lives in the same package. */
+    record Snapshot(int materialId, int precipitation, int lightEmission, int blockClassFlags) { }
+
+    static Snapshot snapshotForVertex() {
+        int[] slots = CURRENT.get();
+        return new Snapshot(slots[ID_SLOT], slots[PRECIPITATION_SLOT], slots[LIGHT_EMISSION_SLOT],
+                slots[BLOCK_CLASS_SLOT]);
+    }
+
     public static int get() {
         return CURRENT.get()[ID_SLOT];
     }
@@ -72,11 +112,17 @@ public final class MaterialIdContext {
      * rather than each keeping a copy of the switch that could drift.
      */
     public static void setPrecipitation(Biome.Precipitation precipitation) {
-        setPrecipitation(switch (precipitation) {
+        setPrecipitation(precipitationCode(precipitation));
+    }
+
+    /** Used by both {@link #setPrecipitation(Biome.Precipitation)} and {@link #setAll}, so both
+     * keep the same mapping from the enum to its code. */
+    private static int precipitationCode(Biome.Precipitation precipitation) {
+        return switch (precipitation) {
             case NONE -> PRECIPITATION_NONE;
             case RAIN -> PRECIPITATION_RAIN;
             case SNOW -> PRECIPITATION_SNOW;
-        });
+        };
     }
 
     public static int getPrecipitation() {

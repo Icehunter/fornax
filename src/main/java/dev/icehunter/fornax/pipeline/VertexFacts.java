@@ -38,10 +38,11 @@ public final class VertexFacts {
                 | ((blockClassFlags & BlockClasses.MASK) << CLASS_SHIFT);
     }
 
-    /** The current block's facts from the context. */
+    /** The current block's facts from the context, read in one step instead of four. Runs once
+     * for every quad that has no stamp yet, in the busiest part of building the world's mesh. */
     public static int snapshot() {
-        return pack(MaterialIdContext.get(), MaterialIdContext.getPrecipitation(),
-                MaterialIdContext.getLightEmission(), MaterialIdContext.getBlockClass());
+        MaterialIdContext.Snapshot s = MaterialIdContext.snapshotForVertex();
+        return pack(s.materialId(), s.precipitation(), s.lightEmission(), s.blockClassFlags());
     }
 
     public static boolean isStamped(int facts) {
