@@ -2,6 +2,7 @@ package dev.icehunter.fornax.voxel;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import net.minecraft.client.model.geom.builders.UVPair;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModelPart;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
@@ -9,6 +10,7 @@ import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.client.resources.model.sprite.Material;
 import net.minecraft.core.Direction;
 import org.joml.Vector3f;
+import org.joml.Vector3fc;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -61,18 +63,77 @@ class VoxelModelShapeTest {
         extra.add(quad(Direction.UP, new Vector3f(0, 15, 0), new Vector3f(16, 15, 16)));
         assertNull(VoxelModelShape.reconstruct(List.of(part(extra))));
     }
-    @Test void fractionalRotatedAndBowTieFacesAreUnsupported() {
+    @Test void rotatedAndBowTieFacesAreUnsupported() {
         var base = cuboid(2, 2, 2, 14, 14, 14, null);
-        for (int kind = 0; kind < 3; kind++) {
+        for (int kind = 0; kind < 2; kind++) {
             var altered = new ArrayList<>(base); var q = altered.getFirst();
-            var p0 = new Vector3f(q.position0()); var p1 = new Vector3f(q.position1());
-            var p2 = new Vector3f(q.position2()); var p3 = new Vector3f(q.position3());
-            if (kind == 0) { p0.x += 1f / 32; p1.x += 1f / 32; p2.x += 1f / 32; p3.x += 1f / 32; }
-            if (kind == 1) p1.y += 1f / 16;
-            if (kind == 2) { var swap = p1; p1 = p2; p2 = swap; }
+            Vector3fc p0 = q.position0(), p1 = q.position1(), p2 = q.position2(), p3 = q.position3();
+            if (kind == 0) {
+                // A real 30 degree turn about the cell center. Every corner leaves its axis and
+                // the face is dropped.
+                p0 = rotateAboutCenter(p0, 30); p1 = rotateAboutCenter(p1, 30);
+                p2 = rotateAboutCenter(p2, 30); p3 = rotateAboutCenter(p3, 30);
+            } else {
+                var swap = p1; p1 = p2; p2 = swap;
+            }
             altered.set(0, new BakedQuad(p0,p1,p2,p3,q.packedUV0(),q.packedUV1(),q.packedUV2(),q.packedUV3(),q.direction(),q.materialInfo()));
             assertNull(VoxelModelShape.reconstruct(List.of(part(altered))), "case " + kind);
         }
+    }
+    @Test void fractionalOffsetsRoundOutwardNeverInward() {
+        var quads = cuboid(1.2f, 1.2f, 1.2f, 14.8f, 14.8f, 14.8f, null);
+        var boxes = VoxelModelShape.reconstruct(List.of(part(quads)));
+        assertNotNull(boxes);
+        assertEquals(1, boxes.size());
+        var box = boxes.getFirst();
+        assertEquals(1, box.minX()); assertEquals(15, box.maxX());
+        assertEquals(1, box.minY()); assertEquals(15, box.maxY());
+        assertEquals(1, box.minZ()); assertEquals(15, box.maxZ());
+    }
+    @Test void standingSignModelRebuildsToItsPostAndBoard() {
+        // assets/minecraft/models/block/template_sign_rot_0.json: a post and a board at thirds
+        // of a 1/16. The board carries the game's 0.0001 degree turn, there to stop face culling.
+        // It is applied here to every corner of both boxes.
+        var post = rotateAboutCenter(cuboid(7.33333f, 0f, 7.33333f, 8.66667f, 9.33333f, 8.66667f, null), 0.0001);
+        var board = rotateAboutCenter(cuboid(0f, 9.33333f, 7.33333f, 16f, 17.33333f, 8.66667f, null), 0.0001);
+        var quads = new ArrayList<>(post);
+        quads.addAll(board);
+        var boxes = VoxelModelShape.reconstruct(List.of(part(quads)));
+        assertNotNull(boxes, "the post and board must both rebuild from thirds of a 1/16 and the "
+                + "tiny turn");
+        // Post 7.33333..8.66667 rounds outward to 7..9. Board 9.33333..17.33333 rounds outward to
+        // 9..17, then its top is cut to 16.
+        assertEquals(Set.of(
+                new VoxelShapeClassifier.PackedBox(7, 0, 7, 9, 10, 9),
+                new VoxelShapeClassifier.PackedBox(0, 9, 7, 16, 16, 9)), Set.copyOf(boxes));
+    }
+    @Test void wallSignModelRebuildsToAThinBoardOnTheWall() {
+        // assets/minecraft/models/block/template_wall_sign.json has one box and no turn.
+        // 4.33333..12.33333 rounds outward to 4..13; 0.33333..1.66667 rounds outward to 0..2.
+        var quads = cuboid(0f, 4.33333f, 0.33333f, 16f, 12.33333f, 1.66667f, null);
+        var boxes = VoxelModelShape.reconstruct(List.of(part(quads)));
+        assertNotNull(boxes);
+        assertEquals(Set.of(new VoxelShapeClassifier.PackedBox(0, 4, 0, 16, 13, 2)), Set.copyOf(boxes));
+    }
+    @Test void aQuadWithNoAxisAllFourCornersAgreeOnIsUnsupported() {
+        // One corner of the DOWN face is lifted off its plane, not turned. No axis has all four
+        // corners in line, so the axis search drops it before the corner check runs. The corner
+        // check is covered by rotatedAndBowTieFacesAreUnsupported and
+        // hangingSignChainsKeepTheModelUnsupported.
+        var quads = new ArrayList<>(cuboid(2, 2, 2, 14, 14, 14, null));
+        var q = quads.getFirst();
+        var lifted = new Vector3f(q.position0()).add(0, 2f / 16f, 0);
+        quads.set(0, new BakedQuad(lifted, q.position1(), q.position2(), q.position3(),
+                q.packedUV0(), q.packedUV1(), q.packedUV2(), q.packedUV3(), q.direction(), q.materialInfo()));
+        assertNull(VoxelModelShape.reconstruct(List.of(part(quads))));
+    }
+    @Test void hangingSignChainsKeepTheModelUnsupported() {
+        // assets/minecraft/models/block/template_hanging_sign_rot_0.json: the board is an exact
+        // grid box, but the chain quads are turned 45 degrees about the cell center. That is a
+        // real turn, so the whole model is dropped.
+        var quads = new ArrayList<>(cuboid(1, 0, 7, 15, 10, 9, null));
+        quads.addAll(rotateAboutCenter(cuboid(6, 10, 6, 10, 16, 10, null), 45));
+        assertNull(VoxelModelShape.reconstruct(List.of(part(quads))));
     }
     @Test void alphaUncertaintyAndTranslucencyCannotBecomeOpaqueCuboids() {
         for (var layer : List.of(ChunkSectionLayer.CUTOUT, ChunkSectionLayer.TRANSLUCENT)) {
@@ -102,12 +163,37 @@ class VoxelModelShapeTest {
         return result;
     }
     static List<BakedQuad> cuboid(int x0,int y0,int z0,int x1,int y1,int z1,Direction missing) {
+        return cuboid((float) x0, (float) y0, (float) z0, (float) x1, (float) y1, (float) z1, missing);
+    }
+    static List<BakedQuad> cuboid(float x0,float y0,float z0,float x1,float y1,float z1,Direction missing) {
         var out = new ArrayList<BakedQuad>();
         for(var face:Direction.values()) if(face!=missing) {
             var lo=new Vector3f(x0,y0,z0);var hi=new Vector3f(x1,y1,z1);
             int axis=face.getAxis()==Direction.Axis.X?0:face.getAxis()==Direction.Axis.Y?1:2;
             float plane=face.getAxisDirection()==Direction.AxisDirection.POSITIVE?hi.get(axis):lo.get(axis);
             lo.setComponent(axis,plane);hi.setComponent(axis,plane);out.add(quad(face,lo,hi));
+        }
+        return out;
+    }
+    /** Turns a point given in block units (0..1, the {@code BakedQuad} position unit) by
+     * {@code angleDegrees} about the y axis through the cell center (8,*,8) in 1/16 units, the
+     * same pivot and axis the game's sign board uses. */
+    static Vector3f rotateAboutCenter(Vector3fc position, double angleDegrees) {
+        var sixteenths = new Vector3f(position).mul(16);
+        double radians = Math.toRadians(angleDegrees);
+        double cos = Math.cos(radians), sin = Math.sin(radians);
+        double dx = sixteenths.x() - 8, dz = sixteenths.z() - 8;
+        float x = (float) (8 + dx * cos - dz * sin);
+        float z = (float) (8 + dx * sin + dz * cos);
+        return new Vector3f(x, sixteenths.y(), z).div(16);
+    }
+    static List<BakedQuad> rotateAboutCenter(List<BakedQuad> quads, double angleDegrees) {
+        var out = new ArrayList<BakedQuad>();
+        for (var q : quads) {
+            out.add(new BakedQuad(
+                    rotateAboutCenter(q.position0(), angleDegrees), rotateAboutCenter(q.position1(), angleDegrees),
+                    rotateAboutCenter(q.position2(), angleDegrees), rotateAboutCenter(q.position3(), angleDegrees),
+                    q.packedUV0(), q.packedUV1(), q.packedUV2(), q.packedUV3(), q.direction(), q.materialInfo()));
         }
         return out;
     }

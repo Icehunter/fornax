@@ -2922,8 +2922,11 @@ hands them to `VoxelModelShape.reconstruct` with no world and no position. That 
 is safe on the harvest thread. It never calls the live Fabric model-emission hook, which a
 connected-texture mod hooks with a real world and position. A model whose geometry changes only
 inside that hook is not seen this way and keeps its selection-shape fallback. The fence case above,
-rails drawn inside the selection slab, is why the rebuild exists. Off-grid, rotated, open, or
-alpha-uncertain geometry also keeps the selection-shape fallback.
+rails drawn inside the selection slab, is why the rebuild exists. A quad's corners round outward to
+the 1/16 grid: low side down, high side up, and the face plane away from the solid. Vanilla signs
+are the test case: a post and board at thirds of a 1/16, the board turned 0.0001 degrees so the
+game does not cull it. A quad turned by a real angle, bent out of a rectangle, open, or with
+unproven alpha keeps the selection shape.
 
 Opposed rectangular faces propose candidate cuboids. Six rendered faces certify a closed body;
 a missing face may close only when its entire rectangle lies strictly inside an already certified

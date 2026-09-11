@@ -27,11 +27,31 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.jspecify.annotations.Nullable;
 
 /** Exact opaque cuboids reconstructed from final rendered rectangles, within the palette ABI.
- * Unsupported geometry retains the selection-shape fallback; no box is enlarged to make it fit. */
+ * A shape the proof cannot close keeps the block's selection shape. No box is made bigger to fit.
+ *
+ * <p>Each corner of a quad is rounded outward to the 1/16 grid. The low side of a face rounds
+ * down, the high side rounds up, and the face plane rounds away from the solid it belongs to. A
+ * box 1/16 too big shades a little too much. A box 1/16 too small lets a shadow ray start inside
+ * it, and the surface goes black. That black surface is the bug this rebuild exists to stop. A
+ * plane past the edge of the cell (a sign board that pokes into the block above) is cut at the
+ * edge. Only a face with nothing left after that cut is dropped. Vanilla signs are the test case:
+ * {@code assets/minecraft/models/block/template_sign_rot_0.json} puts the post and board at thirds
+ * of a 1/16 and turns the board by 0.0001 degrees so the game does not cull its faces.
+ *
+ * <p>Two kinds of turn fail in two places. A quad turned flat about its own normal (a floor tile
+ * spun in place) still has all four corners on one plane, so the axis search passes, but the
+ * corners do not sit at the low and high ends of that plane, so the corner check drops it. A
+ * quad tipped up on one edge has no axis its four corners share, so the axis search drops it. Both
+ * keep the selection shape. */
 final class VoxelModelShape {
     // Six faces per ABI box bounds proof work; one coincident overlay per face bounds capture.
     private static final int MAX_FACES = 6 * VoxelShapeClassifier.MAX_BOXES;
     private static final int MAX_QUADS = 2 * MAX_FACES;
+    // The shadow ray starts 1/4096 block off a surface, which is 1/256 of a 1/16. Any error under
+    // that is already treated as exact by the ray. A quarter of it, 1e-3 of a 1/16, is well inside.
+    // The 0.0001 degree sign board turn and float noise are both far below this. A real offset such
+    // as a third of a 1/16 (0.33333) is far above it, stays as is, and still rounds outward.
+    private static final float GRID_EPSILON = 1e-3f;
     // A resolver lives for one section harvest (16^3 cells), never across model/atlas lifetimes.
     private static final int MAX_CACHE_ENTRIES = 16 * 16 * 16;
     private static final Comparator<Box> ORDER = Comparator.comparingInt(Box::x0).thenComparingInt(Box::y0)
@@ -192,27 +212,64 @@ final class VoxelModelShape {
         return boxes.stream().map(box -> new VoxelShapeClassifier.PackedBox(box.x0,box.y0,box.z0,box.x1,box.y1,box.z1)).toList();
     }
 
+    /** Turns one drawn quad into an axis-aligned {@link Face} in 1/16 units, or null when the
+     * quad cannot be shown to be the face of a box. A value within {@link #GRID_EPSILON} of a grid
+     * line counts as on it. The face plane rounds away from the solid: up for a face that points
+     * up or out, down for the other side. The face edges round outward: low side down, high side
+     * up. All values are cut to 0..16, so a plane past the cell edge is cut to the edge. A quad with
+     * no shared axis is tipped and is dropped here. A quad with a shared axis whose corners are not
+     * at the ends of its edges is turned flat and is dropped by the corner check. A face with no
+     * width or height left after the cut is dropped. */
     private static @Nullable Face rectangle(float[] position) {
-        int[][] p = new int[4][3];
-        int[] lo = {16,16,16}, hi = {0,0,0};
+        float[][] p = new float[4][3];
         for (int vertex = 0; vertex < 4; vertex++) for (int c = 0; c < 3; c++) {
-            float value = position[vertex * 3 + c] * 16;
-            if (!(value >= 0 && value <= 16) || value != Math.rint(value)) return null;
-            p[vertex][c] = (int)value; lo[c] = Math.min(lo[c],p[vertex][c]); hi[c] = Math.max(hi[c],p[vertex][c]);
+            float sixteenths = position[vertex * 3 + c] * 16;
+            float nearest = Math.round(sixteenths);
+            p[vertex][c] = Math.abs(sixteenths - nearest) < GRID_EPSILON ? nearest : sixteenths;
         }
-        int axis = lo[0] == hi[0] ? 0 : lo[1] == hi[1] ? 1 : lo[2] == hi[2] ? 2 : -1;
+        int axis = -1;
+        for (int c = 0; c < 3; c++) {
+            float lo = min4(p, c), hi = max4(p, c);
+            if (hi - lo < GRID_EPSILON) { axis = c; break; }
+        }
         if (axis < 0) return null;
         int s = (axis + 1) % 3, t = (axis + 2) % 3;
-        if (lo[axis] != hi[axis] || lo[s] == hi[s] || lo[t] == hi[t]) return null;
+        float loS = min4(p, s), hiS = max4(p, s), loT = min4(p, t), hiT = max4(p, t);
+        // The winding sign below is a cross product of two corners. Each corner can carry noise up
+        // to GRID_EPSILON, in opposite directions, so an edge under twice that could be noise alone.
+        // Asking for a full 2 * GRID_EPSILON keeps the sign off pure noise.
+        if (hiS - loS < 2 * GRID_EPSILON || hiT - loT < 2 * GRID_EPSILON) return null;
         int[] corners = new int[4]; int mask = 0;
         for (int v = 0; v < 4; v++) {
-            if ((p[v][s] != lo[s] && p[v][s] != hi[s]) || (p[v][t] != lo[t] && p[v][t] != hi[t])) return null;
-            corners[v] = (p[v][s] == hi[s] ? 1 : 0) | (p[v][t] == hi[t] ? 2 : 0); mask |= 1 << corners[v];
+            boolean atLoS = Math.abs(p[v][s] - loS) < GRID_EPSILON, atHiS = Math.abs(p[v][s] - hiS) < GRID_EPSILON;
+            boolean atLoT = Math.abs(p[v][t] - loT) < GRID_EPSILON, atHiT = Math.abs(p[v][t] - hiT) < GRID_EPSILON;
+            if ((!atLoS && !atHiS) || (!atLoT && !atHiT)) return null;
+            corners[v] = (atHiS ? 1 : 0) | (atHiT ? 2 : 0); mask |= 1 << corners[v];
         }
         if (mask != 15 || (corners[0] ^ corners[2]) != 3 || (corners[1] ^ corners[3]) != 3) return null;
-        int winding = (p[1][s]-p[0][s])*(p[2][t]-p[0][t])-(p[1][t]-p[0][t])*(p[2][s]-p[0][s]);
-        int sign = Integer.signum(winding);
-        return new Face(axis,sign,lo[axis],lo[s],lo[t],hi[s],hi[t]);
+        float winding = (p[1][s]-p[0][s])*(p[2][t]-p[0][t]) - (p[1][t]-p[0][t])*(p[2][s]-p[0][s]);
+        int sign = winding >= 0 ? 1 : -1;
+        int plane = sign > 0 ? ceilClamped(max4(p, axis)) : floorClamped(min4(p, axis));
+        int roundedS0 = floorClamped(loS), roundedS1 = ceilClamped(hiS);
+        int roundedT0 = floorClamped(loT), roundedT1 = ceilClamped(hiT);
+        if (roundedS0 >= roundedS1 || roundedT0 >= roundedT1) return null;
+        return new Face(axis, sign, plane, roundedS0, roundedT0, roundedS1, roundedT1);
+    }
+
+    private static float min4(float[][] p, int c) {
+        return Math.min(Math.min(p[0][c], p[1][c]), Math.min(p[2][c], p[3][c]));
+    }
+
+    private static float max4(float[][] p, int c) {
+        return Math.max(Math.max(p[0][c], p[1][c]), Math.max(p[2][c], p[3][c]));
+    }
+
+    private static int floorClamped(float value) {
+        return (int) Math.max(0, Math.min(16, Math.floor(value)));
+    }
+
+    private static int ceilClamped(float value) {
+        return (int) Math.max(0, Math.min(16, Math.ceil(value)));
     }
 
     private static boolean closed(Box box, Set<Face> faces, Set<Box> certified) {
