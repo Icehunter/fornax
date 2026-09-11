@@ -753,6 +753,15 @@ class GraphValidatorTest {
     }
 
     @Test
+    void entityOccludersComputeReaderFixtureThrows() {
+        GraphSpec g = PackTomlLoader.loadGraph(
+                resource("entity_occluders_compute_reader/graph.toml"), "graph.toml");
+        FornaxPackError e = assertThrows(FornaxPackError.class,
+                () -> GraphValidator.validate(g, Map.of(), 1920, 1080));
+        assertEquals("pass.march.inputs", e.key());
+    }
+
+    @Test
     void enabledIfRuntimeOptionFixtureThrows() {
         GraphSpec g = PackTomlLoader.loadGraph(resource("runtime_in_enabledif/graph.toml"), "graph.toml");
         Map<String, String> shaderSrc = new LinkedHashMap<>();
@@ -867,7 +876,8 @@ class GraphValidatorTest {
 
     @Test
     void fixturePackAndScreensTomlsLoadCleanly() {
-        for (String name : List.of("missing_target", "cycle", "runtime_in_enabledif", "bad_toml", "volume_missing_dims")) {
+        for (String name : List.of("missing_target", "cycle", "runtime_in_enabledif", "bad_toml",
+                "volume_missing_dims", "entity_occluders_compute_reader")) {
             assertDoesNotThrow(() -> PackTomlLoader.loadMeta(resource(name + "/pack.toml"), "pack.toml"));
             assertDoesNotThrow(() -> PackTomlLoader.loadScreens(resource(name + "/screens.toml"), "screens.toml"));
         }

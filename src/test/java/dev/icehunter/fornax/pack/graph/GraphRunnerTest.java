@@ -475,6 +475,96 @@ class GraphRunnerTest {
         assertFalse(GraphRunner.anyEnabledPassReadsSurfaceFluidClipmap(graph, Map.of()));
     }
 
+    // --- anyEnabledGraphicsPassReadsEntityOccluders --------------------------------------------
+
+    @Test
+    void entityOccluderGateAdmitsAnEnabledFullscreenReader() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("march", PassType.FULLSCREEN, null, null, "shaders/post/march.fsh",
+                        List.of(EntityOccluderBuffer.TARGET), List.of("builtin.output"),
+                        null, null, List.of(), null, null, null)));
+        assertTrue(GraphRunner.anyEnabledGraphicsPassReadsEntityOccluders(g, Map.of()));
+    }
+
+    @Test
+    void entityOccluderGateAdmitsAnEnabledParticlesReader() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("march", PassType.PARTICLES, null, null, "shaders/particles/march",
+                        List.of(EntityOccluderBuffer.TARGET), List.of("sceneColor"),
+                        null, null, List.of(), null, null, null)));
+        assertTrue(GraphRunner.anyEnabledGraphicsPassReadsEntityOccluders(g, Map.of()));
+    }
+
+    @Test
+    void entityOccluderGateRefusesAComputeOnlyReader() {
+        // The upload runs on the graphics queue only (see EntityOccluderUpload). GraphValidator
+        // refuses a compute reader of this target for the same reason, so the gate and the
+        // validator agree.
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("march", PassType.COMPUTE, null, null, "shaders/compute/march.comp",
+                        List.of(EntityOccluderBuffer.TARGET), List.of("out"),
+                        null, null, List.of(1, 1, 1), null, null, null)));
+        assertFalse(GraphRunner.anyEnabledGraphicsPassReadsEntityOccluders(g, Map.of()));
+    }
+
+    @Test
+    void entityOccluderGateIsFalseWhenTheReaderIsDisabledByEnabledIf() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("march", PassType.FULLSCREEN, null, null, "shaders/post/march.fsh",
+                        List.of(EntityOccluderBuffer.TARGET), List.of("builtin.output"),
+                        null, "LOCAL_SHADOWS", List.of(), null, null, null)));
+        assertFalse(GraphRunner.anyEnabledGraphicsPassReadsEntityOccluders(g, Map.of("LOCAL_SHADOWS", 0)));
+        assertTrue(GraphRunner.anyEnabledGraphicsPassReadsEntityOccluders(g, Map.of("LOCAL_SHADOWS", 1)));
+    }
+
+    // --- graphicsDrainableBufferTargets -----------------------------------------------------------
+
+    @Test
+    void graphicsDrainableTargetsIncludeATargetReadOnlyByAFullscreenPass() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("march", PassType.FULLSCREEN, null, null, "shaders/post/march.fsh",
+                        List.of(EntityOccluderBuffer.TARGET), List.of("builtin.output"),
+                        null, null, List.of(), null, null, null)));
+        assertEquals(List.of(EntityOccluderBuffer.TARGET),
+                GraphRunner.graphicsDrainableBufferTargets(g, Map.of()));
+    }
+
+    @Test
+    void graphicsDrainableTargetsExcludeATargetWithAnEnabledComputeReader() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("march", PassType.FULLSCREEN, null, null, "shaders/post/march.fsh",
+                        List.of(WaterActorBuffer.TARGET), List.of("builtin.output"),
+                        null, null, List.of(), null, null, null),
+                new PassSpec("stir", PassType.COMPUTE, null, null, "shaders/compute/stir.comp",
+                        List.of(WaterActorBuffer.TARGET), List.of("out"),
+                        null, null, List.of(1, 1, 1), null, null, null)));
+        assertFalse(GraphRunner.graphicsDrainableBufferTargets(g, Map.of()).contains(WaterActorBuffer.TARGET),
+                "a target with any enabled compute reader is drained by ComputePassRunner instead");
+    }
+
+    @Test
+    void graphicsDrainableTargetsExcludeATargetWhoseOnlyReaderIsDisabledByEnabledIf() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("march", PassType.FULLSCREEN, null, null, "shaders/post/march.fsh",
+                        List.of(PrecipClipmapBuffer.TARGET), List.of("builtin.output"),
+                        null, "SNOW_SHADOWS", List.of(), null, null, null)));
+        assertTrue(GraphRunner.graphicsDrainableBufferTargets(g, Map.of("SNOW_SHADOWS", 0)).isEmpty(),
+                "the only reader is left out of the build, so nothing needs draining");
+    }
+
+    @Test
+    void graphicsDrainableTargetsNeverIncludeVoxelPublications() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("march", PassType.FULLSCREEN, null, null, "shaders/post/march.fsh",
+                        List.of(dev.icehunter.fornax.voxel.VoxelSourceWindow.TARGET,
+                                dev.icehunter.fornax.voxel.VoxelEmitterPool.TARGET,
+                                PrecipCoarseClipmapBuffer.TARGET),
+                        List.of("builtin.output"), null, null, List.of(), null, null, null)));
+        assertTrue(GraphRunner.graphicsDrainableBufferTargets(g, Map.of()).isEmpty(),
+                "voxelSourceWindow and voxelEmitterPool are sent to the GPU under the shared compute-queue lock, "
+                        + "and precipCoarseClipmap refuses graphics readers at validation");
+    }
+
     // --- Demotion crash: shouldMarkSourcesReady's generation guard -------------------------------
     //
     // Pins the ORDERING invariant, not just a symptom: a rebuild()'s RuntimeShaderPack.reload future

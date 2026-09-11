@@ -48,10 +48,18 @@ public final class FaceColorResolver {
 
     /** Layer-zero biome tint is applied only to quads that request that layer, before averaging. */
     public static int resolve(BlockState state, Direction face, int tint) {
+        return resolve(parts(state), face, tint, FaceColorResolver::averageQuadColor);
+    }
+
+    /** The state's baked model parts, collected fresh with the fixed harvest seed. Package-visible
+     * so a caller that needs the same state's parts twice, for a surface check and a shape rebuild,
+     * collects them once and passes the list to both. Never cache the result: see this class's own
+     * doc for why a state-keyed cache is wrong here. */
+    static List<BlockStateModelPart> parts(BlockState state) {
         BlockStateModel model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
         List<BlockStateModelPart> parts = new ArrayList<>();
         model.collectParts(RandomSource.create(HARVEST_SEED), parts);
-        return resolve(parts, face, tint, FaceColorResolver::averageQuadColor);
+        return parts;
     }
 
     // Leaves and inside faces are unculled, so walk both lists and sort the unculled ones into the
@@ -94,10 +102,7 @@ public final class FaceColorResolver {
     record Surface(boolean cutout, boolean cross) { }
 
     static Surface surface(BlockState state) {
-        BlockStateModel model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
-        List<BlockStateModelPart> parts = new ArrayList<>();
-        model.collectParts(RandomSource.create(HARVEST_SEED), parts);
-        return surface(parts);
+        return surface(parts(state));
     }
 
     /** The baked materials say whether a surface is alpha-tested. A cross is accepted only for the

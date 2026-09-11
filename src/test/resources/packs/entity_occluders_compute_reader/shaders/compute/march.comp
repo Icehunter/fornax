@@ -1,0 +1,5 @@
+#version 450
+// Stub: GraphValidator rejects this graph before any pipeline is built, so this file only needs
+// to be a compute shader the "march" pass can find.
+layout(local_size_x = 1) in;
+void main() {}

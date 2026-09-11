@@ -8,6 +8,7 @@ import net.minecraft.client.Minecraft;
 import dev.icehunter.fornax.atlas.MaterialSourceIndex;
 import net.minecraft.client.color.block.BlockTintSource;
 import net.minecraft.client.renderer.block.BlockAndTintGetter;
+import net.minecraft.client.renderer.block.dispatch.BlockStateModelPart;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.state.BlockState;
@@ -55,6 +56,20 @@ public final class SectionHarvester {
 
     /** Distinct states already reported by the cutout-drop diagnostic below, so a chunk-load storm logs each once. */
     private static final java.util.Set<String> CUTOUT_DROP_LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** States the rebuild log below has already named, so loading many chunks at once logs each
+     * state once. */
+    private static final java.util.Set<String> PARTIAL_REBUILD_FAILED_LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * The most boxes a PARTIAL cell's real shape may occupy and still carry a cutout rect. A
+     * cutout entry stores its atlas UV rect in palette words 13/14, the words {@code
+     * BrickGridUpload.packPaletteEntries} otherwise uses for box slots 6/7; see {@code
+     * BrickGridUpload.PALETTE_ENTRY_WORDS}'s layout comment. Six real boxes leave those two slots
+     * free; seven or eight would need them for real box data, so a PARTIAL cell needing that many
+     * boxes keeps the solid-occluder fallback instead.
+     */
+    static final int CUTOUT_MAX_BOXES = 6;
 
     public record Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
                          VoxelSourceSummary sourceSummary, long harvestGeneration, VoxelSourceEvidence sourceEvidence,
@@ -164,13 +179,14 @@ public final class SectionHarvester {
                     sourceIndex, sourceEntries, sourceEvidence));
         });
 
-        // No VoxelModelShape.Resolver here. Building one with its no-argument constructor goes
-        // through Minecraft.getInstance().getModelManager(), the same block model entry point a
-        // connected-texture mod hooks, and calls the Fabric Rendering API emitQuads() hook with a
-        // live world and position from this background harvest thread. That query runs apart from
-        // Sodium's own per-position work and breaks the mod's render when the two land together
-        // (see docs/ARCHITECTURE.md section 12). PARTIAL-shape cells keep their selection-shape
-        // geometry unrefined, which is what VoxelPaletteShapes.refine does with a null box list.
+        // buildEntry, called once per distinct state in the forEachInPalette loop above, already
+        // rebuilds a PARTIAL state's exact geometry from that state's baked model parts, with no
+        // world and no position. That is why it is safe on this background harvest thread: it never
+        // calls the live Fabric model-emission hook, the one a connected-texture mod uses with a
+        // real world and position. A mod that only changes its geometry inside that hook is not
+        // seen here and keeps the selection-shape fallback; that is a documented limit, not a bug.
+        // The rebuild does not use shapeVariants below. That path keys on each voxel rather than on
+        // each distinct state.
         var shapeVariants = new VoxelPaletteShapes(entries, baseIndex -> {
             sourcePolicy.copy(baseIndex);
             if (sourceEntries != null) {
@@ -185,13 +201,6 @@ public final class SectionHarvester {
                     BlockState state = blockData.get(x, y, z);
                     Integer index = indexByState.get(state);
                     if (index == null) sourcePolicy.markIncomplete();
-                    if (index != null && tintSource != null
-                            && entries.get(index).shapeKind() == VoxelShapeKind.PARTIAL) {
-                        // No live model query here, see the comment above shapeVariants. null
-                        // keeps the selection-shape fallback, like any other shape the code
-                        // cannot rebuild.
-                        index = shapeVariants.refine(index, null);
-                    }
                     // A state that was skipped above (palette overflow past MAX_PALETTE_ENTRIES) has no
                     // entry here -- fall back to index 0 deterministically rather than unboxing null.
                     paletteIndices[(y << 8) | (z << 4) | x] = (byte) (index != null ? index : 0);
@@ -257,9 +266,13 @@ public final class SectionHarvester {
         VoxelShapeClassifier.ClassifiedShape shape = VoxelShapeClassifier.classify(state);
         int categoryId = BlockMaterials.idForState(state);
 
+        // The surface check below and the geometry rebuild further down share this one
+        // collectParts read of the state's baked model parts, instead of each asking for its own.
+        List<BlockStateModelPart> parts = shape.kind() == VoxelShapeKind.EMPTY
+                ? List.of() : FaceColorResolver.parts(state);
         // The material layer and quad shape come from the model; a pack tag also counts.
         FaceColorResolver.Surface surface = shape.kind() == VoxelShapeKind.EMPTY
-                ? new FaceColorResolver.Surface(false, false) : FaceColorResolver.surface(state);
+                ? new FaceColorResolver.Surface(false, false) : FaceColorResolver.surface(parts);
         boolean cutoutTag = surface.cutout() || materialScalars.isCutout(categoryId);
         boolean crossTag = surface.cross() || materialScalars.isCross(categoryId);
         VoxelShapeKind effectiveKind = shape.kind();
@@ -278,7 +291,41 @@ public final class SectionHarvester {
             // else: tagged cross but the real model has no unculled quads (misconfigured blocks.toml
             // entry) -- fall through with the vanilla-classified shape/boxes untouched, cutout false,
             // exactly as if the tag had never been applied. Never guesses at geometry that doesn't exist.
-        } else if (cutoutTag && effectiveKind == VoxelShapeKind.FULL) {
+            // A state that is still PARTIAL after this falls through to the rebuild below like any
+            // other PARTIAL cell: no cross geometry replaced it, so the cross tag alone must not
+            // hold the rebuild back.
+        }
+        if (effectiveKind == VoxelShapeKind.PARTIAL) {
+            // The selection shape (vanilla's own getShape()) can be wider than what the block
+            // renders: a fence arm's selection is one solid slab, but its rendered rails are two
+            // thinner bars with a real gap between them. Sending the selection box then makes a
+            // shadow ray toward the rail's real face start inside the sent box, so the ray reads as
+            // blocked and the gap fills in. Rebuilding from the same baked parts the surface read
+            // above already collected recovers the real rendered boxes; a state whose geometry is
+            // open, off-grid, rotated or alpha-uncertain cannot be proven closed and keeps the
+            // selection shape instead, the same fallback used for any shape the rebuild cannot
+            // prove.
+            List<VoxelShapeClassifier.PackedBox> rendered = VoxelModelShape.reconstruct(parts);
+            if (rendered == null && PARTIAL_REBUILD_FAILED_LOGGED.add(state.toString())) {
+                FornaxMod.LOGGER.debug(
+                        "[Fornax] {} kept its selection shape: its baked model parts do not prove a "
+                                + "closed solid shape. Many PARTIAL blocks are open, off-grid, "
+                                + "rotated or alpha-uncertain; this is not an error",
+                        state);
+            }
+            effectiveBoxes = renderedOrSelection(effectiveKind, effectiveBoxes, rendered);
+            if (partialCutoutAllowed(effectiveKind, effectiveBoxes.size(), cutoutTag)) {
+                float[] rect = FaceColorResolver.resolveCutoutRect(state);
+                if (rect != null) {
+                    uvRect = rect;
+                    cutout = true;
+                    // extinction stays 0: it stands for a cloud of leaves spread through a block. A
+                    // door, trapdoor, glass pane or iron bars is a flat sheet, not a cloud. For a
+                    // sheet, the alpha test the shader already runs on each texel is the right
+                    // answer.
+                }
+            }
+        } else if (!crossTag && cutoutTag && effectiveKind == VoxelShapeKind.FULL) {
             float[] rect = FaceColorResolver.resolveCutoutRect(state);
             if (rect != null) {
                 uvRect = rect;
@@ -291,21 +338,40 @@ public final class SectionHarvester {
                 extinction = FoliageDensityResolver.resolveExtinction(state);
             }
         }
+        // Derived from partialCutoutAllowed rather than re-checking the box count directly, so the
+        // two can never drift apart on where the limit sits. crossTag needs no separate check: a
+        // state whose cross shape resolved is CROSS, not PARTIAL, so partialCutoutAllowed already
+        // answers false for it.
+        boolean partialBoxLimitDropped = cutoutTag
+                && effectiveKind == VoxelShapeKind.PARTIAL && !effectiveBoxes.isEmpty()
+                && !partialCutoutAllowed(effectiveKind, effectiveBoxes.size(), cutoutTag);
         // DIAGNOSTIC: a block classified as cutout that nonetheless harvests as a solid
         // occluder is invisible from the outside -- the shadow shader just treats it as an opaque cube, so
         // every foliage-transmission setting looks identical and the canopy self-shadows with no clue why.
         // Logged once per distinct state (this runs per palette entry, i.e. once per state per section, so
         // the set keeps a busy chunk-load from spamming). Remove once the leaf path is confirmed.
         if ((cutoutTag || crossTag) && !cutout && CUTOUT_DROP_LOGGED.add(state.toString())) {
-            FornaxMod.LOGGER.warn(
-                    "[Fornax] {} has cutout/cross geometry or tags but harvested as a SOLID occluder "
-                            + "(shape={}, crossTag={}, cutoutTag={}) -- no UV rect could be resolved from its "
-                            + "baked model, so foliage light transmission will not apply to it",
-                    state, effectiveKind, crossTag, cutoutTag);
+            if (partialBoxLimitDropped) {
+                FornaxMod.LOGGER.warn(
+                        "[Fornax] {} has a cutout material tag but its PARTIAL shape needs {} boxes, "
+                                + "over the {}-box limit that keeps the UV-rect words free (see "
+                                + "BrickGridUpload's palette layout comment); it harvests as a SOLID "
+                                + "occluder instead",
+                        state, effectiveBoxes.size(), CUTOUT_MAX_BOXES);
+            } else {
+                FornaxMod.LOGGER.warn(
+                        "[Fornax] {} has cutout/cross geometry or tags but harvested as a SOLID occluder "
+                                + "(shape={}, crossTag={}, cutoutTag={}): no UV rect could be resolved from its "
+                                + "baked model, so foliage light transmission will not apply to it",
+                        state, effectiveKind, crossTag, cutoutTag);
+            }
         }
-        // cutoutTag on a PARTIAL/EMPTY shape (neither FULL cube nor real cross geometry) is silently
-        // ignored: there is no meaningful UV-rect capture path for it, and forcing one would risk the
-        // shader alpha-testing against garbage/zero UV data. No worse than pre-milestone behavior.
+        // The branch above gives the rect to a PARTIAL cell with a cutout material and at most
+        // CUTOUT_MAX_BOXES boxes. That box count leaves box slots 6/7 empty, so they can hold the
+        // packed UV rect the way a FULL or CROSS cutout entry does (see
+        // BrickGridUpload.PALETTE_ENTRY_WORDS). A PARTIAL cell needing more boxes than that keeps
+        // the solid fallback instead of overwriting live box data; the warn above logs it once per
+        // state.
         // Effective emission = blocks.toml category strength x the vanilla light level (0..15 -> 0..1),
         // so a redstone torch (tagged, level 7) emits dimmer than glowstone (tagged, level 15) and an
         // OFF redstone lamp (tagged, level 0) emits nothing. Any UNTAGGED block with a nonzero vanilla
@@ -376,5 +442,31 @@ public final class SectionHarvester {
     static double effectiveEmission(double categoryStrength, int vanillaLightLevel) {
         double vanilla = vanillaLightLevel / 15.0;
         return categoryStrength > 0.0 ? categoryStrength * vanilla : vanilla;
+    }
+
+    /**
+     * True when a PARTIAL cell's cutout material tag may carry its sprite rect: it has a cutout
+     * material and at least one, but no more than {@link #CUTOUT_MAX_BOXES}, boxes, leaving box
+     * slots 6/7 free for the rect. FULL and CROSS always answer false here, whatever the arguments.
+     * Their own branches in {@code buildEntry} set their cutout bit. EMPTY always answers false,
+     * and so does a PARTIAL cell with no boxes. Sorting a shape as PARTIAL never gives zero boxes,
+     * so the range starts at 1. Kept free of other state so a test can call it without a started-up
+     * BlockState, which {@code buildEntry} needs.
+     */
+    static boolean partialCutoutAllowed(VoxelShapeKind kind, int boxCount, boolean cutoutTag) {
+        return cutoutTag && kind == VoxelShapeKind.PARTIAL && boxCount >= 1 && boxCount <= CUTOUT_MAX_BOXES;
+    }
+
+    /**
+     * Which box list a cell sends on: the rebuilt {@code rendered} boxes when {@code kind} is
+     * PARTIAL and the rebuild proved a closed shape, {@code selection} (vanilla's own selection
+     * shape) otherwise. FULL, CROSS and EMPTY always keep {@code selection}; the rebuild only ever
+     * replaces a PARTIAL cell's boxes. Takes no {@code BlockState} and no model manager, so a test
+     * can call it without a running Minecraft client, which {@code buildEntry} needs.
+     */
+    static List<VoxelShapeClassifier.PackedBox> renderedOrSelection(VoxelShapeKind kind,
+            List<VoxelShapeClassifier.PackedBox> selection,
+            @Nullable List<VoxelShapeClassifier.PackedBox> rendered) {
+        return kind == VoxelShapeKind.PARTIAL && rendered != null ? rendered : selection;
     }
 }

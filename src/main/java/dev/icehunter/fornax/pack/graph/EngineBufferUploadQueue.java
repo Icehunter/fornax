@@ -12,11 +12,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Pending CPU-to-engine-buffer writes recorded into the first consuming compute command buffer.
+ * Pending CPU-to-engine-buffer writes, drained on the queue their readers run on. {@link
+ * ComputePassRunner} records compute bindings into its own frames-in-flight command buffer.
+ * {@link GraphicsBufferUploads} records graphics bindings into a transient one.
  *
- * <p>This deliberately does not submit or wait on a queue. {@link ComputePassRunner}'s existing
- * frames-in-flight command buffer owns the transfer, barrier, dispatch, fence, and reuse wait, so a
- * per-frame data producer cannot accidentally add a render-thread queue-idle or fence stall.
+ * <p>This never submits to a queue or waits on one. Each caller's own command buffer owns the
+ * transfer, the barrier, the dispatch or draw, the fence if it uses one, and the wait before
+ * reuse. Code that feeds data each frame cannot add a queue-idle or fence stall on the render
+ * thread.
  */
 public final class EngineBufferUploadQueue {
     public record Range(long offset, ByteBuffer bytes) {}
@@ -58,13 +61,44 @@ public final class EngineBufferUploadQueue {
         return update != null && update.clearFirst();
     }
 
+    /**
+     * Whether every range pending for {@code target} fits in a buffer of {@code bufferSizeBytes},
+     * without removing the entry. Runs the same offset plus length check {@link #recordForBindings}
+     * runs while draining, so a caller can drop a bad update before {@code recordForBindings}
+     * throws partway through a command buffer it has already started. A target with nothing
+     * pending fits.
+     */
+    static synchronized boolean pendingFitsBuffer(String target, long bufferSizeBytes) {
+        Update update = PENDING.get(target);
+        if (update == null) {
+            return true;
+        }
+        for (Range range : update.ranges()) {
+            long length = range.bytes().remaining();
+            if (range.offset() < 0 || range.offset() + length > bufferSizeBytes) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public static synchronized void discard(String target) {
         PENDING.remove(target);
     }
 
-    /** Records and consumes updates for buffer targets bound by this compute pass. */
+    /**
+     * Records the pending updates for the buffer targets this pass binds, on the queue {@code cmd}
+     * belongs to, and removes them from the queue. {@code readerStages} is the shader-stage mask
+     * for that queue: the compute stage for {@link ComputePassRunner}, the vertex and fragment
+     * stages together for {@link GraphicsBufferUploads}. It is used twice. The barrier before the
+     * transfer puts this write after the stage that last read the buffer. The barrier after it
+     * makes the write visible to that same stage. The access masks stay {@code SHADER_READ} and
+     * {@code TRANSFER_WRITE} either way, since a texel-buffer read and a storage-buffer read use
+     * the same access flag.
+     */
     static synchronized void recordForBindings(VkCommandBuffer cmd, MemoryStack stack,
-                                               TargetRegistry registry, List<String> bindings) {
+                                               TargetRegistry registry, List<String> bindings,
+                                               int readerStages) {
         boolean wrote = false;
         for (String target : bindings) {
             Update update = PENDING.remove(target);
@@ -74,7 +108,7 @@ public final class EngineBufferUploadQueue {
             boolean targetWrites = update.clearFirst();
             for (Range range : update.ranges()) targetWrites |= range.bytes().hasRemaining();
             if (targetWrites) {
-                // This target is CPU-written and compute-read. Order prior same-queue reads before
+                // This target is CPU-written and shader-read. Order prior same-queue reads before
                 // overwriting it; the post-transfer barrier below makes the new snapshot visible.
                 VkBufferMemoryBarrier.Buffer priorReads = VkBufferMemoryBarrier.calloc(1, stack).sType$Default()
                         .srcAccessMask(VK13.VK_ACCESS_SHADER_READ_BIT)
@@ -82,7 +116,7 @@ public final class EngineBufferUploadQueue {
                         .srcQueueFamilyIndex(VK13.VK_QUEUE_FAMILY_IGNORED)
                         .dstQueueFamilyIndex(VK13.VK_QUEUE_FAMILY_IGNORED)
                         .buffer(buffer.vkBuffer()).offset(0).size(buffer.sizeBytes());
-                VK13.vkCmdPipelineBarrier(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK13.vkCmdPipelineBarrier(cmd, readerStages,
                         VK13.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, null, priorReads, null);
             }
             if (update.clearFirst()) {
@@ -105,7 +139,7 @@ public final class EngineBufferUploadQueue {
                     .srcAccessMask(VK13.VK_ACCESS_TRANSFER_WRITE_BIT)
                     .dstAccessMask(VK13.VK_ACCESS_SHADER_READ_BIT);
             VK13.vkCmdPipelineBarrier(cmd, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, barrier, null, null);
+                    readerStages, 0, barrier, null, null);
         }
     }
 }

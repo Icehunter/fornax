@@ -32,10 +32,16 @@ final class VoxelPaletteShapes {
         }
         int index = entries.size();
         copyMetadata.accept(baseIndex);
+        // A base's cutout rect lives in its last two box slots (see BrickGridUpload's
+        // PALETTE_ENTRY_WORDS layout comment), which stay free only up to SectionHarvester's
+        // CUTOUT_MAX_BOXES. A narrowed box list over that count falls back to solid, the rule
+        // SectionHarvester.buildEntry applies, so the packer never gets a cutout entry it has to
+        // throw on.
+        boolean keepCutout = base.cutout() && key.boxes().size() <= SectionHarvester.CUTOUT_MAX_BOXES;
         entries.add(new SectionPalette.Entry(base.shapeKind(), key.boxes(), base.faceColors(),
-                base.emissiveStrength(), base.lightTransmissive(), base.emissionColor(), base.cutout(),
-                base.uvRect(), base.extinction(), FaceSealResolver.resolve(base.shapeKind(), key.boxes()),
-                base.faceTextureWords()));
+                base.emissiveStrength(), base.lightTransmissive(), base.emissionColor(), keepCutout,
+                keepCutout ? base.uvRect() : SectionPalette.NO_UV_RECT, base.extinction(),
+                FaceSealResolver.resolve(base.shapeKind(), key.boxes()), base.faceTextureWords()));
         variants.put(key, index);
         return index;
     }

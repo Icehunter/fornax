@@ -15,6 +15,7 @@ import dev.icehunter.fornax.pack.PackModel;
 import dev.icehunter.fornax.pack.ParticleSpec;
 import dev.icehunter.fornax.pack.PassSpec;
 import dev.icehunter.fornax.pack.PassType;
+import dev.icehunter.fornax.pack.EntityOccluderStrideContract;
 import dev.icehunter.fornax.pack.LightCellStrideContract;
 import dev.icehunter.fornax.pack.LightListStrideContract;
 import dev.icehunter.fornax.pack.PaletteStrideContract;
@@ -22,6 +23,7 @@ import dev.icehunter.fornax.pack.ShaderImports;
 import dev.icehunter.fornax.pack.TargetSpec;
 import dev.icehunter.fornax.pack.layout.DefineRewriter;
 import dev.icehunter.fornax.pack.layout.PackOptionsBuffer;
+import dev.icehunter.fornax.pipeline.EntityOccluderUpload;
 import dev.icehunter.fornax.pipeline.SlotReachabilityCensus;
 import dev.icehunter.fornax.pipeline.WaterActorUpload;
 import dev.icehunter.fornax.pack.layout.PackOptionsLayout;
@@ -81,6 +83,7 @@ import org.joml.Vector3f;
 import org.lwjgl.vulkan.VK13;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -142,6 +145,11 @@ public final class GraphRunner {
     private static Map<String, Integer> compileValues = Map.of();
     private static java.util.function.BiPredicate<PassSpec, PassSpec> computeGraphicsConflicts =
             ComputeGraphicsWaits.compile(List.of());
+    // Computed once per rebuild, alongside computeGraphicsConflicts, not every frame. See
+    // graphicsDrainableBufferTargets for which targets can qualify and which are left out. Which
+    // targets qualify stays fixed until the next rebuild, the same as computeAtlasTextureInputs
+    // below.
+    private static List<String> graphicsDrainableTargets = List.of();
     // Verbatim snapshot of the LAST rebuild()'s own (pre-engine-overlay) arguments -- see
     // ensureRunnersBuilt()'s FX_COMPUTE self-heal for why this is retained (replaying a rebuild once
     // computeAvailable becomes truthfully known, without a second shader-source read from disk).
@@ -177,6 +185,10 @@ public final class GraphRunner {
     private static final Set<String> missingRunnerLogged = new HashSet<>();
     // Same log-once/reset-on-rebuild shape as missingRunnerLogged, for logPassRunFailureOnce().
     private static final Set<String> passRunFailureLogged = new HashSet<>();
+    // Same log-once, reset-on-rebuild shape as missingRunnerLogged, for
+    // logGraphicsUploadFailureOnce(). One flag, not a set per target: the recording call covers
+    // every drainable target at once, so a failure names the whole batch, not one target.
+    private static boolean graphicsUploadFailureLogged;
     // Pipeline construction can fail for one backend-specific compute function while every other
     // runner remains valid. Name it once per pack session without flooding every frame/rebuild.
     private static final Set<String> runnerBuildFailureLogged = new HashSet<>();
@@ -734,6 +746,7 @@ public final class GraphRunner {
         // #moj_import otherwise degrades to a silently-broken composed shader (see ShaderImports).
         ShaderImports.validate(shaderSources);
         PaletteStrideContract.validate(shaderSources);
+        EntityOccluderStrideContract.validate(pack.graph(), shaderSources);
         LightCellStrideContract.validate(shaderSources);
         LightListStrideContract.validate(shaderSources);
 
@@ -770,6 +783,10 @@ public final class GraphRunner {
         Map<String, Integer> withEngineDefines = new LinkedHashMap<>(newCompileValues);
         withEngineDefines.putAll(EngineDefines.forMethod(FornaxConfig.get().aaMethod, computeAvailable));
         compileValues = Map.copyOf(withEngineDefines);
+        // Fixed until the next rebuild, like computeAtlasTextureInputs below. Computed once here,
+        // after the engine overlay is applied to compileValues, not on every finish() call, so a
+        // pass gated on an engine-injected symbol, such as FX_COMPUTE, is judged correctly.
+        graphicsDrainableTargets = graphicsDrainableBufferTargets(pack.graph(), compileValues);
         // Light Detail tier: pushed into BrickGridUpload here, the same place/cadence compileValues
         // itself is finalized, so every reader of BrickGridUpload.lightCellsPerSectionAxis() this
         // rebuild generation (this class's own computeDispatchOverride included) sees the SAME tier --
@@ -1190,6 +1207,17 @@ public final class GraphRunner {
             } else if (r.getBuffer(WaterActorBuffer.TARGET) != null) {
                 WaterActorBuffer.free(r);
             }
+
+            // Nearby entities act as shadow-ray occluders for a pack's local-light march. Positions
+            // are relative to the camera: this frame's camera position is subtracted in double.
+            // Uploaded on the graphics queue in finish(), so the gate admits graphics readers only.
+            if (currentPack != null
+                    && anyEnabledGraphicsPassReadsEntityOccluders(currentPack.graph(), compileValues)) {
+                EntityOccluderBuffer.ensureAllocated(r);
+                EntityOccluderUpload.onFrame(r, x, y, z);
+            } else if (r.getBuffer(EntityOccluderBuffer.TARGET) != null) {
+                EntityOccluderBuffer.free(r);
+            }
         }
         if (!canExecuteGraphForCoarsePrecipitation(coarsePrecipitationRequired, coarsePrecipitationReady)) {
             clearGeometryInputViews();
@@ -1369,6 +1397,17 @@ public final class GraphRunner {
         // The unjittered projection keeps sky motion in the same jitter-free basis as gMotion.
         SkyReprojection.commit(CameraJitter.currentUnjitteredProjection(), matrices.modelView());
         dev.icehunter.fornax.debug.FullscreenCapture.beginFrame(compileValues);
+
+        // Engine buffer updates whose only readers are graphics passes are recorded here, on the
+        // graphics queue, before the first pass can bind them. This runs outside every render pass,
+        // after every early return above, and before the ComputeGraphicsWaits scope, so the
+        // transfer is never mistaken for a cross-queue handoff.
+        try {
+            GraphicsBufferUploads.record(r, graphicsDrainableTargets);
+        } catch (RuntimeException e) {
+            GpuFatalErrors.rethrowIfFatal(e);
+            logGraphicsUploadFailureOnce(e);
+        }
 
         try (ComputeGraphicsWaits graphicsWaits = new ComputeGraphicsWaits(computeGraphicsConflicts, (semaphore, stages) -> {
             if (computeBackend == null) {
@@ -1980,6 +2019,73 @@ public final class GraphRunner {
     /** Pure gate for tests and both frame halves: only a required unavailable field blocks a graph. */
     static boolean canExecuteGraphForCoarsePrecipitation(boolean required, boolean ready) {
         return !required || ready;
+    }
+
+    /**
+     * True if an enabled fullscreen or particles pass reads the entity occluder set. This is the
+     * other half of {@link #anyEnabledComputePassReadsPrecipCoarseClipmap}. That buffer is uploaded
+     * for a compute reader only. This one is uploaded on the graphics queue, see {@code
+     * EntityOccluderUpload}, so COMPUTE is left out here on purpose. {@link
+     * GraphValidator#checkBufferBindable} refuses a compute reader or writer of this target for the
+     * same reason, so this gate and that validation rule allow the same two pass types.
+     */
+    static boolean anyEnabledGraphicsPassReadsEntityOccluders(
+            GraphSpec graph, Map<String, Integer> compileValues) {
+        for (PassSpec p : graph.passes()) {
+            if ((p.type() != PassType.FULLSCREEN && p.type() != PassType.PARTICLES)
+                    || !isEnabledAtCompile(p, compileValues)) {
+                continue;
+            }
+            for (String in : p.inputs()) {
+                if (in.equals(EntityOccluderBuffer.TARGET)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Every buffer target GraphicsBufferUploads may drain. voxelSourceWindow and voxelEmitterPool
+    // are left out even though a fullscreen pass may read them: both send their updates under
+    // VulkanComputeBackend.SHARED_QUEUE_LOCK from the compute runner path, so recording the same
+    // update again from the graphics queue would race that lock. precipCoarseClipmap is left out
+    // because GraphValidator refuses it a graphics reader at load; see
+    // anyEnabledComputePassReadsPrecipCoarseClipmap's own doc.
+    private static final List<String> GRAPHICS_DRAINABLE_BUFFER_TARGETS = List.of(
+            EntityOccluderBuffer.TARGET, WaterActorBuffer.TARGET,
+            PrecipClipmapBuffer.TARGET, SurfaceFluidClipmapBuffer.TARGET);
+
+    /**
+     * Which of {@link #GRAPHICS_DRAINABLE_BUFFER_TARGETS} {@link GraphicsBufferUploads} must drain
+     * this rebuild: a target that is an input of an enabled FULLSCREEN or PARTICLES pass, and of no
+     * enabled COMPUTE pass. A target with a compute reader is left out because {@link
+     * ComputePassRunner} already drains any target it binds. Recording the same pending update
+     * again on the graphics queue would race it. Order follows
+     * {@link #GRAPHICS_DRAINABLE_BUFFER_TARGETS}'s own order, not the order passes are declared in.
+     *
+     * <p>Reads only {@link GraphSpec} and the live compile values, like the other gates above, so
+     * it can be tested with no pack and no device.
+     */
+    static List<String> graphicsDrainableBufferTargets(GraphSpec graph, Map<String, Integer> compileValues) {
+        List<String> result = new ArrayList<>();
+        for (String target : GRAPHICS_DRAINABLE_BUFFER_TARGETS) {
+            boolean graphicsReader = false;
+            boolean computeReader = false;
+            for (PassSpec p : graph.passes()) {
+                if (!isEnabledAtCompile(p, compileValues) || !p.inputs().contains(target)) {
+                    continue;
+                }
+                if (p.type() == PassType.FULLSCREEN || p.type() == PassType.PARTICLES) {
+                    graphicsReader = true;
+                } else if (p.type() == PassType.COMPUTE) {
+                    computeReader = true;
+                }
+            }
+            if (graphicsReader && !computeReader) {
+                result.add(target);
+            }
+        }
+        return result;
     }
 
     /**
@@ -2872,6 +2978,28 @@ public final class GraphRunner {
         }
     }
 
+    /**
+     * When {@link GraphicsBufferUploads#record} throws, this frame's graphics-queue engine buffer
+     * updates are skipped entirely, not partly, since the failure is caught around the whole batch,
+     * not one target. Logged at ERROR once per pack session, the same shape as {@link
+     * #logMissingRunnerOnce}, so a graph that fails this every frame does not fill the log at frame
+     * rate forever.
+     *
+     * <p>Package-private so {@link GraphicsBufferUploads#record} can call it directly when it drops
+     * a pending update before allocating a command buffer. A target that fails the early check is
+     * the same kind of failure as one caught here, so it sets the same once-per-session flag rather
+     * than adding a second log path.
+     */
+    static void logGraphicsUploadFailureOnce(RuntimeException e) {
+        if (!graphicsUploadFailureLogged) {
+            graphicsUploadFailureLogged = true;
+            FornaxMod.LOGGER.error("[Fornax] GraphRunner: recording graphics-queue engine buffer "
+                    + "uploads threw ({}); skipping this frame's updates. A buffer read by graphics "
+                    + "passes may hold stale or zero data until the next successful rebuild",
+                    e.toString(), e);
+        }
+    }
+
     /** A raw compute pipeline can be rejected by a specific Vulkan backend even when the pack and
      * SPIR-V passed load-time validation. Quarantine only that runner: graph targets are explicitly
      * zero-cleared at allocation, so later passes receive a defined empty result instead of losing
@@ -2985,6 +3113,7 @@ public final class GraphRunner {
         missingRunnerLogged.clear();
         passRunFailureLogged.clear();
         runnerBuildFailureLogged.clear();
+        graphicsUploadFailureLogged = false;
 
         VoxelSourceSummary.setEnabled(false);
         if (registry != null) {
@@ -3011,6 +3140,7 @@ public final class GraphRunner {
         packDeclaresDepthCopyback = false;
         packReferencesOpaqueDepth = false;
         computeAtlasTextureInputs = List.of();
+        graphicsDrainableTargets = List.of();
         // Drop every rolling per-label sample: a pass whose enabled_if just went permanently false
         // this rebuild (option toggle, pack switch, "None" unload) must not leave its last avg/p95
         // frozen on the HUD forever -- see frameProfiler's own field doc. Losing the

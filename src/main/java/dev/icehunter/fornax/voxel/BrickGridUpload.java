@@ -217,18 +217,20 @@ public final class BrickGridUpload {
     //                  all-zero for a CROSS entry (no per-cardinal-face concept; see VoxelShapeKind's
     //                  own doc and SectionPalette.Entry's cutout/uvRect doc).
     //   words 7..14  : up to MAX_BOXES (8) packed boxes, one uint each (see packBox) for a PARTIAL
-    //                  entry (unchanged); for a CROSS entry, word 7 alone holds the real harvested
-    //                  cross-quad bounding box (boxCount == 1, see FaceColorResolver.CrossGeometry).
-    //                  CUTOUT REUSE: when the entry is cutout-flagged (word 0 bit 30 set -- always a
-    //                  FULL or CROSS entry, see SectionHarvester.buildEntry, so boxCount is always 0 or
-    //                  1, never near MAX_BOXES), words 13/14 (box indices 6/7, the last two of the
-    //                  eight box slots) carry the packed atlas UV rect instead of box[6]/box[7] -- see
-    //                  packPaletteEntries. Reused rather than growing PALETTE_ENTRY_WORDS: consuming
-    //                  shaders hand-mirror `const int PALETTE_ENTRY_WORDS = 16`, so a stride change
-    //                  would silently corrupt their addressing math. Reusing already-guaranteed-unused
-    //                  box words for a non-PARTIAL entry has zero stride impact; a normal PARTIAL entry
-    //                  (fences, stairs, walls -- never cutout-tagged) keeps writing real box[6]/box[7]
-    //                  data unaffected.
+    //                  entry; for a CROSS entry, word 7 alone holds the real harvested cross-quad
+    //                  bounding box (boxCount == 1, see FaceColorResolver.CrossGeometry).
+    //                  CUTOUT REUSE: when the entry is cutout-flagged (word 0 bit 30 set), it has at
+    //                  most 6 boxes: FULL has 0, CROSS has 1, PARTIAL (a door, trapdoor, glass pane
+    //                  or iron bars) has 1..6, see SectionHarvester.buildEntry and its
+    //                  CUTOUT_MAX_BOXES. So words 13/14 (box indices 6/7, the last two of the eight
+    //                  box slots) always stay free of real box data and carry the packed atlas UV
+    //                  rect instead, see packPaletteEntries, which throws rather than let the rect
+    //                  write over a box that holds real data. The slots are reused rather than
+    //                  PALETTE_ENTRY_WORDS made bigger. Shaders that read the palette hold their
+    //                  own copy of `const int PALETTE_ENTRY_WORDS = 16`, so a change to the stride
+    //                  would quietly send them to the wrong words. A PARTIAL entry with no cutout
+    //                  material (fences, stairs, walls) keeps writing real box[6]/box[7] data
+    //                  unaffected.
     //                    word 13 (box slot 6, cutout only): u0 (bits 16-31, 16-bit unorm) | v0 (bits 0-15)
     //                    word 14 (box slot 7, cutout only): u1 (bits 16-31, 16-bit unorm) | v1 (bits 0-15)
     //                  Atlas-space UV, not sprite-local -- round(clamp(u,0,1) * 65535) per component;
@@ -262,6 +264,7 @@ public final class BrickGridUpload {
      * layout changes in any way a shader can observe.
      *
      * <p>Value 1 = the 16-word layout with a cutout entry's single UV rect reusing box slots 6/7.
+     * Only which entries qualify to use them changes.
      */
     public static final int PALETTE_LAYOUT_VERSION = 1;
 
@@ -680,17 +683,28 @@ public final class BrickGridUpload {
             int boxCount = Math.min(boxes.size(), VoxelShapeClassifier.MAX_BOXES);
             boolean cutout = entry.cutout();
             boolean cross = entry.shapeKind() == VoxelShapeKind.CROSS;
+            if (cutout && boxCount > SectionHarvester.CUTOUT_MAX_BOXES) {
+                // A cutout entry's rect lives in box slots 6/7 (words 13/14, see the
+                // PALETTE_ENTRY_WORDS layout comment); SectionHarvester.buildEntry never sets
+                // cutout=true past CUTOUT_MAX_BOXES boxes, so reaching here means that rule was
+                // broken before the entry got this far. Fail loudly rather than silently overwrite
+                // a live box with the rect. Names the entry's real box count (boxes.size()), not
+                // the capped boxCount used for packing, so the message shows the true count.
+                throw new IllegalStateException("cutout-flagged palette entry has " + boxes.size()
+                        + " boxes, more than the " + SectionHarvester.CUTOUT_MAX_BOXES
+                        + " that leave the UV-rect words free");
+            }
             buf.putInt(packPaletteFlagsWord(boxCount, cutout, cross, entry.extinction()));
             int[] faceColors = entry.faceColors();
             for (int f = 0; f < 6; f++) {
                 buf.putInt(faceColors[f]);
             }
-            // Reuse of box slots 6/7 (words 13/14) as the packed UV rect for a cutout entry -- safe
+            // Reuse of box slots 6/7 (words 13/14) as the packed UV rect for a cutout entry is safe
             // because SectionHarvester.buildEntry only ever sets cutout=true for a FULL entry
-            // (boxCount 0) or a CROSS entry (boxCount 1, its own harvested bbox in box[0]), so a
-            // cutout-flagged entry's real boxCount never approaches 6 -- box[6]/box[7] are always
-            // genuinely unused, exactly like every OTHER unused box slot past a PARTIAL entry's real
-            // boxCount already is. See the PALETTE_ENTRY_WORDS layout comment for the full rationale.
+            // (boxCount 0), a CROSS entry (boxCount 1), or a PARTIAL entry with at most
+            // CUTOUT_MAX_BOXES (6) boxes, so box[6]/box[7] are always free, like every other box
+            // slot past a PARTIAL entry's real boxCount. The check above throws instead of writing
+            // over a box that holds real data. See the PALETTE_ENTRY_WORDS layout comment.
             for (int k = 0; k < VoxelShapeClassifier.MAX_BOXES; k++) {
                 if (cutout && k == 6) {
                     buf.putInt(packUvWord(entry.uvRect()[0], entry.uvRect()[1]));

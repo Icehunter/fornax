@@ -8,6 +8,12 @@ import java.util.List;
  * <p>Bit order matches Minecraft's direction data values: DOWN, UP, NORTH, SOUTH, WEST, EAST.
  * Coverage is rasterized at the same 1/16-block precision used by {@link VoxelShapeClassifier}.
  * A face is sealed only when the union of all boxes covers every one of its 16x16 samples.
+ *
+ * <p>This is shape cover only. It says nothing about whether the material over a sealed face is
+ * solid. The entry's {@link SectionPalette.Entry#cutout()} bit outranks every bit {@code resolve}
+ * returns. A sealed face on a cutout entry (a door's flat face, a full leaves cube) is covered by
+ * an alpha-tested quad, not an opaque one. The shader checks the entry's cutout bit first, and
+ * treats a sealed face as a solid face only when that bit is false.
  */
 public final class FaceSealResolver {
     public static final int DOWN = 1;

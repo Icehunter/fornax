@@ -95,7 +95,7 @@ public final class GraphValidator {
             VoxelWaterReflBuffer.TARGET, AnalyticLightListBuffer.TARGET,
             PrecipClipmapBuffer.TARGET, PrecipCoarseClipmapBuffer.TARGET,
             SurfaceFluidClipmapBuffer.TARGET,
-            WaterActorBuffer.TARGET);
+            WaterActorBuffer.TARGET, EntityOccluderBuffer.TARGET);
 
     /** Legal {@code pass.blend} values -- see {@code PassSpec.blend()}'s own doc. */
     private static final Set<String> BLEND_VALUES = Set.of("translucent", "additive", "multiply");
@@ -371,6 +371,14 @@ public final class GraphValidator {
                     "'" + ref + "' is the raw coarse precipitation field and may be read only by a"
                             + " compute preprocessing pass; graphics passes must sample that pass's"
                             + " output instead");
+        }
+        // The other half of the rule above: entityOccluders is uploaded on the graphics queue only,
+        // see EntityOccluderUpload, so it hands buffer ownership between queues in neither
+        // direction, and a compute pass has nothing to rely on.
+        if (base.equals(EntityOccluderBuffer.TARGET) && p.type() == PassType.COMPUTE) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + (writePosition ? ".outputs" : ".inputs"),
+                    "'" + ref + "' is the entity occluder set, uploaded on the graphics queue for"
+                            + " fullscreen and particles readers; a compute pass may not bind it");
         }
         boolean legal = writePosition
                 ? p.type() == PassType.COMPUTE

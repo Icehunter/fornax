@@ -1,0 +1,14 @@
+[targets.entityOccluders]
+kind = "buffer"
+
+[targets.out]
+format = "rgba16f"
+scale = 1.0
+
+[[pass]]
+name = "march"
+type = "compute"
+shader = "shaders/compute/march.comp"
+dispatch = [1, 1, 1]
+inputs = ["entityOccluders"]
+outputs = ["out"]

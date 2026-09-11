@@ -381,6 +381,56 @@ turn it into a texture there and sample that from graphics passes.
 `u_Globals` also carries `u_WorldBounds`: sea level, the lowest buildable Y, one above the highest,
 and the dimension (0 other, 1 overworld, 2 nether, 3 end). Filled every frame.
 
+### Entity occluders
+
+`entityOccluders` is a buffer the engine fills. A `fullscreen` or `particles` pass may declare it as
+an input. A `compute` pass may not, because the upload can only be seen from the graphics queue.
+Every word is a float bit pattern; read it back with `uintBitsToFloat`. It lists the nearby bodies a
+pack's own local coloured-light shadow march may occlude against:
+
+```glsl
+uniform usamplerBuffer u_InputN;   // entityOccluders, every word a float bit pattern
+float occF(int w) { return uintBitsToFloat(texelFetch(u_InputN, w).r); }
+
+bool hitsBox(vec3 o, vec3 d, vec3 bmin, vec3 bmax, float maxT) {
+    vec3 inv = 1.0 / d;
+    vec3 t0 = (bmin - o) * inv, t1 = (bmax - o) * inv;
+    vec3 tn = min(t0, t1), tf = max(t0, t1);
+    float tEnter = max(max(tn.x, tn.y), tn.z), tExit = min(min(tf.x, tf.y), tf.z);
+    return tExit >= max(tEnter, 0.0) && tEnter <= maxT;
+}
+
+bool occludedByEntity(vec3 originCamRel, vec3 dir, float len) {
+    int count = int(occF(0));
+    for (int i = 0; i < count; i++) {
+        int b = 4 + i * 12;
+        vec3 bmin = vec3(occF(b), occF(b + 1), occF(b + 2));
+        vec3 bmax = vec3(occF(b + 4), occF(b + 5), occF(b + 6));
+        if (hitsBox(originCamRel, dir, bmin, bmax, len)) return true;
+    }
+    return false;
+}
+```
+
+Positions are measured from this frame's animated camera, the same point a fullscreen pass works
+`worldPos` out from. The slot-0 body is the local player when its kind is 1. Test kind, not slot, to
+find it. A ray origin that lands inside a box is the held-light case; how to treat it is left to the
+pack.
+
+A pass that declares `entityOccluders` as an input must name the header size, the occluder cap, and
+the record size as their own `const int` declarations. They can sit in the pass's own file or in any
+`fornax_runtime` include it pulls in. The short snippet above writes the numbers straight into the
+code instead:
+
+```glsl
+const int ENTITY_OCCLUDER_HEADER_WORDS = 4;
+const int ENTITY_OCCLUDER_MAX = 64;
+const int ENTITY_OCCLUDER_RECORD_WORDS = 12;
+```
+
+Load fails, naming the shader and the declaration, if any reading pass is missing one of these or
+declares a value this engine version does not use.
+
 ### Use compile options, not runtime options
 
 **A runtime option in a geometry shader will not compile.** Runtime options become uniforms, and

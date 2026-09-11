@@ -133,7 +133,9 @@ final class VoxelModelShape {
         }
     }
 
-    /** Pure baked-geometry seam for FaceBakery and numeric proof fixtures; production uses emitQuads. */
+    /** {@code SectionHarvester} hands this a state's baked model parts, collected with no world and
+     * no position, once for each distinct state in a section. Tests call it with made-up parts
+     * lists. */
     static @Nullable List<VoxelShapeClassifier.PackedBox> reconstruct(List<BlockStateModelPart> parts) {
         Set<Face> faces = new HashSet<>(), overlays = new HashSet<>();
         int count = 0;

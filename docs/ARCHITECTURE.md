@@ -74,6 +74,7 @@ SodiumWorldRenderer.drawChunkLayer(OPAQUE, ...)
              insert one final compute -> graphics semaphore wait
   [Sodium's own SOLID/CUTOUT terrain draws run here, into the shared G-buffer]
   RETURN -> GraphRunner.finish(matrices, x, y, z)
+             record graphics-read engine buffer uploads (transient command buffer, no flush)
 
 GameRenderer.renderLevel(...)
   RETURN -> restore native target
@@ -121,8 +122,12 @@ be the exact signature of the worst failure this engine can produce: the deferre
 produces nothing, with zero log evidence, because terrain lands in the G-buffer but the resolve pass
 never composites it to screen. Immediately before the loop, `SkyReprojection.commit(...)`
 publishes this frame's unjittered sky transform, so a temporal pass in that same loop consumes the
-current frame's factual transform rather than the preceding frame's publication. After the pass
-loop, a pack that declares no depth copy-back pass
+transform of this frame rather than the one sent last frame. Next, still
+outside any render pass and before the loop, `GraphicsBufferUploads.record(...)` writes each
+graphics-read engine buffer's data for this frame into a short-lived command buffer. The first pass
+that binds one of those targets then sees this frame's data, not the zeros the buffer held when it
+was made.
+After the pass loop, a pack that declares no depth copy-back pass
 gets a hardcoded fallback copy of G-buffer depth into the main render target's depth texture, so
 translucent draws afterward always see correct depth.
 
@@ -472,7 +477,8 @@ exactly two possible owners, and which one applies is decided by name, against
   `voxelPalette`/`voxelLightVolume`/`voxelBrickSummary` (`BrickGridUpload`), `voxelWaterRefl`
   (`VoxelWaterReflBuffer`), `analyticLightList` (`AnalyticLightListBuffer`), `precipClipmap` and
   `precipCoarseClipmap` (`PrecipClipmapBuffer`/`PrecipCoarseClipmapBuffer`), `surfaceFluidClipmap`
-  (`SurfaceFluidClipmapBuffer`) and `waterActors` (`WaterActorBuffer`). Their byte counts come
+  (`SurfaceFluidClipmapBuffer`), `waterActors` (`WaterActorBuffer`) and `entityOccluders`
+  (`EntityOccluderBuffer`). Their byte counts come
   from runtime quantities the graph cannot express (voxel window diameter, render resolution, or a
   fixed engine data grid), so their own engine call site drives `TargetRegistry.ensureBufferSize`.
   A pack declares the target purely so the name is referenceable, and must not give it a size; the
@@ -539,6 +545,51 @@ column, not a world.
 This is a raw world-data ABI, not a cloud policy. The engine does not smooth biome boundaries,
 extend the field, classify storm shapes, or darken the sky. The required compute preprocessor owns
 those decisions and writes a pack texture for later cloud, sky, shadow, and reflection consumers.
+
+### Entity occluders (`entityOccluders`)
+
+The voxel grid is built only from block states, so a march reading it alone never sees a player, a
+mob, or an item standing inside a light's radius. `entityOccluders` sends the GPU where each nearby
+body is, how big it is, which way it faces, and what kind it is. A pack's coloured-light shadow
+march decides by itself how that shapes a shadow. Nothing here sets the soft edge of a shadow, how
+fast it fades, or which kinds a light casts against.
+
+Layout, std430, all 32-bit floats. A pack reads them as `R32_UINT` texels and turns the bits back
+into floats:
+
+```
+vec4 header;                  // x live count, y frame counter (wraps at 2^24 so it stays
+                              //   exact as a float), z RANGE_BLOCKS, w reserved
+struct {
+  vec4 boundsMin;             // xyz AABB min, camera-relative, w kind
+  vec4 boundsMax;             // xyz AABB max, camera-relative, w body yaw (radians)
+  vec4 motion;                // xyz how far the centre moved since the frame before, w eye height
+} occluders[MAX_OCCLUDERS];
+```
+
+Slot 0 is always the local player when the player is sent, first person included. It is the player
+entity itself, not a root vehicle it may be riding: a body occludes its own held light, not whatever
+it is riding, so a pack tests `kind`, never slot, to find it. Every other slot holds a different
+body, nearest first by how far each box centre sits from the camera, so a full list drops the bodies
+least likely to be looked at. A spectator, an invisible body, a dead body, or one whose position is
+not a real number is never sent. Passengers are published, unlike `waterActors`'s boats: each body
+casts its own shadow, while a boat and its rider raise only one shared wake. Positions are
+camera-relative, subtracted in `double` and only then cut down to `float`, for the same reason as
+`waterActors`: a march centred on the camera needs a distance from its own centre. Two absolute
+world coordinates subtracted in `float` would throw away the low bits of the quantity that matters
+once the player is far from the world origin.
+
+Only an enabled fullscreen or particles pass may read this target. A compute reader or writer is
+refused at load, the other way round from `precipCoarseClipmap`, which only compute may touch. This
+buffer's upload can be seen from the graphics queue and nowhere else. The data goes through
+`EngineBufferUploadQueue` like every other engine buffer, but `GraphicsBufferUploads` records it,
+from `finish()` before the pass loop, not `ComputePassRunner`. See the "single queue its readers run
+on" law in §12.
+
+`EntityOccluderStrideContract` fails load, naming the file and the declaration, when a pass that
+reads `entityOccluders` declares header, cap, or record word counts different from
+`EntityOccluderBuffer`'s own. It is the same load-time check `PaletteStrideContract` gives the
+brick-grid palette.
 
 ### Builtin resource names (`builtin.*`)
 
@@ -2235,6 +2286,12 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
   readers and `anyEnabledComputePassReadsPrecipCoarseClipmap` therefore deliberately asks only for
   enabled compute inputs. Its readiness gate suppresses graph execution until a complete current
   window's clear and refill are queued ahead of that compute pass's dispatch.
+- **Data put on `EngineBufferUploadQueue` is picked up only by a recorder running on the same
+  queue as the passes that read it.** `ComputePassRunner` records for compute bindings.
+  `GraphicsBufferUploads` records, in `finish()` before the pass loop, for the allowed targets
+  read by enabled fullscreen or particles passes and by no enabled compute pass. A target let in
+  for a pass type that has no recorder is made, never written, and reads zeros forever with no log
+  line.
 - **An unresolvable shader include fails silently downstream, so this engine validates eagerly.**
   The underlying shader-composition mechanism splices an error string into the composed source for
   a missing include rather than failing the load, which would otherwise surface only as a broken
@@ -2469,7 +2526,10 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
   out or a slow mist fade from yesterday's value.
 - **A mesh-triggered voxel harvest must never run inside Sodium's meshing task.** The harvest reads
   vanilla's own section storage and sorts the fixed baked block parts it collects; it never asks a
-  live block-and-position path to fill in PARTIAL cells. `ChunkBuilderMeshingTaskMixin` only puts
+  live block-and-position path to fill in PARTIAL cells. The parts-based geometry rebuild (see
+  "Exact opaque partial model geometry" below) is the one allowed way to do that fill: it uses only
+  a state's baked parts, never a world or a position, so it carries none of the risk this law
+  guards against. `ChunkBuilderMeshingTaskMixin` only puts
   the work in a queue. `VoxelWindow.queueMeshTriggeredHarvest` runs it on its own mesh worker, away
   from backfill and light work. Repeat events for one section share one waiting request, and an edit
   that lands while that request is being read leaves one more behind it. The worker takes the most
@@ -2839,19 +2899,31 @@ layer zero, before the average; other faces keep their atlas colours. Bootstrap 
 client world's tint view and the section corner, so they colour like a mesh-driven harvest. These
 are average colours and rough shapes, not lit surfaces and not the model's triangles.
 
+A PARTIAL cell with an alpha-tested material and at most six boxes carries the cutout bit and the
+sprite rect in the same words a full cutout cell uses (a door, trapdoor, glass pane, or iron bars).
+A pack alpha-tests the faces of the stored boxes, spreading the rect across each box face, not
+across the whole block. A PARTIAL cell needing more than six boxes keeps the solid fallback instead,
+logged once per state. The cutout bit outranks the per-face seal mask: the seal mask only says which
+faces are covered and says nothing about the material, so a sealed face on a cutout entry is covered
+by an alpha-tested quad, not a solid one. A pack checks the cutout bit before letting a sealed face
+stop a ray.
+
 ### Exact opaque partial model geometry
 
-`VoxelModelShape` refines PARTIAL cells when final model emission proves a union of opaque
-axis-aligned cuboids on the existing 1/16-block grid. Selection shapes remain the fallback: they
+`VoxelModelShape` sharpens PARTIAL cells when a state's baked model parts add up to solid boxes
+lined up with the axes, on the existing 1/16-block grid. Selection shapes remain the fallback: they
 can be wider than visible rails and fill the gaps between them. Refinement uses geometry and
 material data, never block identities. Cube and CROSS handling remain unchanged.
 
-The public Fabric model-emission API runs with the actual cell position, supplied world view,
-vanilla position seed and a predicate that keeps every face. Custom wrappers remain in the chain;
-`collectParts` and unwrapped delegates do not prove their final geometry. Non-null geometry keys
-reuse exact emitted results only within the current harvest; null keys require a fresh emission.
-The resolver snapshots immutable rectangle/opacity facts rather than retaining mutable quads.
-Position-offset, off-grid, rotated, open or alpha-uncertain geometry retains the existing fallback.
+The rebuild runs once per distinct state per section, not once per cell.
+`SectionHarvester.buildEntry` collects a PARTIAL state's baked model parts with `collectParts` and
+the fixed harvest seed, the same parts the face colour read already collects for that entry, and
+hands them to `VoxelModelShape.reconstruct` with no world and no position. That is why the rebuild
+is safe on the harvest thread. It never calls the live Fabric model-emission hook, which a
+connected-texture mod hooks with a real world and position. A model whose geometry changes only
+inside that hook is not seen this way and keeps its selection-shape fallback. The fence case above,
+rails drawn inside the selection slab, is why the rebuild exists. Off-grid, rotated, open, or
+alpha-uncertain geometry also keeps the selection-shape fallback.
 
 Opposed rectangular faces propose candidate cuboids. Six rendered faces certify a closed body;
 a missing face may close only when its entire rectangle lies strictly inside an already certified
@@ -2865,12 +2937,15 @@ with identical cross-sections reduce the result. More than eight remaining boxes
 refinement; nothing is inflated or truncated. The existing palette box words, CUTOUT/CROSS flags,
 GPU buffer sizes and shader traversal stay unchanged.
 
-`VoxelPaletteShapes` deduplicates exact results by original state entry and packed boxes within
-the existing 96-entry section palette. Original entries remain available for unsupported cells.
-Each appended variant copies material/source metadata and recomputes its face-seal mask.
-Exhausting the cap logs geometry pressure and keeps the original selection fallback; it never
-aliases a cell to a different contextual shape or invalidates unchanged source evidence.
-Only PARTIAL cells run final emission, at most once per cell during harvesting, never each frame.
+`VoxelPaletteShapes` deduplicates exact results by original state entry and packed boxes within the
+existing 96-entry section palette. Original entries remain available for unsupported cells. Each
+appended variant copies material/source metadata and recomputes its face-seal mask. Exhausting the
+cap logs geometry pressure and keeps the original selection fallback. It never points a cell at some
+other shape, and it never throws away evidence that has not changed. The harvester does not call
+`VoxelPaletteShapes.refine`. The rebuild above runs once for each distinct state in a section, in
+`buildEntry`, so every cell with that state gets the rebuilt boxes from the one palette entry they
+share. `VoxelPaletteShapes` is the place to hook a rebuild that needs a different shape for each
+cell, one that depends on where the cell is.
 Resolvers and geometry keys die with the harvest lease; atlas opacity evidence clears after
 reader drain. Tests cover wrapper emission, key reuse and null keys, all 16 fence connections,
 cardinal model baking, receiving/gap/casting rays, unsupported geometry and palette/source

@@ -416,6 +416,51 @@ class BrickGridUploadTest {
         assertEquals(BrickGridUpload.packBox(boxes.get(7)), buf.getInt(14 * 4), "word 14 stays box[7] when not cutout");
     }
 
+    @Test
+    void aCutoutPartialEntryWithSixBoxesPacksAllSixBoxesAndTheRect() {
+        // A door, trapdoor, glass pane, or iron bars: a PARTIAL shape with a cutout material and
+        // at most six boxes. At that count, box slots 6 and 7 stay free of real box data, so the
+        // rect goes there the same way it does for a FULL or CROSS cutout entry.
+        List<VoxelShapeClassifier.PackedBox> boxes = new java.util.ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            boxes.add(new VoxelShapeClassifier.PackedBox(i, i, i, i + 1, i + 1, i + 1));
+        }
+        float[] uvRect = {0.05f, 0.15f, 0.25f, 0.35f};
+        SectionPalette.Entry entry = new SectionPalette.Entry(
+                VoxelShapeKind.PARTIAL, boxes, new int[6], 0.0, false, 0, true, uvRect, 0f);
+
+        byte[] bytes = BrickGridUpload.packPaletteEntries(List.of(entry));
+        ByteBuffer buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+
+        int word0 = buf.getInt(0);
+        assertEquals(6, word0 & 0xF, "boxCount 6");
+        assertTrue((word0 & (1 << 30)) != 0, "cutout flag set");
+
+        for (int i = 0; i < 6; i++) {
+            assertEquals(BrickGridUpload.packBox(boxes.get(i)), buf.getInt((7 + i) * 4),
+                    "word " + (7 + i) + " holds real box " + i);
+        }
+        assertEquals(BrickGridUpload.packUvWord(uvRect[0], uvRect[1]), buf.getInt(13 * 4), "word 13: u0,v0");
+        assertEquals(BrickGridUpload.packUvWord(uvRect[2], uvRect[3]), buf.getInt(14 * 4), "word 14: u1,v1");
+    }
+
+    @Test
+    void aCutoutEntryWithSevenBoxesFailsLoudly() {
+        // Seven boxes need box slot 6 for real box data, the same word a cutout entry's rect uses.
+        // packPaletteEntries must refuse instead of letting the rect silently overwrite it.
+        List<VoxelShapeClassifier.PackedBox> boxes = new java.util.ArrayList<>();
+        for (int i = 0; i < 7; i++) {
+            boxes.add(new VoxelShapeClassifier.PackedBox(i, i, i, i + 1, i + 1, i + 1));
+        }
+        SectionPalette.Entry entry = new SectionPalette.Entry(
+                VoxelShapeKind.PARTIAL, boxes, new int[6], 0.0, false, 0, true,
+                new float[] {0.1f, 0.1f, 0.2f, 0.2f}, 0f);
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> BrickGridUpload.packPaletteEntries(List.of(entry)));
+        assertTrue(thrown.getMessage().contains("has 7 boxes"), "message names the offending box count");
+    }
+
     // --- Out-of-bounds write guard (OOB-write fix, 2026-07-21): fitsInBuffer -------------------------
     // The correctness core of the "Colored Light Reach shrink stale-slot" fix: every vkCmdUpdateBuffer
     // call site in BrickGridUpload runs a write's (offset, dataSize) through this pure function against

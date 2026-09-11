@@ -57,4 +57,25 @@ class EngineBufferUploadQueueTest {
         EngineBufferUploadQueue.discard(TARGET);
         assertFalse(EngineBufferUploadQueue.hasPending(TARGET));
     }
+
+    @Test
+    void aTargetWithNoPendingUpdateTriviallyFitsAnyBuffer() {
+        assertTrue(EngineBufferUploadQueue.pendingFitsBuffer(TARGET, 0));
+    }
+
+    @Test
+    void pendingFitsBufferAcceptsARangeEndingExactlyAtTheBufferSize() {
+        EngineBufferUploadQueue.publish(TARGET, false, List.of(
+                new EngineBufferUploadQueue.Range(4, ByteBuffer.allocateDirect(8))));
+        assertTrue(EngineBufferUploadQueue.pendingFitsBuffer(TARGET, 12));
+        // Checking does not remove the entry; it must still be there for the real drain.
+        assertTrue(EngineBufferUploadQueue.hasPending(TARGET));
+    }
+
+    @Test
+    void pendingFitsBufferRejectsARangeThatOverrunsTheBufferSize() {
+        EngineBufferUploadQueue.publish(TARGET, false, List.of(
+                new EngineBufferUploadQueue.Range(4, ByteBuffer.allocateDirect(8))));
+        assertFalse(EngineBufferUploadQueue.pendingFitsBuffer(TARGET, 11));
+    }
 }

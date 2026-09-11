@@ -141,6 +141,7 @@ public final class PackDiscovery {
         // pipeline compile mid-frame.
         ShaderImports.validate(shaderSources);
         PaletteStrideContract.validate(shaderSources);
+        EntityOccluderStrideContract.validate(graph, shaderSources);
         Map<String, PackOption> options = OptionScanner.scan(shaderSources);
 
         VramReport report = GraphValidator.validate(graph, options, renderWidth, renderHeight);

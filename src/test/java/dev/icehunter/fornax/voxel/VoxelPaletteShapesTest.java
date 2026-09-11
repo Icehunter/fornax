@@ -23,6 +23,16 @@ class VoxelPaletteShapesTest {
         return new SectionPalette.Entry(VoxelShapeKind.PARTIAL, SELECTION,
                 new int[]{color,color,color,color,color,color}, 0.5, false, color);
     }
+    private static final float[] CUTOUT_RECT = {0.1f, 0.2f, 0.3f, 0.4f};
+    private static SectionPalette.Entry cutoutEntry() {
+        return new SectionPalette.Entry(VoxelShapeKind.PARTIAL, SELECTION,
+                new int[]{1,1,1,1,1,1}, 0.0, false, 0, true, CUTOUT_RECT, 0f);
+    }
+    private static List<VoxelShapeClassifier.PackedBox> boxesOfSize(int count) {
+        var boxes = new ArrayList<VoxelShapeClassifier.PackedBox>();
+        for (int i = 0; i < count; i++) boxes.add(box(0,0,0,1,1,1));
+        return boxes;
+    }
     private static List<SectionPalette.Entry> entries(SectionPalette.Entry... entries) {
         return new ArrayList<>(List.of(entries));
     }
@@ -108,6 +118,28 @@ class VoxelPaletteShapesTest {
         assertEquals(12, finished.eligibleFaces()); // Two intrinsically emissive cells, six faces each.
         assertTrue(policy.finish(false).complete());
         assertFalse(finished.incompletePalette());
+    }
+
+    @Test void refiningACutoutBaseToSevenBoxesFallsBackToASolidVariant() {
+        var base = cutoutEntry();
+        var entries = entries(base);
+        var variants = new VoxelPaletteShapes(entries, index -> { });
+        // One past SectionHarvester.CUTOUT_MAX_BOXES: the packer's UV-rect box slots (6 and 7)
+        // collide with real box data at this count, so the entry falls back to solid.
+        int index = variants.refine(0, boxesOfSize(SectionHarvester.CUTOUT_MAX_BOXES + 1));
+        var refined = entries.get(index);
+        assertFalse(refined.cutout());
+        assertSame(SectionPalette.NO_UV_RECT, refined.uvRect());
+    }
+
+    @Test void refiningACutoutBaseToTheMaxCutoutBoxCountKeepsTheCutoutRect() {
+        var base = cutoutEntry();
+        var entries = entries(base);
+        var variants = new VoxelPaletteShapes(entries, index -> { });
+        int index = variants.refine(0, boxesOfSize(SectionHarvester.CUTOUT_MAX_BOXES));
+        var refined = entries.get(index);
+        assertTrue(refined.cutout());
+        assertSame(base.uvRect(), refined.uvRect());
     }
 
     @Test void sourcePolicyCopiesAcrossTheSixtyFourEntryWordBoundary() {

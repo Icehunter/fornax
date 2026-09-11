@@ -111,7 +111,7 @@ class GraphValidatorBufferTargetTest {
                         VoxelWaterReflBuffer.TARGET, AnalyticLightListBuffer.TARGET,
                         PrecipClipmapBuffer.TARGET, PrecipCoarseClipmapBuffer.TARGET,
                         SurfaceFluidClipmapBuffer.TARGET,
-                        WaterActorBuffer.TARGET),
+                        WaterActorBuffer.TARGET, EntityOccluderBuffer.TARGET),
                 GraphValidator.ENGINE_BUFFERS);
     }
 
@@ -146,6 +146,40 @@ class GraphValidatorBufferTargetTest {
                         pass("badParticles", PassType.PARTICLES,
                                 List.of(PrecipCoarseClipmapBuffer.TARGET), List.of("out"))),
                 Map.of(), 1920, 1080));
+    }
+
+    @Test
+    void entityOccludersIsAGraphicsInputOnly() {
+        // The other side of rawCoarsePrecipitationIsComputeInputOnly above: this buffer is uploaded
+        // on the graphics queue only, so a compute pass cannot bind it as an input or an output.
+        TargetSpec occluders = TargetSpec.buffer(EntityOccluderBuffer.TARGET, null);
+
+        assertDoesNotThrow(() -> GraphValidator.validate(
+                graph(targets(occluders, texture("out")),
+                        pass("fullscreenReader", PassType.FULLSCREEN,
+                                List.of(EntityOccluderBuffer.TARGET), List.of("out"))),
+                Map.of(), 1920, 1080));
+        assertDoesNotThrow(() -> GraphValidator.validate(
+                graph(targets(occluders, texture("sceneColor")),
+                        pass("particlesReader", PassType.PARTICLES,
+                                List.of(EntityOccluderBuffer.TARGET), List.of("sceneColor"))),
+                Map.of(), 1920, 1080));
+
+        FornaxPackError inputError = assertThrows(FornaxPackError.class, () -> GraphValidator.validate(
+                graph(targets(occluders, texture("out")),
+                        pass("computeReader", PassType.COMPUTE,
+                                List.of(EntityOccluderBuffer.TARGET), List.of("out"))),
+                Map.of(), 1920, 1080));
+        assertEquals("pass.computeReader.inputs", inputError.key());
+        assertTrue(inputError.getMessage().contains("computeReader"), inputError.getMessage());
+
+        FornaxPackError outputError = assertThrows(FornaxPackError.class, () -> GraphValidator.validate(
+                graph(targets(occluders),
+                        pass("computeWriter", PassType.COMPUTE,
+                                List.of(), List.of(EntityOccluderBuffer.TARGET))),
+                Map.of(), 1920, 1080));
+        assertEquals("pass.computeWriter.outputs", outputError.key());
+        assertTrue(outputError.getMessage().contains("computeWriter"), outputError.getMessage());
     }
 
     @Test

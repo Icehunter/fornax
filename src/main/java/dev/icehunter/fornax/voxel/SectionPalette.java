@@ -32,16 +32,27 @@ public final class SectionPalette {
      *
      * <p>{@code cutout} (cutout/cross milestone) marks a voxel whose real appearance is alpha-tested
      * rather than fully opaque. It is read from the baked quad material layers, or from a
-     * {@code MaterialScalars.isCutout(categoryId)} tag. Only ever {@code true} when
-     * {@code shapeKind} is {@code FULL} (a real cube
-     * with an alpha-cutout texture, e.g. leaves) or {@code CROSS} (billboard geometry, e.g. grass);
-     * SectionHarvester never sets it for {@code PARTIAL}/{@code EMPTY} shapes (no meaningful UV rect
-     * to alpha-test against for those). {@code uvRect} is the block's real atlas sprite rect ({@code
+     * {@code MaterialScalars.isCutout(categoryId)} tag. {@code true} when {@code shapeKind} is
+     * {@code FULL} (a real cube with an alpha-cutout texture, e.g. leaves), {@code CROSS} (billboard
+     * geometry, e.g. grass), or {@code PARTIAL} with at most six boxes (a door, trapdoor, glass pane
+     * or iron bars). A PARTIAL cell needing more boxes than that keeps the solid-occluder fallback
+     * instead, since its rect would otherwise need to overwrite real box data (see {@code
+     * BrickGridUpload.PALETTE_ENTRY_WORDS}'s layout comment). {@code SectionHarvester} never sets it
+     * for {@code EMPTY} shapes. {@code uvRect} is the block's real atlas sprite rect ({@code
      * {u0, v0, u1, v1}}, ATLAS space) captured by {@link FaceColorResolver}, all-zero ({@link
      * #NO_UV_RECT}) when {@code cutout} is false. For {@code CROSS} entries, {@code boxes} holds
-     * exactly one box -- the real harvested bounding box of the block's own cross-quad geometry (see
-     * {@link FaceColorResolver#resolveCrossGeometry}), NOT a partial-shape collision box; the shader
-     * reconstructs the standard two-diagonal-plane cross topology within that box.
+     * exactly one box: the real harvested bounding box of the block's own cross-quad geometry
+     * (see {@link FaceColorResolver#resolveCrossGeometry}), NOT a partial-shape collision box; the
+     * shader rebuilds the usual two crossed slanted planes inside that box. A cutout {@code
+     * PARTIAL} entry keeps its real partial-shape boxes in {@code boxes}. The shader alpha-tests
+     * the faces of those boxes, spreading the rect across each face, rather than assuming one cross
+     * box or a whole cube.
+     *
+     * <p>{@code cutout} outranks {@code faceSealMask}: {@link FaceSealResolver} reports shape cover
+     * only and knows nothing about material. A sealed face on a cutout entry (a door's flat face, a
+     * full leaves cube) is covered by an alpha-tested quad, not a solid one. The shader checks
+     * {@code cutout} first, and treats a sealed bit as a solid face only when {@code cutout} is
+     * false.
      *
      * <p>{@code extinction} (volumetric foliage milestone, 2026-07-20) is the block's measured
      * extinction coefficient per block of path length ({@link FoliageDensityResolver#resolveExtinction}),

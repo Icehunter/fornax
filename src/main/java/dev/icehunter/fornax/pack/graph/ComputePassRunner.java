@@ -578,7 +578,8 @@ public final class ComputePassRunner implements AutoCloseable {
                 VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack).sType$Default();
                 VK13.vkBeginCommandBuffer(cmd, beginInfo);
                 if (bindingOrder.contains(VoxelSourceWindow.TARGET)) VoxelWindow.refreshSourceWindow(registry);
-                EngineBufferUploadQueue.recordForBindings(cmd, stack, registry, bindingOrder);
+                EngineBufferUploadQueue.recordForBindings(cmd, stack, registry, bindingOrder,
+                        VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
                 VK13.vkCmdBindPipeline(cmd, VK13.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline());
                 updateAndBindDescriptorSet(registry, cmd, descriptorSets[slotIndex], options, globals);
 
