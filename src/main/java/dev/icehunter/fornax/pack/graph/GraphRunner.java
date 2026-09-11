@@ -1264,11 +1264,8 @@ public final class GraphRunner {
             return;
         }
 
-        List<PassSpec> runnable = pack.graph().passes().stream()
-                .filter(GraphRunner::isPreOpaqueLightingComputePass)
-                .filter(GraphRunner::enabledAtCompile)
-                .filter(p -> computeRunners.containsKey(p.name()))
-                .toList();
+        List<PassSpec> runnable = preOpaqueLightingComputeRunnablePasses(pack.graph().passes(),
+                GraphRunner::enabledAtCompile, GraphRunner::enabledThisFrame, computeRunners.keySet());
 
         // Null until Sodium's first terrain draw of the session has published a slice, and
         // unavoidably so at THIS point in the frame: prepare() runs before any terrain draw, so what
@@ -2553,6 +2550,23 @@ public final class GraphRunner {
                 || p.name().equals("light_list_reset")
                 || isLightListBuildPass(p)
                 || isVoxelWaterReflPass(p));
+    }
+
+    /**
+     * The pre-opaque lighting passes to run this frame: pre-opaque, compiled in, still wanted this
+     * frame by {@code runtime_enabled_if}, and ready. Every other pass type checks
+     * {@code runtime_enabled_if} in the main per-frame loop; this list runs earlier, from
+     * {@code prepare()}, so it must check on its own.
+     */
+    static List<PassSpec> preOpaqueLightingComputeRunnablePasses(List<PassSpec> passes,
+            java.util.function.Predicate<PassSpec> compiledIn, java.util.function.Predicate<PassSpec> wantedThisFrame,
+            java.util.Set<String> built) {
+        return passes.stream()
+                .filter(GraphRunner::isPreOpaqueLightingComputePass)
+                .filter(compiledIn)
+                .filter(wantedThisFrame)
+                .filter(p -> built.contains(p.name()))
+                .toList();
     }
 
     /**

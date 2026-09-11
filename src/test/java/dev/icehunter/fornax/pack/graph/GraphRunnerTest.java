@@ -108,6 +108,32 @@ class GraphRunnerTest {
                 List.of(), List.of(), null, null, List.of(), null, null, null);
     }
 
+    // --- preOpaqueLightingComputeRunnablePasses ---------------------------------------------------
+
+    @Test
+    void skipsAPreOpaquePassTheWorldTurnedOffThisFrame() {
+        PassSpec pass = new PassSpec("light_list_reset", PassType.COMPUTE, null, null,
+                "shaders/compute/light_list_reset.comp", List.of(), List.of(), null, null,
+                List.of(1, 1, 1), List.of(8, 8), null, null, "dimension != 3");
+
+        List<PassSpec> runnable = GraphRunner.preOpaqueLightingComputeRunnablePasses(
+                List.of(pass), p -> true, p -> false, Map.of(pass.name(), 1).keySet());
+
+        assertTrue(runnable.isEmpty(), "a pass the world turned off this frame must not dispatch");
+    }
+
+    @Test
+    void keepsAPreOpaquePassNothingTurnedOff() {
+        PassSpec pass = new PassSpec("light_list_reset", PassType.COMPUTE, null, null,
+                "shaders/compute/light_list_reset.comp", List.of(), List.of(), null, null,
+                List.of(1, 1, 1), List.of(8, 8), null, null);
+
+        List<PassSpec> runnable = GraphRunner.preOpaqueLightingComputeRunnablePasses(
+                List.of(pass), p -> true, p -> true, Map.of(pass.name(), 1).keySet());
+
+        assertEquals(List.of(pass), runnable);
+    }
+
     @Test
     void falseWhenNoCopyPassWritesSceneDepth() {
         GraphSpec g = new GraphSpec(Map.of(), List.of(
