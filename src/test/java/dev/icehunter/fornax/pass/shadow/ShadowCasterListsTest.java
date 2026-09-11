@@ -31,6 +31,11 @@ class ShadowCasterListsTest {
         return ShadowCasterLists.aabbIntersectsShadowVolume(viewProj, minX, minY, minZ, maxX, maxY, maxZ, new Vector4f());
     }
 
+    private static boolean fullyInside(Matrix4f viewProj, double minX, double minY, double minZ,
+                                        double maxX, double maxY, double maxZ) {
+        return ShadowCasterLists.aabbFullyInsideShadowVolume(viewProj, minX, minY, minZ, maxX, maxY, maxZ, new Vector4f());
+    }
+
     /**
      * At a low sun angle, a section far along the sun's ground azimuth (world +X here) sits well
      * outside a world-XZ-radius cylinder (radius ~ shadowDistance + one section = 112 blocks) but
@@ -104,6 +109,37 @@ class ShadowCasterListsTest {
      * confirms the AABB predicate built on top of that matrix stays well-defined (no NaN/infinite
      * results) rather than assuming it.
      */
+    /**
+     * A small box centered on the camera sits well inside the shadow area on every axis, at any sun
+     * angle, since the shadow area is always centered on the camera. This is the case {@link
+     * ShadowCasterLists#build} counts on to skip a whole region's per-section checks when the
+     * region's own box already passes this test.
+     */
+    @Test
+    void smallBoxAtCameraIsFullyInside() {
+        Vector3f lowSun = new Vector3f(0.995f, 0.1f, 0.0f).normalize();
+        Matrix4f viewProj = ShadowCamera.compute(lowSun, CAM_X, CAM_Y, CAM_Z, SHADOW_DISTANCE, RESOLUTION).viewProj();
+
+        assertTrue(fullyInside(viewProj, -8.0, -8.0, -8.0, 8.0, 8.0, 8.0),
+                "a small box at the camera must sit fully inside any well-formed shadow volume");
+    }
+
+    /**
+     * A box that starts well inside the shadow area and stretches far past its edge must still
+     * count as touching the shadow area (part of it is inside), but must NOT count as fully inside,
+     * since part of it sticks out. The two checks must give different answers here.
+     */
+    @Test
+    void boxStraddlingTheEdgeIntersectsButIsNotFullyInside() {
+        Matrix4f viewProj = ShadowCamera.compute(NOON_SUN, CAM_X, CAM_Y, CAM_Z, SHADOW_DISTANCE, RESOLUTION).viewProj();
+
+        // X runs from well inside the noon world-XZ radius (40) to far past it (400).
+        assertTrue(intersects(viewProj, 40.0, -8.0, 42.0, 400.0, 8.0, 58.0),
+                "sanity: the near half of this box must still register as touching the volume");
+        assertFalse(fullyInside(viewProj, 40.0, -8.0, 42.0, 400.0, 8.0, 58.0),
+                "a box reaching far past the volume's edge must not count as fully inside it");
+    }
+
     @Test
     void nearVerticalLightAxisProducesFiniteResult() {
         Vector3f nearVertical = new Vector3f(0.001f, 0.9999995f, 0.0f).normalize();

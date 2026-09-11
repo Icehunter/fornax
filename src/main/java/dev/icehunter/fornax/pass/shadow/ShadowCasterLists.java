@@ -192,15 +192,21 @@ public final class ShadowCasterLists {
             if (!regionMayIntersect(region, lightViewProj, camX, camY, camZ, scratch)) {
                 continue;
             }
+            // When the whole region already sits inside the shadow area, every section it holds does
+            // too (a section's box always fits inside its region's). So the per-section check below
+            // is skipped entirely for it. See aabbFullyInsideShadowVolume's own note.
+            boolean regionFullyInside = regionFullyInsideShadowVolume(region, lightViewProj, camX, camY, camZ, scratch);
 
             ChunkRenderList list = null;
             for (int local = 0; local < RenderRegion.REGION_SIZE; local++) {
-                int sectionX = region.getChunkX() + LocalSectionIndex.unpackX(local);
-                int sectionY = region.getChunkY() + LocalSectionIndex.unpackY(local);
-                int sectionZ = region.getChunkZ() + LocalSectionIndex.unpackZ(local);
-                if (!sectionIntersectsShadowVolume(lightViewProj, sectionX, sectionY, sectionZ,
-                        camX, camY, camZ, scratch)) {
-                    continue;
+                if (!regionFullyInside) {
+                    int sectionX = region.getChunkX() + LocalSectionIndex.unpackX(local);
+                    int sectionY = region.getChunkY() + LocalSectionIndex.unpackY(local);
+                    int sectionZ = region.getChunkZ() + LocalSectionIndex.unpackZ(local);
+                    if (!sectionIntersectsShadowVolume(lightViewProj, sectionX, sectionY, sectionZ,
+                            camX, camY, camZ, scratch)) {
+                        continue;
+                    }
                 }
 
                 if (list == null) {
@@ -241,6 +247,21 @@ public final class ShadowCasterLists {
         double minY = region.getOriginY() - camY;
         double minZ = region.getOriginZ() - camZ;
         return aabbIntersectsShadowVolume(lightViewProj,
+                minX, minY, minZ,
+                minX + REGION_FOOTPRINT_XZ_BLOCKS, minY + REGION_FOOTPRINT_Y_BLOCKS, minZ + REGION_FOOTPRINT_XZ_BLOCKS,
+                scratch);
+    }
+
+    /** True when the region's own box sits ENTIRELY inside the shadow area, not just touching it
+     * (see {@link #aabbFullyInsideShadowVolume}). When true, every one of this region's up to 256
+     * sections must also be inside the shadow area, with no need to check that section's own 8
+     * corners. See {@link #build} for where this is used. */
+    private static boolean regionFullyInsideShadowVolume(RenderRegion region, Matrix4f lightViewProj,
+                                                          double camX, double camY, double camZ, Vector4f scratch) {
+        double minX = region.getOriginX() - camX;
+        double minY = region.getOriginY() - camY;
+        double minZ = region.getOriginZ() - camZ;
+        return aabbFullyInsideShadowVolume(lightViewProj,
                 minX, minY, minZ,
                 minX + REGION_FOOTPRINT_XZ_BLOCKS, minY + REGION_FOOTPRINT_Y_BLOCKS, minZ + REGION_FOOTPRINT_XZ_BLOCKS,
                 scratch);
@@ -300,6 +321,45 @@ public final class ShadowCasterLists {
         return ndcMaxX >= -1.0f - eps && ndcMinX <= 1.0f + eps
                 && ndcMaxY >= -1.0f - eps && ndcMinY <= 1.0f + eps
                 && ndcMaxZ >= 0.0f - eps && ndcMinZ <= 1.0f + eps;
+    }
+
+    /**
+     * True when the box's 8 moved corners land ENTIRELY inside the shadow area ({@code x,y} in
+     * {@code [-1,1]}, {@code z} in {@code [0,1]}), not just touching it as {@link
+     * #aabbIntersectsShadowVolume} tests. Moving the box through the light's matrix is a straight
+     * (linear) move, with no bending, so the box keeps its shape: if all 8 corners land inside a
+     * box-shaped area, every point between them must too. This is the same reasoning {@link
+     * #aabbIntersectsShadowVolume} already leans on for the touching test.
+     *
+     * <p>{@link #build} uses this to skip checking each section's own corners for a region already
+     * known to sit fully inside the shadow area: every section such a region holds fits inside the
+     * region's own box, so it must be inside the shadow area too.
+     */
+    static boolean aabbFullyInsideShadowVolume(Matrix4f lightViewProj,
+                                                double minX, double minY, double minZ,
+                                                double maxX, double maxY, double maxZ,
+                                                Vector4f scratch) {
+        float ndcMinX = Float.POSITIVE_INFINITY, ndcMinY = Float.POSITIVE_INFINITY, ndcMinZ = Float.POSITIVE_INFINITY;
+        float ndcMaxX = Float.NEGATIVE_INFINITY, ndcMaxY = Float.NEGATIVE_INFINITY, ndcMaxZ = Float.NEGATIVE_INFINITY;
+        for (int i = 0; i < 8; i++) {
+            float cx = (float) ((i & 1) == 0 ? minX : maxX);
+            float cy = (float) ((i & 2) == 0 ? minY : maxY);
+            float cz = (float) ((i & 4) == 0 ? minZ : maxZ);
+            lightViewProj.transform(scratch.set(cx, cy, cz, 1.0f));
+            ndcMinX = Math.min(ndcMinX, scratch.x);
+            ndcMaxX = Math.max(ndcMaxX, scratch.x);
+            ndcMinY = Math.min(ndcMinY, scratch.y);
+            ndcMaxY = Math.max(ndcMaxY, scratch.y);
+            ndcMinZ = Math.min(ndcMinZ, scratch.z);
+            ndcMaxZ = Math.max(ndcMaxZ, scratch.z);
+        }
+        // Same tiny roundoff guard as aabbIntersectsShadowVolume, same direction: a corner exactly on
+        // the edge still counts as inside. Not a wider margin, since a wider one here would wrongly
+        // mark a region that only PARTLY overlaps the shadow area as fully inside it.
+        final float eps = 1.0e-4f;
+        return ndcMinX >= -1.0f - eps && ndcMaxX <= 1.0f + eps
+                && ndcMinY >= -1.0f - eps && ndcMaxY <= 1.0f + eps
+                && ndcMinZ >= 0.0f - eps && ndcMaxZ <= 1.0f + eps;
     }
 
     /**
