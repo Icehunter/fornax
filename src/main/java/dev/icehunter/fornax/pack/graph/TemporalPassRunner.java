@@ -86,10 +86,15 @@ public final class TemporalPassRunner {
     private final PassSpec spec;
     private final RenderPipeline pipeline;
     private boolean invalid;
+    /** Built once, since {@code spec.name()} never changes for this runner. {@link #run} runs
+     * every frame, so building a new name there each time would mean one small allocation per
+     * frame for a string that never changes. */
+    private final java.util.function.Supplier<String> passLabel;
 
     private TemporalPassRunner(PassSpec spec, RenderPipeline pipeline) {
         this.spec = spec;
         this.pipeline = pipeline;
+        this.passLabel = () -> "Fornax " + spec.name();
     }
 
     public static TemporalPassRunner build(PassSpec spec, TargetFormat outputFormat) {
@@ -171,7 +176,7 @@ public final class TemporalPassRunner {
         CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
         GpuSampler linearSampler = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
         GpuSampler nearestSampler = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST);
-        try (RenderPass pass = encoder.createRenderPass(() -> "Fornax " + spec.name(),
+        try (RenderPass pass = encoder.createRenderPass(passLabel,
                 outputView, Optional.empty())) {
             try {
                 pass.setPipeline(pipeline);

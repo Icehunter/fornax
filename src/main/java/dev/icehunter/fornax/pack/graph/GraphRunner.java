@@ -185,6 +185,10 @@ public final class GraphRunner {
     // builtin.depth_opaque as an input. GraphValidator only allows this input on a GEOMETRY pass,
     // so most packs never ask for it.
     private static boolean packReferencesOpaqueDepth;
+    // Every input a compile-enabled COMPUTE pass declares, set once per rebuild for
+    // prepareComputeAtlasTextures to read every frame. Which passes are compute and compile-enabled
+    // is fixed until the next rebuild, so re-deriving this list every frame bought nothing.
+    private static List<String> computeAtlasTextureInputs = List.of();
 
     // Pure-JVM rolling stats; the FrameProfiler OBJECT lives for the mod's whole session, independent
     // of which pack (if any) is loaded (like opaqueDepth below -- see that field's own doc). Its
@@ -783,6 +787,7 @@ public final class GraphRunner {
         packTextureRegistry = PackTextureRegistry.create(pack.root(), pack.graph().textures());
         packDeclaresDepthCopyback = computePackDeclaresDepthCopyback(graphWithSceneHistory);
         packReferencesOpaqueDepth = computePackReferencesOpaqueDepth(graphWithSceneHistory);
+        computeAtlasTextureInputs = computeComputeAtlasTextureInputs(graphWithSceneHistory, compileValues);
 
         pendingOptionsLayout = PackOptionsLayout.build(List.copyOf(pack.options().values()));
         Map<String, Float> defaults = new LinkedHashMap<>();
@@ -1217,21 +1222,26 @@ public final class GraphRunner {
     }
 
     private static void prepareComputeAtlasTextures(TargetRegistry targets) {
-        PackModel pack = currentPack;
-        if (pack == null) {
+        if (currentPack == null) {
             computeAtlasTextures.clear();
             return;
         }
-        // Prepare every compile-enabled declaration, even passes gated at runtime, so a runtime
-        // gate never has to build its neutral descriptor for the first time mid-pass.
-        List<String> inputs = pack.graph().passes().stream()
-                .filter(pass -> pass.type() == PassType.COMPUTE && enabledAtCompile(pass))
-                .flatMap(pass -> pass.inputs().stream()).distinct().toList();
-        computeAtlasTextures.prepare(inputs, name -> {
+        computeAtlasTextures.prepare(computeAtlasTextureInputs, name -> {
                     GraphInputResolver.materializeAtlasFallback(name);
                     return GraphInputResolver.resolveView(name, targets, Map.of());
                 },
                 () -> RenderSystem.getDevice().createCommandEncoder());
+    }
+
+    /** Every input a compile-enabled COMPUTE pass declares. {@link #prepareComputeAtlasTextures}
+     * gets every one of these ready up front, even one gated at runtime, so a runtime gate never
+     * has to build its blank fallback for the first time mid-pass. Depends only on the pack's
+     * graph and compile values, neither of which change frame to frame, so {@link #rebuild} sets
+     * this once instead of working it out again every frame. */
+    static List<String> computeComputeAtlasTextureInputs(GraphSpec graph, Map<String, Integer> compileValues) {
+        return graph.passes().stream()
+                .filter(pass -> pass.type() == PassType.COMPUTE && isEnabledAtCompile(pass, compileValues))
+                .flatMap(pass -> pass.inputs().stream()).distinct().toList();
     }
 
     static void requireComputeAtlasTexturesPrepared(String passName, List<String> inputs, TargetRegistry targets) {
@@ -3000,6 +3010,7 @@ public final class GraphRunner {
         dev.icehunter.fornax.pipeline.DeferredGeometryPipelines.invalidate();
         packDeclaresDepthCopyback = false;
         packReferencesOpaqueDepth = false;
+        computeAtlasTextureInputs = List.of();
         // Drop every rolling per-label sample: a pass whose enabled_if just went permanently false
         // this rebuild (option toggle, pack switch, "None" unload) must not leave its last avg/p95
         // frozen on the HUD forever -- see frameProfiler's own field doc. Losing the

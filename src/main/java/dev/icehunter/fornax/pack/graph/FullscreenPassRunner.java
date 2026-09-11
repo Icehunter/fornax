@@ -95,12 +95,28 @@ public final class FullscreenPassRunner implements AutoCloseable {
      * count to compare against the device's maxTexelBufferElements limit. */
     private static volatile boolean loggedTexelBufferBindOnce = false;
 
+    /** Built once, since {@code spec.name()} never changes for this runner. {@link #runFrame} runs
+     * every frame, so building a new name there each time would mean one small allocation per
+     * frame for a string that never changes. */
+    private final java.util.function.Supplier<String> passLabel;
+
+    /** {@code inputSamplerName(i)} for every input, positionally aligned with {@code
+     * spec.inputs()}. {@link #runFrame} binds every input every frame, and how many inputs a pass
+     * has never changes for this runner, so building each name string fresh every frame bought
+     * nothing. */
+    private final String[] inputSamplerNames;
+
     private FullscreenPassRunner(PassSpec spec, RenderPipeline pipeline, boolean[] bufferInputs,
             InputSamplerKind[] inputSamplerKinds) {
         this.spec = spec;
         this.pipeline = pipeline;
         this.bufferInputs = bufferInputs;
         this.inputSamplerKinds = inputSamplerKinds;
+        this.passLabel = () -> "Fornax " + spec.name();
+        this.inputSamplerNames = new String[bufferInputs.length];
+        for (int i = 0; i < bufferInputs.length; i++) {
+            inputSamplerNames[i] = inputSamplerName(i);
+        }
         this.texelWrappers = new RawVulkanGpuBuffer[bufferInputs.length];
         this.texelWrapperHandles = new long[bufferInputs.length];
         this.passParamsData = new MappableRingBuffer(
@@ -264,7 +280,7 @@ public final class FullscreenPassRunner implements AutoCloseable {
             capture = FullscreenCapture.before(spec, bufferInputs, resolvedInputs, captureSamplers, outputView);
         }
         CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
-        try (RenderPass pass = encoder.createRenderPass(() -> "Fornax " + spec.name(), outputView, Optional.empty())) {
+        try (RenderPass pass = encoder.createRenderPass(passLabel, outputView, Optional.empty())) {
             try {
                 pass.setPipeline(pipeline);
             } catch (RuntimeException e) {
@@ -336,7 +352,7 @@ public final class FullscreenPassRunner implements AutoCloseable {
                         texelWrappers[i] = new RawVulkanGpuBuffer(buf.vkBuffer(), GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER, buf.sizeBytes());
                         texelWrapperHandles[i] = buf.vkBuffer();
                     }
-                    pass.setUniform(inputSamplerName(i), texelWrappers[i]);
+                    pass.setUniform(inputSamplerNames[i], texelWrappers[i]);
                     logTexelBufferBindOnce(buf);
                 } else {
                     GpuTextureView inputView = resolvedInputs != null ? resolvedInputs.get(i)
@@ -359,7 +375,7 @@ public final class FullscreenPassRunner implements AutoCloseable {
                     if (capture != null) capture.sampler(i,
                             kind == InputSamplerKind.SHADOW_COMPARISON && inputSampler == sampler
                                     ? InputSamplerKind.NEAREST_CLAMP.name() : kind.name());
-                    pass.bindTexture(inputSamplerName(i), inputView, inputSampler);
+                    pass.bindTexture(inputSamplerNames[i], inputView, inputSampler);
                 }
             }
 

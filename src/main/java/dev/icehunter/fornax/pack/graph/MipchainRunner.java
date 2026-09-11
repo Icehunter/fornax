@@ -26,6 +26,7 @@ import org.joml.Vector4f;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * Generalizes {@code HiZDownsamplePass}'s exact shape: a seed pass copies the pack's single-level
@@ -49,6 +50,12 @@ public final class MipchainRunner implements AutoCloseable {
     private final RenderPipeline pipeline;
     private final GpuBuffer seedParams;
     private final GpuBuffer reduceParams;
+    /** Built once, since {@code spec.name()} never changes for this runner. {@link #run} draws
+     * every frame, and the reduce pass runs once per level in that same frame, so building a new
+     * name for each draw would mean one small allocation per level, every frame, for a string that
+     * never changes. */
+    private final Supplier<String> seedLabel;
+    private final Supplier<String> reduceLabel;
 
     private int width;
     private int height;
@@ -67,6 +74,8 @@ public final class MipchainRunner implements AutoCloseable {
         this.pipeline = pipeline;
         this.seedParams = seedParams;
         this.reduceParams = reduceParams;
+        this.seedLabel = () -> "Fornax " + spec.name() + " Seed";
+        this.reduceLabel = () -> "Fornax " + spec.name() + " Reduce";
     }
 
     public static MipchainRunner build(PassSpec spec, TargetSpec targetSpec) {
@@ -184,7 +193,7 @@ public final class MipchainRunner implements AutoCloseable {
         GpuSampler sampler = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST);
 
         GpuTextureView seedInput = GraphInputResolver.resolveView(spec.inputs().get(0), registry, mipchainTargets);
-        try (RenderPass pass = encoder.createRenderPass(() -> "Fornax " + spec.name() + " Seed", levelViews[0], Optional.empty())) {
+        try (RenderPass pass = encoder.createRenderPass(seedLabel, levelViews[0], Optional.empty())) {
             pass.setPipeline(pipeline);
             pass.setUniform("u_PassParams", seedParams);
             pass.bindTexture("u_Input0", seedInput, sampler);
@@ -192,7 +201,7 @@ public final class MipchainRunner implements AutoCloseable {
         }
 
         for (int i = 1; i < levels; i++) {
-            try (RenderPass pass = encoder.createRenderPass(() -> "Fornax " + spec.name() + " Reduce", levelViews[i], Optional.empty())) {
+            try (RenderPass pass = encoder.createRenderPass(reduceLabel, levelViews[i], Optional.empty())) {
                 pass.setPipeline(pipeline);
                 pass.setUniform("u_PassParams", reduceParams);
                 pass.bindTexture("u_Input0", levelViews[i - 1], sampler);

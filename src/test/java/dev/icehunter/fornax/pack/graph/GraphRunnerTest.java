@@ -190,6 +190,35 @@ class GraphRunnerTest {
         assertFalse(GraphRunner.computePackReferencesOpaqueDepth(g));
     }
 
+    // --- computeComputeAtlasTextureInputs -------------------------------------------------------
+
+    @Test
+    void collectsInputsFromEveryCompileEnabledComputePassOnce() {
+        PassSpec a = new PassSpec("a", PassType.COMPUTE, null, null, "shaders/compute/a.comp",
+                List.of("builtin.noise", "shared"), List.of(), null, null, List.of(1, 1, 1), null, null, null);
+        PassSpec b = new PassSpec("b", PassType.COMPUTE, null, null, "shaders/compute/b.comp",
+                List.of("shared", "onlyB"), List.of(), null, null, List.of(1, 1, 1), null, null, null);
+        GraphSpec g = new GraphSpec(Map.of(), List.of(a, b));
+
+        assertEquals(List.of("builtin.noise", "shared", "onlyB"),
+                GraphRunner.computeComputeAtlasTextureInputs(g, Map.of()));
+    }
+
+    @Test
+    void skipsAComputePassCompiledOutAndAnyNonComputePass() {
+        PassSpec gated = new PassSpec("gated", PassType.COMPUTE, null, null, "shaders/compute/gated.comp",
+                List.of("gatedOnly"), List.of(), null, "SOME_OPTION == 1", List.of(1, 1, 1), null, null, null);
+        PassSpec draw = new PassSpec("draw", PassType.FULLSCREEN, null, null, "shaders/post/draw.fsh",
+                List.of("drawOnly"), List.of("builtin.output"), null, null, List.of(), null, null, null);
+        GraphSpec g = new GraphSpec(Map.of(), List.of(gated, draw));
+
+        // SOME_OPTION is a made-up name for this test, not a real engine option. Only its value
+        // matters here (0, which does not match "== 1").
+        assertEquals(List.of(), GraphRunner.computeComputeAtlasTextureInputs(g, Map.of("SOME_OPTION", 0)));
+        assertEquals(List.of("gatedOnly"),
+                GraphRunner.computeComputeAtlasTextureInputs(g, Map.of("SOME_OPTION", 1)));
+    }
+
     // --- Part A5: anyEnabledComputePassReadsVoxelGrid -------------------------------------------
 
     @Test

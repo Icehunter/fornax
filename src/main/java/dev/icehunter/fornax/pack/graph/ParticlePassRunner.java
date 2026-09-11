@@ -127,6 +127,10 @@ public final class ParticlePassRunner implements AutoCloseable {
      * {@link #bindingOrder}. Worked out once in {@link #build}, same as {@link #descriptorTypes}:
      * which pack textures exist does not change frame to frame, only on a pack rebuild. */
     private final boolean[] tileableSampler;
+    /** Built once, since {@code spec.name()} never changes for this runner. {@link #runFrame} runs
+     * every frame, so building a new name there each time would mean one small allocation per
+     * frame for a string that never changes. */
+    private final java.util.function.Supplier<String> passLabel;
     private long descriptorPool;
     private final long[] descriptorSets = new long[RING_DEPTH];
     private long frameIndex;
@@ -148,6 +152,7 @@ public final class ParticlePassRunner implements AutoCloseable {
         this.bindingOrder = bindingOrder;
         this.descriptorTypes = descriptorTypes;
         this.tileableSampler = tileableSampler;
+        this.passLabel = () -> "Fornax " + spec.name();
     }
 
     /**
@@ -356,7 +361,7 @@ public final class ParticlePassRunner implements AutoCloseable {
         // composite over whatever the output target already holds and test against the opaque depth
         // the terrain draw left there; clearing either would erase the scene they are supposed to
         // sit in front of.
-        try (RenderPass pass = encoder.createRenderPass(() -> "Fornax " + spec.name(),
+        try (RenderPass pass = encoder.createRenderPass(passLabel,
                 outputView, Optional.empty(), gbuffer.getDepthView(), OptionalDouble.empty())) {
             VkCommandBuffer cmd = commandBufferOf(pass);
             VK13.vkCmdBindPipeline(cmd, VK13.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline());
