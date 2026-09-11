@@ -1,6 +1,7 @@
 package dev.icehunter.fornax.mixin.sodium;
 
 import dev.icehunter.fornax.atlas.BlockAtlasPages;
+import dev.icehunter.fornax.pipeline.BiomePrecipitationCache;
 import dev.icehunter.fornax.pipeline.BlockClasses;
 import dev.icehunter.fornax.pipeline.MaterialIdContext;
 import dev.icehunter.fornax.pack.material.BlockMaterials;
@@ -76,6 +77,10 @@ public class FluidRendererMaterialIdMixin {
         // exposes no biome accessor, so both paths share one lookup and one failure mode instead of
         // diverging.
         //
+        // Uses BiomePrecipitationCache, same as the block path. For a block sitting in water, the
+        // block path already asked this about this same spot a moment ago. This call gets the
+        // saved answer instead of asking again.
+        //
         // This carries the TYPE (none/rain/snow), same as the block path. Water in a snowy biome must
         // report SNOW and not merely "precipitates", or the water pre-pass writes a positive alpha
         // sign and water_composite rings a frozen lake with rain splashes.
@@ -102,8 +107,9 @@ public class FluidRendererMaterialIdMixin {
         // pageForFluidState(FluidState) overload, avoiding a second createLegacyBlock() resolution
         // in this hot path -- see BlockAtlasPages' own doc on that overload.
         Minecraft client = Minecraft.getInstance();
-        MaterialIdContext.setAll(BlockMaterials.idForState(fluidKey),
-                client.level == null ? Biome.Precipitation.RAIN : client.level.getPrecipitationAt(blockPos),
+        Biome.Precipitation precipitation = client.level == null ? Biome.Precipitation.RAIN
+                : BiomePrecipitationCache.at(blockPos, () -> client.level.getPrecipitationAt(blockPos));
+        MaterialIdContext.setAll(BlockMaterials.idForState(fluidKey), precipitation,
                 fluidKey.getLightEmission(), BlockClasses.flagsForBlock(fluidKey.getBlock()),
                 BlockAtlasPages.pageForState(fluidKey));
     }

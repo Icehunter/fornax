@@ -1,6 +1,7 @@
 package dev.icehunter.fornax.mixin.sodium;
 
 import dev.icehunter.fornax.atlas.BlockAtlasPages;
+import dev.icehunter.fornax.pipeline.BiomePrecipitationCache;
 import dev.icehunter.fornax.pipeline.BlockClasses;
 import dev.icehunter.fornax.pipeline.MaterialIdContext;
 import dev.icehunter.fornax.pack.material.BlockMaterials;
@@ -50,6 +51,10 @@ public class BlockRendererMaterialIdMixin {
         // than stamping a permanently dry patch into a mesh that then persists until the chunk is
         // rebuilt. NOT NONE: dryness is the visible change, not the neutral one.
         //
+        // Uses BiomePrecipitationCache instead of asking directly: for a block sitting in water,
+        // FluidRendererMaterialIdMixin asks the same thing about the same spot right after this
+        // runs. The cache gives back the saved answer instead of doing the work twice.
+        //
         // How much light this block emits, straight off the BlockState already in hand. No lookup,
         // no allocation and no level access -- getLightEmission() reads a field cached on the
         // BlockState (SectionHarvester already calls it on the voxel path, javap-confirmed against
@@ -70,8 +75,9 @@ public class BlockRendererMaterialIdMixin {
         // cache (see that class's own doc), so this is currently a no-op write of the value every
         // block already implicitly had -- wiring the lookup path now costs nothing behaviorally.
         Minecraft client = Minecraft.getInstance();
-        MaterialIdContext.setAll(BlockMaterials.idForState(state),
-                client.level == null ? Biome.Precipitation.RAIN : client.level.getPrecipitationAt(pos),
+        Biome.Precipitation precipitation = client.level == null ? Biome.Precipitation.RAIN
+                : BiomePrecipitationCache.at(pos, () -> client.level.getPrecipitationAt(pos));
+        MaterialIdContext.setAll(BlockMaterials.idForState(state), precipitation,
                 state.getLightEmission(), BlockClasses.flagsForBlock(state.getBlock()),
                 BlockAtlasPages.pageForState(state));
     }
