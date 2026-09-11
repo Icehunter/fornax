@@ -90,6 +90,19 @@ class ComputeGraphicsWaitsTest {
         assertEquals(List.of(1L, 2L), waits);
     }
 
+    @Test void onlyTheConflictingPendingHandoffWaitsNotEveryPendingOne() {
+        List<Long> waits = new ArrayList<>();
+        ComputeGraphicsWaits frame = new ComputeGraphicsWaits(ComputeGraphicsWaits::conflicts, (semaphore, stages) -> waits.add(semaphore));
+        frame.submitted(compute("first", List.of(), "first"), 1L, 8L);
+        frame.submitted(compute("water", List.of(), "water"), 2L, 8L);
+        frame.submitted(compute("clouds", List.of(), "clouds"), 3L, 8L);
+        assertEquals(List.of(1L), waits);
+        frame.beforePass(draw("useWater", List.of("water"), "out"));
+        assertEquals(List.of(1L, 2L), waits, "clouds does not conflict, so it must stay deferred");
+        frame.close();
+        assertEquals(List.of(1L, 2L, 3L), waits, "the deferred handoff still drains at scope exit");
+    }
+
     @Test void laterComputeKeepsTheOriginalPreSubmitGraphicsBoundary() {
         List<Long> waits = new ArrayList<>();
         ComputeGraphicsWaits frame = new ComputeGraphicsWaits(ComputeGraphicsWaits::conflicts, (semaphore, stages) -> waits.add(semaphore));

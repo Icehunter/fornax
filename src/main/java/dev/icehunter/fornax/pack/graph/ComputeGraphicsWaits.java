@@ -5,6 +5,7 @@ import dev.icehunter.fornax.pack.PassType;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
@@ -71,12 +72,19 @@ final class ComputeGraphicsWaits implements AutoCloseable {
         }
     }
 
-    /** Called before the runner, including its debug transfers and attachment load/store. */
+    /** Called before the runner, including its debug transfers and attachment load/store. Waits
+     * only for the pending handoffs {@code pass} actually conflicts with, not every pending one.
+     * A handoff touching data {@code pass} never reads or writes stays deferred: forcing an early
+     * wait on it would stall the graphics queue for no reason. A pass outside {@code conflicts}'s
+     * tracked types (a real compute or particles pass) conflicts with everything pending, so every
+     * entry still waits then, matching this class's own doc on that case. */
     void beforePass(PassSpec pass) {
-        for (Pending handoff : pending) {
+        Iterator<Pending> it = pending.iterator();
+        while (it.hasNext()) {
+            Pending handoff = it.next();
             if (conflictPlan.test(handoff.producer(), pass)) {
-                close();
-                return;
+                waitFor(handoff);
+                it.remove();
             }
         }
     }
@@ -119,14 +127,17 @@ final class ComputeGraphicsWaits implements AutoCloseable {
         return false;
     }
 
+    /** A Vulkan semaphore wait covers only the named stages. ALL_COMMANDS also guards a fullscreen
+     * capture's transfer before its draw, and its WAW/WAR attachment access, not only its fragment
+     * shader. Passes with no conflict were recorded before this boundary. */
+    private void waitFor(Pending handoff) {
+        recorder.waitFor(handoff.semaphore(), VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+    }
+
     @Override
     public void close() {
         while (!pending.isEmpty()) {
-            Pending handoff = pending.getFirst();
-            // A Vulkan semaphore wait covers only the named stages. ALL_COMMANDS also guards a
-            // fullscreen capture's transfer before its draw, and its WAW/WAR attachment access, not
-            // only its fragment shader. Passes with no conflict were recorded before this boundary.
-            recorder.waitFor(handoff.semaphore(), VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+            waitFor(pending.getFirst());
             pending.removeFirst();
         }
     }
