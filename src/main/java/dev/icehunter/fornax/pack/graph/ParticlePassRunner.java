@@ -123,6 +123,10 @@ public final class ParticlePassRunner implements AutoCloseable {
     private final List<String> bindingOrder;
     /** The {@code VkDescriptorType} of each binding, positionally aligned with {@link #bindingOrder}. */
     private final List<Integer> descriptorTypes;
+    /** Whether each binding wants the LINEAR + REPEAT sampler, positionally aligned with
+     * {@link #bindingOrder}. Worked out once in {@link #build}, same as {@link #descriptorTypes}:
+     * which pack textures exist does not change frame to frame, only on a pack rebuild. */
+    private final boolean[] tileableSampler;
     private long descriptorPool;
     private final long[] descriptorSets = new long[RING_DEPTH];
     private long frameIndex;
@@ -135,13 +139,15 @@ public final class ParticlePassRunner implements AutoCloseable {
 
     private ParticlePassRunner(PassSpec spec, ParticleSpec particles, VulkanComputeBackend backend,
                                ParticlePipelineBuilder.CompiledParticlePipeline pipeline,
-                               List<String> bindingOrder, List<Integer> descriptorTypes) {
+                               List<String> bindingOrder, List<Integer> descriptorTypes,
+                               boolean[] tileableSampler) {
         this.spec = spec;
         this.particles = particles;
         this.backend = backend;
         this.pipeline = pipeline;
         this.bindingOrder = bindingOrder;
         this.descriptorTypes = descriptorTypes;
+        this.tileableSampler = tileableSampler;
     }
 
     /**
@@ -177,8 +183,13 @@ public final class ParticlePassRunner implements AutoCloseable {
 
         List<String> bindingOrder = bindingOrder(spec);
         List<Integer> descriptorTypes = new ArrayList<>(bindingOrder.size());
-        for (String name : bindingOrder) {
+        boolean[] tileableSampler = new boolean[bindingOrder.size()];
+        PackTextureRegistry packTextures = GraphRunner.packTextureRegistry();
+        for (int i = 0; i < bindingOrder.size(); i++) {
+            String name = bindingOrder.get(i);
             descriptorTypes.add(descriptorTypeFor(spec, name, registry));
+            boolean packTexture = packTextures != null && packTextures.isDeclared(name);
+            tileableSampler[i] = isTileableSampler(name, packTexture);
         }
 
         // The color attachment's format has to be baked into the pipeline (VkPipelineRenderingCreateInfo)
@@ -203,7 +214,7 @@ public final class ParticlePassRunner implements AutoCloseable {
                 var compiled = ParticlePipelineBuilder.build(backend.device(), vertexSpirv, fragmentSpirv,
                         descriptorTypes, colorFormat, depthFormat);
                 ParticlePassRunner runner = new ParticlePassRunner(spec, particles, backend, compiled,
-                        bindingOrder, descriptorTypes);
+                        bindingOrder, descriptorTypes, tileableSampler);
                 try {
                     runner.allocateDescriptorSets();
                 } catch (RuntimeException e) {
@@ -412,7 +423,7 @@ public final class ParticlePassRunner implements AutoCloseable {
                     GpuTextureView view = GraphInputResolver.resolveView(name, registry, mipchainTargets);
                     long imageView = ((VulkanGpuTextureView) view).vkImageView();
                     VkDescriptorImageInfo.Buffer imageInfo = VkDescriptorImageInfo.calloc(1, stack)
-                            .sampler(samplerFor(name).vkSampler()).imageView(imageView)
+                            .sampler(samplerFor(i).vkSampler()).imageView(imageView)
                             .imageLayout(VK13.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                     write.descriptorType(VK13.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(imageInfo);
                 }
@@ -447,15 +458,21 @@ public final class ParticlePassRunner implements AutoCloseable {
                 .offset(0).range(VK13.VK_WHOLE_SIZE);
     }
 
-    /** LINEAR + REPEAT for the two tileable-image input kinds that already carry that contract
-     * elsewhere in the graph (the engine noise texture and any pack-declared {@code [textures.*]}
-     * asset -- see FullscreenPassRunner's identical special case), NEAREST + CLAMP_TO_EDGE for
-     * everything else. A flake sprite is a pack texture, so it lands in the filtered branch without
-     * needing a per-input filter syntax in graph.toml that nothing else would use. */
-    private static VulkanGpuSampler samplerFor(String name) {
-        PackTextureRegistry packTextures = GraphRunner.packTextureRegistry();
-        boolean tileable = name.equals("builtin.noise") || (packTextures != null && packTextures.isDeclared(name));
-        return (VulkanGpuSampler) (tileable
+    /** Whether {@code name} wants the LINEAR + REPEAT sampler: the engine noise texture and any
+     * pack-declared {@code [textures.*]} asset carry that contract elsewhere in the graph too (see
+     * FullscreenPassRunner's identical special case). A flake sprite is a pack texture, so it lands
+     * in the tileable branch without needing a per-input filter syntax in graph.toml that nothing
+     * else would use. Takes {@code packTexture} as a plain argument instead of looking the
+     * registry up itself, same shape as {@code ComputePassRunner.samplerKindFor}, so a unit test
+     * can check it directly; {@link #build} runs it once into {@link #tileableSampler} rather
+     * than asking every binding. */
+    static boolean isTileableSampler(String name, boolean packTexture) {
+        return name.equals("builtin.noise") || packTexture;
+    }
+
+    /** LINEAR + REPEAT or NEAREST + CLAMP_TO_EDGE for binding {@code i}, from {@link #tileableSampler}. */
+    private VulkanGpuSampler samplerFor(int i) {
+        return (VulkanGpuSampler) (tileableSampler[i]
                 ? RenderSystem.getSamplerCache().getRepeat(FilterMode.LINEAR)
                 : RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
     }

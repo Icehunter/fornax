@@ -76,6 +76,13 @@ public final class FullscreenPassRunner implements AutoCloseable {
      * {@link #build}. */
     private final boolean[] bufferInputs;
 
+    /** Positional (matches {@code spec.inputs()}): which sampler kind each input binds with.
+     * Worked out once in {@link #build}, same as {@link #bufferInputs}. Only a pack rebuild can
+     * change this, not a single frame, so there is no reason to work it out again on every draw.
+     * A buffer-input slot never reads its own entry here, since it binds as a texel buffer, not a
+     * sampler. */
+    private final InputSamplerKind[] inputSamplerKinds;
+
     /** Cached per-input texel-buffer wrappers, keyed positionally; entry recreated only when the
      * underlying vkBuffer handle changes (registry reallocation) -- see RawVulkanGpuBuffer's javadoc
      * on why per-frame fresh wrappers are forbidden. Index space matches spec.inputs(). */
@@ -88,10 +95,12 @@ public final class FullscreenPassRunner implements AutoCloseable {
      * count to compare against the device's maxTexelBufferElements limit. */
     private static volatile boolean loggedTexelBufferBindOnce = false;
 
-    private FullscreenPassRunner(PassSpec spec, RenderPipeline pipeline, boolean[] bufferInputs) {
+    private FullscreenPassRunner(PassSpec spec, RenderPipeline pipeline, boolean[] bufferInputs,
+            InputSamplerKind[] inputSamplerKinds) {
         this.spec = spec;
         this.pipeline = pipeline;
         this.bufferInputs = bufferInputs;
+        this.inputSamplerKinds = inputSamplerKinds;
         this.texelWrappers = new RawVulkanGpuBuffer[bufferInputs.length];
         this.texelWrapperHandles = new long[bufferInputs.length];
         this.passParamsData = new MappableRingBuffer(
@@ -116,6 +125,8 @@ public final class FullscreenPassRunner implements AutoCloseable {
         // v1 convention: every buffer-kind fullscreen input is R32_UINT (usamplerBuffer) -- a
         // per-target format field is future work no current consumer needs.
         boolean[] bufferInputs = new boolean[spec.inputs().size()];
+        InputSamplerKind[] inputSamplerKinds = new InputSamplerKind[spec.inputs().size()];
+        PackTextureRegistry packTextures = GraphRunner.packTextureRegistry();
         for (int i = 0; i < spec.inputs().size(); i++) {
             String name = spec.inputs().get(i);
             bufferInputs[i] = !name.startsWith("builtin.") && !name.endsWith(".history")
@@ -125,6 +136,8 @@ public final class FullscreenPassRunner implements AutoCloseable {
             } else {
                 bindGroupBuilder.withSampler(inputSamplerName(i));
             }
+            inputSamplerKinds[i] = samplerKindFor(name, packTextures != null && packTextures.isDeclared(name),
+                    name.equals("builtin.noise"), registry.filterFor(name));
         }
         bindGroupBuilder.withUniform("u_Globals", UniformType.UNIFORM_BUFFER);
         bindGroupBuilder.withUniform("u_PackOptions", UniformType.UNIFORM_BUFFER);
@@ -174,7 +187,7 @@ public final class FullscreenPassRunner implements AutoCloseable {
                 .withColorTargetState(new ColorTargetState(blendFunction(spec.blend()), TargetRegistry.gpuFormat(outputFormat), ColorTargetState.WRITE_ALL))
                 .build();
 
-        return new FullscreenPassRunner(spec, pipeline, bufferInputs);
+        return new FullscreenPassRunner(spec, pipeline, bufferInputs, inputSamplerKinds);
     }
 
     public void run(TargetRegistry registry, Map<String, MipchainRunner> mipchainTargets,
@@ -243,12 +256,10 @@ public final class FullscreenPassRunner implements AutoCloseable {
         if (FullscreenCapture.isSelected(spec.name())) {
             resolvedInputs = new ArrayList<>();
             List<String> captureSamplers = new ArrayList<>();
-            PackTextureRegistry captureTextures = GraphRunner.packTextureRegistry();
             for (int i = 0; i < spec.inputs().size(); i++) {
                 String ref = spec.inputs().get(i);
                 resolvedInputs.add(bufferInputs[i] ? null : GraphInputResolver.resolveView(ref, registry, mipchainTargets));
-                captureSamplers.add(samplerKindFor(ref, captureTextures != null && captureTextures.isDeclared(ref),
-                        ref.equals("builtin.noise"), registry.filterFor(ref)).name());
+                captureSamplers.add(inputSamplerKinds[i].name());
             }
             capture = FullscreenCapture.before(spec, bufferInputs, resolvedInputs, captureSamplers, outputView);
         }
@@ -313,7 +324,6 @@ public final class FullscreenPassRunner implements AutoCloseable {
             // For targets that declared `filter = "linear"` -- bilinear but still CLAMPed, since a
             // render target has real edges where a tileable image does not.
             GpuSampler linearSampler = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
-            PackTextureRegistry packTextures = GraphRunner.packTextureRegistry();
             List<String> inputs = spec.inputs();
             for (int i = 0; i < inputs.size(); i++) {
                 if (bufferInputs[i]) {
@@ -331,10 +341,7 @@ public final class FullscreenPassRunner implements AutoCloseable {
                 } else {
                     GpuTextureView inputView = resolvedInputs != null ? resolvedInputs.get(i)
                             : GraphInputResolver.resolveView(inputs.get(i), registry, mipchainTargets);
-                    boolean builtinNoise = inputs.get(i).equals("builtin.noise");
-                    boolean packTexture = packTextures != null && packTextures.isDeclared(inputs.get(i));
-                    InputSamplerKind kind = samplerKindFor(inputs.get(i), packTexture, builtinNoise,
-                            registry.filterFor(inputs.get(i)));
+                    InputSamplerKind kind = inputSamplerKinds[i];
                     GpuSampler inputSampler = switch (kind) {
                         case SHADOW_COMPARISON -> {
                             // Falls back to the plain NEAREST sampler (byte-identical to the

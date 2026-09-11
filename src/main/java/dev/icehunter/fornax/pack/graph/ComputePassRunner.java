@@ -144,6 +144,11 @@ public final class ComputePassRunner implements AutoCloseable {
      * {@code STORAGE_BUFFER} for a registry buffer target, {@code COMBINED_IMAGE_SAMPLER} for a texture
      * target, {@code UNIFORM_BUFFER} for the reserved {@code packOptions} input. */
     private final List<Integer> descriptorTypes;
+    /** Which sampler binding {@code i} wants, positionally aligned with {@link #bindingOrder}.
+     * Only means anything where {@link #descriptorTypes} is {@code COMBINED_IMAGE_SAMPLER}.
+     * Worked out once in {@link #build}, same as {@link #descriptorTypes}: which pack textures
+     * exist does not change frame to frame, only on a pack rebuild. */
+    private final List<InputSamplerKind> samplerKinds;
     /** Extra push-constant bytes (beyond the shared {@code PassParams.PUSH_CONSTANT_BASE_SIZE}) this
      * pass's pipeline layout was built with -- see {@link ExtraPushConstants}. Zero for every compute
      * pass that doesn't need more than the shared block; {@link #run} sizes its push-constant buffer to
@@ -178,6 +183,7 @@ public final class ComputePassRunner implements AutoCloseable {
     private ComputePassRunner(PassSpec spec, VulkanComputeBackend backend,
                                ComputePipelineBuilder.CompiledComputePipeline pipeline,
                                List<String> bindingOrder, List<Integer> descriptorTypes,
+                               List<InputSamplerKind> samplerKinds,
                                int extraPushConstantBytes, boolean graphicsCompletionBeforeStorageWrite,
                                FrameProfiler profiler) {
         this.spec = spec;
@@ -202,6 +208,7 @@ public final class ComputePassRunner implements AutoCloseable {
         this.pipeline = pipeline;
         this.bindingOrder = bindingOrder;
         this.descriptorTypes = descriptorTypes;
+        this.samplerKinds = samplerKinds;
         this.extraPushConstantBytes = extraPushConstantBytes;
         this.imageReuseSequence = graphicsCompletionBeforeStorageWrite
                 ? new CrossQueueImageReuseSequence() : null;
@@ -292,8 +299,13 @@ public final class ComputePassRunner implements AutoCloseable {
                 spec.shader());
         List<String> bindingOrder = combinedBindingOrder(spec);
         List<Integer> descriptorTypes = new ArrayList<>(bindingOrder.size());
+        List<InputSamplerKind> samplerKinds = new ArrayList<>(bindingOrder.size());
+        PackTextureRegistry packTextures = GraphRunner.packTextureRegistry();
         for (String name : bindingOrder) {
             descriptorTypes.add(descriptorTypeFor(spec, name, registry));
+            boolean packTexture = packTextures != null && packTextures.isDeclared(name);
+            boolean volumeTexture = packTexture && packTextures.isVolume(name);
+            samplerKinds.add(samplerKindFor(name, packTexture, volumeTexture));
         }
 
         ByteBuffer spirv = ComputeShaderCompiler.compileToSpirv(source, spec.shader());
@@ -303,7 +315,7 @@ public final class ComputePassRunner implements AutoCloseable {
             ComputePassRunner runner = null;
             try {
                 runner = new ComputePassRunner(spec, backend, compiled, bindingOrder, descriptorTypes,
-                        extraPushConstantBytes, graphicsCompletionBeforeStorageWrite, profiler);
+                        samplerKinds, extraPushConstantBytes, graphicsCompletionBeforeStorageWrite, profiler);
                 runner.allocateDescriptorSets();
             } catch (RuntimeException e) {
                 if (runner != null) {
@@ -848,10 +860,7 @@ public final class ComputePassRunner implements AutoCloseable {
                                 .imageLayout(VK13.VK_IMAGE_LAYOUT_GENERAL);
                         write.descriptorType(VK13.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(imageInfo);
                     } else {
-                        PackTextureRegistry packTextures = GraphRunner.packTextureRegistry();
-                        boolean packTexture = packTextures != null && packTextures.isDeclared(name);
-                        boolean volumeTexture = packTexture && packTextures.isVolume(name);
-                        InputSamplerKind samplerKind = samplerKindFor(name, packTexture, volumeTexture);
+                        InputSamplerKind samplerKind = samplerKinds.get(i);
                         VulkanGpuSampler sampler = (VulkanGpuSampler) (samplerKind.repeat()
                                 ? RenderSystem.getSamplerCache().getRepeat(
                                         samplerKind.filter(), samplerKind.mipmapped())
