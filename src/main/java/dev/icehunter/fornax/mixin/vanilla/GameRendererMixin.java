@@ -11,6 +11,7 @@ import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.metalfx.FrameGenPass;
 import dev.icehunter.fornax.metalfx.MetalFxUpscalePass;
 import dev.icehunter.fornax.metalfx.VulkanMetalInterop;
+import dev.icehunter.fornax.metalfx.objc.Objc;
 import dev.icehunter.fornax.pack.graph.GraphRunner;
 import dev.icehunter.fornax.pack.graph.TargetInstance;
 import dev.icehunter.fornax.pass.reconstruct.ReconstructPass;
@@ -19,6 +20,7 @@ import dev.icehunter.fornax.pass.ssaa.SsaaDownsamplePass;
 import dev.icehunter.fornax.pass.ssaa.SsaaManager;
 import dev.icehunter.fornax.pass.taa.CameraJitter;
 import dev.icehunter.fornax.pass.debug.GraphTargetDebugPass;
+import dev.icehunter.fornax.pass.debug.MetalRtDebugPass;
 import dev.icehunter.fornax.pass.voxel.VoxelDebugRaymarchPass;
 import dev.icehunter.fornax.pass.water.WaterPrepassDebugPass;
 import dev.icehunter.fornax.pipeline.GBuffer;
@@ -229,6 +231,8 @@ public class GameRendererMixin {
         // Generic pack-owned graph-target presentation. Water shaft diagnostics and the archived
         // M1 shadow view route through the same live, no-recompile path.
         GraphTargetDebugPass.presentIfEnabled(this.mainRenderTarget);
+        // RT production occurs before graph consumers; end-frame only presents its current result.
+        MetalRtDebugPass.presentIfEnabled(this.mainRenderTarget);
         // Storage targets written by raw compute may have been sampled by graph passes, history
         // copies, or the debug presenters above. Publish that all such graphics reads have been
         // recorded before next frame's compute write is allowed to reuse the physical image. This

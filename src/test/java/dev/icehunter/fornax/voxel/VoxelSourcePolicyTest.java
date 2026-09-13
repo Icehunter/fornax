@@ -82,7 +82,9 @@ class VoxelSourcePolicyTest {
     @Test void everyHarvestCapturesPolicySeparatelyFromWorldAndMaterialEvidence() throws Exception {
         String source = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/SectionHarvester.java"));
         assertTrue(source.contains("sourcePolicy.add(materialScalars.voxelLighting(BlockMaterials.idForState(state)))"));
-        assertTrue(source.contains("if (index == null) sourcePolicy.markIncomplete()"));
+        assertTrue(java.util.regex.Pattern.compile(
+                "if\\s*\\(index == null\\)\\s*(?:\\{\\s*)?sourcePolicy\\.markIncomplete\\(\\)")
+                .matcher(source).find(), "Unmapped cells must still mark source policy incomplete");
         assertTrue(source.contains("sourcePolicy.finish(overflowLogged[0])"));
     }
     @SuppressWarnings("unchecked")

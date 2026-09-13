@@ -235,13 +235,47 @@ class GBufferDebugViewTest {
     }
 
     @Test
-    void shadowMapViewIsOrdinalFortyAppendedLast() {
+    void shadowMapViewIsOrdinalForty() {
         // Celestial rework decision, Stage 0 (2026-08-11): a full-screen linearized shadow-map
         // visualization, NOT a crosshair readback -- EnvSpecularRatioReadback has no formatter case
-        // for it by design. Appended before the water-shaft and conductor blocks so nothing
-        // earlier shifts.
+        // for it by design. Not the last value: the water-shaft, conductor and Metal RT blocks all
+        // append after it, each pinning its own count, see metalRtSunMaskIsAppendedLast below for
+        // the current values().length.
         assertEquals(40, GBufferDebugView.SHADOW_MAP_VIEW.ordinal());
-        assertEquals(52, GBufferDebugView.values().length);
+    }
+
+    @Test
+    void metalRtSunMaskIsAppendedAfterConductorLit() {
+        // Metal RT milestone 1: a fourth engine-owned override (mirroring
+        // VOXEL_RAYMARCH/WATER_PREPASS/CELESTIAL_SHADOW_VOXEL's own gaps), presented by
+        // MetalRtDebugPass instead of either resolve branch chain. Appended after CONDUCTOR_LIT,
+        // so nothing earlier shifts. METAL_RT_SCENE_DEBUG is appended right after this one; see
+        // metalRtSceneDebugIsAppendedLast below for the current values().length.
+        assertEquals(52, GBufferDebugView.METAL_RT_SUN_MASK.ordinal());
+        assertTrue(GBufferDebugView.METAL_RT_SUN_MASK.isSelectable(),
+                "MetalRtDebugPass is hooked and presents every frame; the cycle must reach it");
+        assertEquals("Metal RT sun mask", GBufferDebugView.METAL_RT_SUN_MASK.label());
+        // No shader branch id: this view bypasses gbuffer_resolve.fsh/tonemap.fsh entirely, same
+        // as WATER_PREPASS, so it falls back to the default (ordinal) shaderId and empty
+        // graphTargetCandidates rather than colliding with a resolve-branched id.
+        assertEquals(GBufferDebugView.METAL_RT_SUN_MASK.ordinal(),
+                GBufferDebugView.METAL_RT_SUN_MASK.shaderId());
+        assertTrue(GBufferDebugView.METAL_RT_SUN_MASK.graphTargetCandidates().isEmpty());
+    }
+
+    @Test
+    void metalRtSceneDebugIsAppendedLast() {
+        // A second engine-owned Metal RT override: a primary-ray scene trace colored by
+        // FornaxSettings#rtDebugMode, presented the same bypass way as METAL_RT_SUN_MASK.
+        // Appended right after it, so nothing earlier shifts.
+        assertEquals(53, GBufferDebugView.METAL_RT_SCENE_DEBUG.ordinal());
+        assertEquals(54, GBufferDebugView.values().length);
+        assertTrue(GBufferDebugView.METAL_RT_SCENE_DEBUG.isSelectable(),
+                "MetalRtDebugPass is hooked and presents every frame; the cycle must reach it");
+        assertEquals("Metal RT scene debug", GBufferDebugView.METAL_RT_SCENE_DEBUG.label());
+        assertEquals(GBufferDebugView.METAL_RT_SCENE_DEBUG.ordinal(),
+                GBufferDebugView.METAL_RT_SCENE_DEBUG.shaderId());
+        assertTrue(GBufferDebugView.METAL_RT_SCENE_DEBUG.graphTargetCandidates().isEmpty());
     }
 
     @Test

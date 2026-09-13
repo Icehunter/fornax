@@ -2,6 +2,7 @@ package dev.icehunter.fornax.voxel;
 
 import com.mojang.blaze3d.vulkan.VulkanDevice;
 import dev.icehunter.fornax.FornaxMod;
+import dev.icehunter.fornax.metalfx.rt.MetalRtGeometry;
 import dev.icehunter.fornax.pack.graph.BufferInstance;
 import dev.icehunter.fornax.pack.graph.TargetRegistry;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
@@ -184,8 +185,14 @@ public final class BrickGridUpload {
         return (long) lightWordsPerSlot() * Integer.BYTES; // 8192 Standard, 65536 High
     }
 
-    static final int VOXELS_PER_SECTION = 16 * 16 * 16;
-    static final long OCCUPANCY_BYTES_PER_SLOT = VOXELS_PER_SECTION / 8; // 512
+    /** Public so a consumer that needs this buffer's exact per-slot stride outside this package
+     * (currently {@code MetalRtGeometry}'s Metal-visible copy) reads it from here rather than
+     * carrying a second, driftable copy of the same number. */
+    public static final int VOXELS_PER_SECTION = 16 * 16 * 16;
+    /** Public for the same reason as {@link #VOXELS_PER_SECTION}. Not to be confused with {@link
+     * #PAYLOAD_BYTES_PER_SLOT}, which totals payload plus occupancy for a different, VRAM-accounting
+     * purpose and is not either buffer's real stride. */
+    public static final long OCCUPANCY_BYTES_PER_SLOT = VOXELS_PER_SECTION / 8; // 512
     public static final long FACE_SEAL_BYTES_PER_SLOT = VOXELS_PER_SECTION;
     public static final long PAYLOAD_BYTES_PER_SLOT = VOXELS_PER_SECTION + OCCUPANCY_BYTES_PER_SLOT;
     /** One little-endian uint per slot -- see {@link #BRICK_SUMMARY_TARGET}'s own doc for why a whole
@@ -866,6 +873,10 @@ public final class BrickGridUpload {
                         if (textureBytes != null) MemoryUtil.memFree(textureBytes);
                         if (lightmapBytes != null) MemoryUtil.memFree(lightmapBytes);
                     }
+                    // Same tier-0-only hook as uploadBatchLocked's; this branch is uploadSlot's own
+                    // direct write path (no section-state/source-summary metadata enabled), reached
+                    // only after every fitsInBuffer guard above already passed for this slot.
+                    MetalRtGeometry.markDirty(slot);
                 } finally {
                     backend.close();
                 }
@@ -1109,6 +1120,9 @@ public final class BrickGridUpload {
                     }
                     committed.add(item);
                     VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.PACKED);
+                    // Tier 0 only: this method always targets the un-suffixed OCCUPANCY_TARGET/etc,
+                    // never a cascade tier's _t<N> buffers. No-op unless the Metal RT pass is active.
+                    MetalRtGeometry.markDirty(slot);
                 }
 
                 recordUploadToComputeReadBarrier(cmd, stack);
@@ -1295,6 +1309,9 @@ public final class BrickGridUpload {
                         }
                     }
                     VK13.vkCmdUpdateBuffer(cmd, occupancyBuffer, occupancyOffset, zeros);
+                    // Tier 0 only, same as uploadBatchLocked's hook: clearOccupancySlots always
+                    // targets the un-suffixed OCCUPANCY_TARGET/etc. No-op unless the RT pass is active.
+                    MetalRtGeometry.markDirty(slot);
                     if (faceSealBuffer != -1L) {
                         long faceSealOffset = (long) slot * FACE_SEAL_BYTES_PER_SLOT;
                         if (fitsInBuffer(faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSealBufferSize)) {

@@ -7,6 +7,7 @@ import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
 import dev.icehunter.fornax.pass.taa.CameraJitter;
 import dev.icehunter.fornax.pipeline.CameraMotionState;
+import dev.icehunter.fornax.pipeline.FrameCameraState;
 import dev.icehunter.fornax.pipeline.FrameUniformValues;
 import dev.icehunter.fornax.pipeline.DayCrossfadeState;
 import dev.icehunter.fornax.pipeline.PreviousFrameCameraTransform;
@@ -117,11 +118,17 @@ public class GlobalUniformsWriteMixin {
         float previousJitterX = wantsJitter ? previousJitter.x() : 0.0f;
         float previousJitterY = wantsJitter ? previousJitter.y() : 0.0f;
 
+        // Computed once and reused for both the shader upload below and FrameCameraState, a
+        // non-shader consumer (the Metal ray-tracing pass) that needs the same matrix as a plain
+        // float array rather than a GLSL uniform.
+        Matrix4f fornaxInvProjModelView = new Matrix4f(this.projection).mul(this.modelView).invert();
+        FrameCameraState.commit(fornaxInvProjModelView);
+
         builder.putMat4f(new Matrix4f(PreviousFrameCameraTransform.getProjection()))
                 .putMat4f(new Matrix4f(PreviousFrameCameraTransform.getModelView()))
                 .putVec2(currentJitterX, currentJitterY)
                 .putVec2(previousJitterX, previousJitterY)
-                .putMat4f(new Matrix4f(this.projection).mul(this.modelView).invert())
+                .putMat4f(fornaxInvProjModelView)
                 // u_SunViewProj: this frame's sun/moon shadow light view-projection matrix,
                 // committed by SodiumWorldRendererOrchestrationMixin before the frame's first
                 // renderLayer/update() call (its "Ordering guarantee" doc).

@@ -5,6 +5,8 @@ import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.config.FornaxSettings;
 import dev.icehunter.fornax.config.FrameGenMode;
 import dev.icehunter.fornax.config.GBufferDebugView;
+import dev.icehunter.fornax.config.RayTracingMode;
+import dev.icehunter.fornax.config.RtDebugMode;
 import dev.icehunter.fornax.config.SettingsApplyRouter;
 import dev.icehunter.fornax.config.SettingsApplyRouter.Action;
 import dev.icehunter.fornax.config.SidecarMapResolution;
@@ -139,6 +141,8 @@ public final class FornaxSettingsScreen {
         copy.metalHud = source.metalHud;
         copy.voxelReachIgnoresRenderDistance = source.voxelReachIgnoresRenderDistance;
         copy.sunPathRotation = source.sunPathRotation;
+        copy.rayTracing = source.rayTracing;
+        copy.rtDebugMode = source.rtDebugMode;
         return copy;
     }
 
@@ -392,6 +396,31 @@ public final class FornaxSettingsScreen {
             metalHud = null; // not macOS/aarch64 -- expected, nothing to log
         }
 
+        // Gated the same way as the metalHud row above: the pass only ever runs behind the Objc
+        // bridge, so offering the row where the bridge never linked would show a control that can
+        // never do anything.
+        Option<RayTracingMode> rayTracing;
+        if (dev.icehunter.fornax.metalfx.objc.Objc.isLoaded()) {
+            rayTracing = buildRayTracingOption();
+        } else if (dev.icehunter.fornax.metalfx.objc.Objc.PLATFORM_SUPPORTED) {
+            dev.icehunter.fornax.FornaxMod.LOGGER.warn(
+                    "[Fornax] Ray tracing option hidden: Objc bridge failed to load ({})",
+                    dev.icehunter.fornax.metalfx.objc.Objc.loadFailure());
+            rayTracing = null;
+        } else {
+            rayTracing = null; // not macOS/aarch64, expected, nothing to log
+        }
+
+        // Gated the same way as rayTracing above: this dispatch only ever runs behind the Objc
+        // bridge, so offering the row where the bridge never linked would show a control that can
+        // never do anything.
+        Option<RtDebugMode> rtDebugMode;
+        if (dev.icehunter.fornax.metalfx.objc.Objc.isLoaded()) {
+            rtDebugMode = buildRtDebugModeOption();
+        } else {
+            rtDebugMode = null; // hidden the same silent way as rayTracing on unsupported platforms
+        }
+
         Option<Boolean> voxelReachIgnoresRenderDistance = Option.<Boolean>createBuilder()
                 .name(Component.translatable("gui.fornax.option.voxel_reach_ignores_render_distance"))
                 .description(OptionDescription.of(
@@ -409,10 +438,58 @@ public final class FornaxSettingsScreen {
                 .option(overlayTopPassesOnly)
                 .option(debugView)
                 .option(voxelReachIgnoresRenderDistance);
+        if (rayTracing != null) {
+            group.option(rayTracing);
+        }
+        if (rtDebugMode != null) {
+            group.option(rtDebugMode);
+        }
         if (metalHud != null) {
             group.option(metalHud);
         }
         return group.build();
+    }
+
+    private static Option<RayTracingMode> buildRayTracingOption() {
+        return Option.<RayTracingMode>createBuilder()
+                .name(Component.translatable("gui.fornax.option.ray_tracing"))
+                .description(OptionDescription.of(Component.translatable("gui.fornax.option.ray_tracing.tooltip")))
+                .binding(RayTracingMode.AUTO, () -> FornaxConfig.get().rayTracing, v -> FornaxConfig.get().rayTracing = v)
+                .controller(opt -> CyclingListControllerBuilder.create(opt)
+                        .values(List.of(RayTracingMode.values()))
+                        .formatValue(FornaxSettingsScreen::rayTracingModeLabel))
+                .build();
+    }
+
+    private static Component rayTracingModeLabel(RayTracingMode mode) {
+        return switch (mode) {
+            case OFF -> Component.literal("Off");
+            case AUTO -> Component.literal("Auto");
+            case FORCE -> Component.literal("Force");
+        };
+    }
+
+    private static Option<RtDebugMode> buildRtDebugModeOption() {
+        return Option.<RtDebugMode>createBuilder()
+                .name(Component.translatable("gui.fornax.option.rt_debug_mode"))
+                .description(OptionDescription.of(Component.translatable("gui.fornax.option.rt_debug_mode.tooltip")))
+                .binding(RtDebugMode.OFF, () -> FornaxConfig.get().rtDebugMode, v -> FornaxConfig.get().rtDebugMode = v)
+                .controller(opt -> CyclingListControllerBuilder.create(opt)
+                        .values(List.of(RtDebugMode.values()))
+                        .formatValue(FornaxSettingsScreen::rtDebugModeLabel))
+                .build();
+    }
+
+    private static Component rtDebugModeLabel(RtDebugMode mode) {
+        return switch (mode) {
+            case OFF -> Component.literal("Off");
+            case HIT_MISS -> Component.literal("Hit/Miss");
+            case DISTANCE -> Component.literal("Distance");
+            case NORMAL -> Component.literal("Normal (placeholder)");
+            case INSTANCE_ID -> Component.literal("Instance ID");
+            case PRIMITIVE_ID -> Component.literal("Primitive ID");
+            case RAY_DIRECTION -> Component.literal("Ray Direction");
+        };
     }
 
     /** One profiler-overlay row filter. All three share a shape, so they share a builder. */

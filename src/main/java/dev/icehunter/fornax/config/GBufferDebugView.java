@@ -489,7 +489,24 @@ public enum GBufferDebugView {
     /** Part 7: R/G/B = the finished HDR {@code lit} this pixel hands the tonemapper, A = its
      * luma. If this reads warm while the screen shows white, the whitening lives in the tonemap.
      * Shader id 74. See {@link #CONDUCTOR_F0}. */
-    CONDUCTOR_LIT;
+    CONDUCTOR_LIT,
+    /**
+     * Metal ray tracing milestone 1: the sun-shadow hit mask traced against the loaded voxel
+     * window, presented directly instead of through either resolve branch chain, an
+     * engine-owned override like {@link #VOXEL_RAYMARCH} and {@link #WATER_PREPASS}, not a
+     * {@code gbuffer_resolve.fsh}/{@code tonemap.fsh} branch. White is unshadowed, black is
+     * shadowed.
+     */
+    METAL_RT_SUN_MASK,
+    /**
+     * Metal ray tracing scene debug: a primary ray per pixel, traced from the camera against the
+     * loaded voxel window and colored by whichever {@link FornaxSettings#rtDebugMode} picks (hit/
+     * miss, distance, normal, instance id, primitive id, or ray direction), presented the same
+     * bypass way as {@link #METAL_RT_SUN_MASK} rather than through either resolve branch chain.
+     * Selecting this view (or setting {@code rtDebugMode} to anything but {@code OFF}) is what
+     * keeps the Metal ray tracing pass running even while the sun-mask view itself is not shown.
+     */
+    METAL_RT_SCENE_DEBUG;
 
     /**
      * Stable integer consumed by pack shaders through {@code u_Param3}. Legacy values retain their
@@ -579,6 +596,8 @@ public enum GBufferDebugView {
             case CONDUCTOR_ENV -> "Conductor: Env Result/Cut";
             case CONDUCTOR_DIRECT -> "Conductor: Direct Sun Term";
             case CONDUCTOR_LIT -> "Conductor: Final HDR";
+            case METAL_RT_SUN_MASK -> "Metal RT sun mask";
+            case METAL_RT_SCENE_DEBUG -> "Metal RT scene debug";
         };
     }
 

@@ -1,5 +1,6 @@
 package dev.icehunter.fornax.config;
 
+import com.google.gson.Gson;
 import dev.icehunter.fornax.pass.ssaa.SsaaPreset;
 import org.junit.jupiter.api.Test;
 
@@ -168,6 +169,56 @@ class FornaxSettingsMigrationTest {
 
         assertEquals(AaMethod.OFF, migrated.aaMethod);
         assertEquals(FornaxSettings.CURRENT_SCHEMA_VERSION, migrated.schemaVersion);
+    }
+
+    @Test
+    void nullRayTracingMigratesToAuto() {
+        // Same reasoning as absentFrameGenModeMigratesToOff: a removed RayTracingMode constant
+        // deserializes to null at any persisted version, not just pre-field ones.
+        FornaxSettings current = new FornaxSettings();
+        current.schemaVersion = FornaxSettings.CURRENT_SCHEMA_VERSION;
+        current.rayTracing = null;
+
+        FornaxSettings migrated = FornaxSettings.migrate(current);
+
+        assertEquals(RayTracingMode.AUTO, migrated.rayTracing);
+    }
+
+    @Test
+    void oldFileWithoutRayTracingFieldDeserializesToAuto() {
+        // A pre-existing fornax.json with no rayTracing key, run through the same Gson path
+        // FornaxConfig uses, deserializes with the field left at the class's own field
+        // initializer (AUTO). migrate must not disturb that.
+        FornaxSettings legacy = new Gson().fromJson("{\"schemaVersion\":0}", FornaxSettings.class);
+
+        FornaxSettings migrated = FornaxSettings.migrate(legacy);
+
+        assertEquals(RayTracingMode.AUTO, migrated.rayTracing);
+    }
+
+    @Test
+    void nullRtDebugModeMigratesToOff() {
+        // Same reasoning as nullRayTracingMigratesToAuto: a removed RtDebugMode constant
+        // deserializes to null at any persisted version, not just pre-field ones.
+        FornaxSettings current = new FornaxSettings();
+        current.schemaVersion = FornaxSettings.CURRENT_SCHEMA_VERSION;
+        current.rtDebugMode = null;
+
+        FornaxSettings migrated = FornaxSettings.migrate(current);
+
+        assertEquals(RtDebugMode.OFF, migrated.rtDebugMode);
+    }
+
+    @Test
+    void oldFileWithoutRtDebugModeFieldDeserializesToOff() {
+        // A pre-existing fornax.json with no rtDebugMode key, run through the same Gson path
+        // FornaxConfig uses, deserializes with the field left at the class's own field
+        // initializer (OFF). migrate must not disturb that.
+        FornaxSettings legacy = new Gson().fromJson("{\"schemaVersion\":0}", FornaxSettings.class);
+
+        FornaxSettings migrated = FornaxSettings.migrate(legacy);
+
+        assertEquals(RtDebugMode.OFF, migrated.rtDebugMode);
     }
 
     @Test

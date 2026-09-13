@@ -8,6 +8,7 @@ import dev.icehunter.fornax.pack.PassType;
 import dev.icehunter.fornax.pack.TargetSpec;
 import dev.icehunter.fornax.pack.option.OptionType;
 import dev.icehunter.fornax.pack.option.PackOption;
+import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
 import dev.icehunter.fornax.pipeline.GeometryInputs;
@@ -598,15 +599,26 @@ public final class GraphValidator {
             return;
         }
         if (ShadowMapManager.isShadowMapRef(base)) {
-            // Engine-owned, never pack-declared (see ShadowMapManager) -- resolved read-only
+            // Engine-owned, never pack-declared (see ShadowMapManager): resolved read-only
             // exactly like sceneHistory, except this target has no history slot: it is a single
             // current-frame depth target the engine overwrites every frame, so unlike sceneHistory
-            // (which REQUIRES the ".history" suffix) this one REJECTS it. Covers BOTH pack-visible
-            // names (TARGET and RAW_TARGET, see the latter's own doc) -- they share every
-            // resolution/validation rule and differ only in which sampler binds them.
+            // (which REQUIRES the ".history" suffix) these REJECT it. Covers the combined map,
+            // its raw alias, and the independent entity-only map.
             if (ref.endsWith(".history")) {
                 throw new FornaxPackError(FILE, "pass." + pass.name() + ".inputs",
-                        "'" + ref + "' -- " + base + " has no history slot; reference '" + base
+                        "'" + ref + "': " + base + " has no history slot; reference '" + base
+                                + "' directly");
+            }
+            return;
+        }
+        if (RtShadowResult.isRtShadowRef(base)) {
+            // Engine-owned, never pack-declared (see RtShadowResult): resolved read-only exactly
+            // like ShadowMapManager's own pair of names, with the same no-history rule: a single
+            // current-frame target the engine (over)writes every frame it runs, never a previous-
+            // frame slot.
+            if (ref.endsWith(".history")) {
+                throw new FornaxPackError(FILE, "pass." + pass.name() + ".inputs",
+                        "'" + ref + "': " + base + " has no history slot; reference '" + base
                                 + "' directly");
             }
             return;
@@ -892,7 +904,8 @@ public final class GraphValidator {
         // (see PackTextureSpec) is likewise always final -- it is loaded once at pack activation and
         // never written by any pass, so there is no same-frame freshness question to ask of it.
         if (BUILTINS.contains(ref) || ref.equals(SceneHistory.TARGET + ".history")
-                || ShadowMapManager.isShadowMapRef(ref) || graph.textures().containsKey(ref)) {
+                || ShadowMapManager.isShadowMapRef(ref) || RtShadowResult.isRtShadowRef(ref)
+                || graph.textures().containsKey(ref)) {
             return;
         }
         if (ref.endsWith(".history")) {

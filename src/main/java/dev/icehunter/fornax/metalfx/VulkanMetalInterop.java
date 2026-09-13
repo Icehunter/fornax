@@ -78,16 +78,18 @@ public final class VulkanMetalInterop {
 
     private VulkanMetalInterop() {}
 
-    /** One export-flagged interop VkImage + its exported MTLTexture. */
-    static final class InteropImage {
-        final long image;
+    /** One export-flagged interop VkImage + its exported MTLTexture. Public (not just the
+     * {@code metalfx} package): {@code metalfx.rt}'s ray-tracing pass copies its own depth input
+     * and mask output through these the same way {@link MetalFxUpscalePass} does. */
+    public static final class InteropImage {
+        public final long image;
         final long allocation;
-        final long mtlTexture;
-        final int width;
-        final int height;
-        final int vkFormat;
+        public final long mtlTexture;
+        public final int width;
+        public final int height;
+        public final int vkFormat;
         final int aspect;
-        int layout = VK13.VK_IMAGE_LAYOUT_UNDEFINED;
+        public int layout = VK13.VK_IMAGE_LAYOUT_UNDEFINED;
 
         private InteropImage(long image, long allocation, long mtlTexture,
                 int width, int height, int vkFormat, int aspect) {
@@ -101,8 +103,9 @@ public final class VulkanMetalInterop {
         }
     }
 
-    /** The live VulkanDevice, or null on the GL backend / before a device exists. */
-    static VulkanDevice vulkanDevice() {
+    /** The live VulkanDevice, or null on the GL backend / before a device exists. Public: {@code
+     * metalfx.rt}'s ray-tracing pass resolves the same device this class does. */
+    public static VulkanDevice vulkanDevice() {
         GpuDevice gpuDevice = RenderSystem.tryGetDevice();
         if (gpuDevice == null) {
             return null;
@@ -111,8 +114,10 @@ public final class VulkanMetalInterop {
         return backend instanceof VulkanDevice vulkanDevice ? vulkanDevice : null;
     }
 
-    /** The fornax-owned MTLCommandQueue (lazily created, retained forever). */
-    static long metalCommandQueue() {
+    /** The fornax-owned MTLCommandQueue (lazily created, retained forever). Public: {@code
+     * metalfx.rt}'s ray-tracing pass shares this one queue rather than opening a second, exactly
+     * like the M1 passthrough and {@link MetalFxUpscalePass} already do. */
+    public static long metalCommandQueue() {
         if (metalCommandQueue == 0) {
             metalCommandQueue = Objc.msgSendId(MetalFxSupport.metalDevice(),
                     Objc.selector("newCommandQueue"));
@@ -130,7 +135,7 @@ public final class VulkanMetalInterop {
      * COLOR_ATTACHMENT->RenderTarget), and MetalFX validates those usages on its input/output
      * textures.
      */
-    static InteropImage createImage(VulkanDevice device, int width, int height, int vkFormat,
+    public static InteropImage createImage(VulkanDevice device, int width, int height, int vkFormat,
             int usage, int aspect) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkExportMetalObjectCreateInfoEXT exportDecl = VkExportMetalObjectCreateInfoEXT.calloc(stack)
@@ -181,17 +186,19 @@ public final class VulkanMetalInterop {
      * timeline value; keeping synchronization at the resource-set level avoids one device-wide
      * idle per image during resize.
      */
-    static void destroyImage(VulkanDevice device, InteropImage img) {
+    public static void destroyImage(VulkanDevice device, InteropImage img) {
         if (img == null) {
             return;
         }
         Vma.vmaDestroyImage(device.vma(), img.image, img.allocation);
     }
 
-    /** An exported cross-API sync pair: one Vulkan timeline semaphore = one MTLSharedEvent. */
-    static final class SharedTimeline {
-        final long vkSemaphore;
-        final long mtlSharedEvent;
+    /** An exported cross-API sync pair: one Vulkan timeline semaphore = one MTLSharedEvent. Public:
+     * {@code metalfx.rt}'s ray-tracing pass keeps its own timeline the same shape as {@link
+     * MetalFxUpscalePass}'s. */
+    public static final class SharedTimeline {
+        public final long vkSemaphore;
+        public final long mtlSharedEvent;
 
         private SharedTimeline(long vkSemaphore, long mtlSharedEvent) {
             this.vkSemaphore = vkSemaphore;
@@ -206,7 +213,7 @@ public final class VulkanMetalInterop {
      * sync primitive: Vulkan signals value v after the copy-in, Metal GPU-waits v and signals v+1
      * after the scaler, Vulkan GPU-waits v+1 before the copy-back. No host blocking anywhere.
      */
-    static SharedTimeline createSharedTimeline(VulkanDevice device) {
+    public static SharedTimeline createSharedTimeline(VulkanDevice device) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkExportMetalObjectCreateInfoEXT exportDecl = VkExportMetalObjectCreateInfoEXT.calloc(stack)
                     .sType$Default()
@@ -243,7 +250,7 @@ public final class VulkanMetalInterop {
     }
 
     /** Host-waits one interop timeline value on resize/teardown, never in the per-frame path. */
-    static void waitTimeline(VulkanDevice device, SharedTimeline timeline, long value) {
+    public static void waitTimeline(VulkanDevice device, SharedTimeline timeline, long value) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkSemaphoreWaitInfo waitInfo = VkSemaphoreWaitInfo.calloc(stack)
                     .sType$Default()
@@ -258,7 +265,12 @@ public final class VulkanMetalInterop {
         }
     }
 
-    interface CmdRecorder {
+    /** Public: {@code metalfx.rt}'s {@code MetalRtShadowPass} records its per-frame depth copy-in
+     * (folding in any dirty per-slot geometry copies), mask copy-back and event wait/signal through
+     * {@link #recordIntoStream}, and {@code MetalRtGeometry} records its one-time allocation zero-fill
+     * through {@link #recordAndFlush}; both reuse this shape rather than duplicating the
+     * transient-command-buffer submit/fence machinery. */
+    public interface CmdRecorder {
         void record(VkCommandBuffer cmd);
     }
 
@@ -267,7 +279,7 @@ public final class VulkanMetalInterop {
      * WITHOUT flushing -- for the event-synced path, where ordering against Metal comes from
      * {@link SharedTimeline} waits instead of host fences.
      */
-    static void recordIntoStream(VulkanCommandEncoder encoder, CmdRecorder recorder) {
+    public static void recordIntoStream(VulkanCommandEncoder encoder, CmdRecorder recorder) {
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
         recorder.record(cmd);
         int result = VK13.vkEndCommandBuffer(cmd);
@@ -281,7 +293,7 @@ public final class VulkanMetalInterop {
      * Records into a transient command buffer from the encoder's own pool, appends it to the
      * encoder's submission (ordering after all prior recorded work), then flushes and host-waits.
      */
-    static void recordAndFlush(VulkanCommandEncoder encoder, CmdRecorder recorder) {
+    public static void recordAndFlush(VulkanCommandEncoder encoder, CmdRecorder recorder) {
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
         recorder.record(cmd);
         int result = VK13.vkEndCommandBuffer(cmd);
@@ -334,7 +346,7 @@ public final class VulkanMetalInterop {
     }
 
     /** Blaze3D-owned GENERAL image: make prior graphics writes visible to a transfer read. */
-    static void prepareGeneralTransferRead(
+    public static void prepareGeneralTransferRead(
             VkCommandBuffer cmd, MemoryStack stack, long image, int aspect) {
         imageBarrier(cmd, stack, image, aspect,
                 VK13.VK_IMAGE_LAYOUT_GENERAL, VK13.VK_IMAGE_LAYOUT_GENERAL,
@@ -343,7 +355,7 @@ public final class VulkanMetalInterop {
     }
 
     /** Blaze3D-owned GENERAL image: prepare a transfer write after prior graphics use. */
-    static void prepareGeneralTransferWrite(
+    public static void prepareGeneralTransferWrite(
             VkCommandBuffer cmd, MemoryStack stack, long image, int aspect) {
         imageBarrier(cmd, stack, image, aspect,
                 VK13.VK_IMAGE_LAYOUT_GENERAL, VK13.VK_IMAGE_LAYOUT_GENERAL,
@@ -353,7 +365,7 @@ public final class VulkanMetalInterop {
     }
 
     /** Publish a transfer write back to later Blaze3D graphics consumers. */
-    static void finishGeneralTransferWrite(
+    public static void finishGeneralTransferWrite(
             VkCommandBuffer cmd, MemoryStack stack, long image, int aspect) {
         imageBarrier(cmd, stack, image, aspect,
                 VK13.VK_IMAGE_LAYOUT_GENERAL, VK13.VK_IMAGE_LAYOUT_GENERAL,
@@ -363,7 +375,7 @@ public final class VulkanMetalInterop {
     }
 
     /** Interop input: transition from Metal-readable GENERAL to Vulkan TRANSFER_DST. */
-    static void prepareInteropTransferWrite(
+    public static void prepareInteropTransferWrite(
             VkCommandBuffer cmd, MemoryStack stack, InteropImage img) {
         imageBarrier(cmd, stack, img.image, img.aspect,
                 img.layout, VK13.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -373,7 +385,7 @@ public final class VulkanMetalInterop {
     }
 
     /** Interop input: publish the Vulkan copy for the following Metal read. */
-    static void finishInteropTransferWrite(
+    public static void finishInteropTransferWrite(
             VkCommandBuffer cmd, MemoryStack stack, InteropImage img) {
         imageBarrier(cmd, stack, img.image, img.aspect,
                 img.layout, VK13.VK_IMAGE_LAYOUT_GENERAL,
@@ -383,7 +395,7 @@ public final class VulkanMetalInterop {
     }
 
     /** Interop output's first-use layout transition before Metal writes it. */
-    static void prepareInteropMetalWrite(
+    public static void prepareInteropMetalWrite(
             VkCommandBuffer cmd, MemoryStack stack, InteropImage img) {
         if (img.layout == VK13.VK_IMAGE_LAYOUT_GENERAL) {
             return;
@@ -396,7 +408,7 @@ public final class VulkanMetalInterop {
     }
 
     /** Interop output: make the semaphore-ordered Metal write available to a Vulkan copy. */
-    static void prepareInteropTransferRead(
+    public static void prepareInteropTransferRead(
             VkCommandBuffer cmd, MemoryStack stack, InteropImage img) {
         imageBarrier(cmd, stack, img.image, img.aspect,
                 img.layout, VK13.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -406,7 +418,7 @@ public final class VulkanMetalInterop {
     }
 
     /** Restore an interop output to GENERAL for the next Metal encode. */
-    static void finishInteropTransferRead(
+    public static void finishInteropTransferRead(
             VkCommandBuffer cmd, MemoryStack stack, InteropImage img) {
         imageBarrier(cmd, stack, img.image, img.aspect,
                 img.layout, VK13.VK_IMAGE_LAYOUT_GENERAL,
@@ -415,13 +427,13 @@ public final class VulkanMetalInterop {
         img.layout = VK13.VK_IMAGE_LAYOUT_GENERAL;
     }
 
-    static void copyImage(VkCommandBuffer cmd, MemoryStack stack, long src, long dst,
+    public static void copyImage(VkCommandBuffer cmd, MemoryStack stack, long src, long dst,
             int aspect, int width, int height) {
         copyImage(cmd, stack, src, VK13.VK_IMAGE_LAYOUT_GENERAL,
                 dst, VK13.VK_IMAGE_LAYOUT_GENERAL, aspect, width, height);
     }
 
-    static void copyImage(VkCommandBuffer cmd, MemoryStack stack,
+    public static void copyImage(VkCommandBuffer cmd, MemoryStack stack,
             long src, int srcLayout, long dst, int dstLayout,
             int aspect, int width, int height) {
         VkImageCopy.Buffer region = VkImageCopy.calloc(1, stack);
@@ -434,8 +446,11 @@ public final class VulkanMetalInterop {
                 region);
     }
 
-    /** Maps the Blaze3D formats this interop handles to VkFormat. */
-    static int mapFormat(String gpuFormatName) {
+    /** Maps the Blaze3D formats this interop handles to VkFormat. Public: {@code metalfx.rt}'s
+     * ray-tracing pass reads a live texture's own {@code GpuFormat} the same way {@link
+     * #runPassthrough} does here, rather than assuming a fixed format for a texture it does not
+     * own. */
+    public static int mapFormat(String gpuFormatName) {
         String name = gpuFormatName.toUpperCase(Locale.ROOT);
         if (name.contains("RGBA8")) {
             return VK13.VK_FORMAT_R8G8B8A8_UNORM;

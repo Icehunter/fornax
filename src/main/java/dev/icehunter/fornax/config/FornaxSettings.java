@@ -37,6 +37,27 @@ public class FornaxSettings {
     public GBufferDebugView debugView = GBufferDebugView.OFF;
 
     /**
+     * Whether the Metal ray tracing sun-shadow pass may run, checked by the Metal RT probe
+     * alongside the device's own reported capability. macOS/Apple Silicon only.
+     *
+     * <p>Defaults to {@link RayTracingMode#AUTO} rather than {@code OFF}: the pass fails closed on
+     * every platform and hardware tier that cannot run it, so a default that only takes effect
+     * where it is already known to work costs nothing on hardware that does not qualify.
+     */
+    public RayTracingMode rayTracing = RayTracingMode.AUTO;
+
+    /**
+     * Which coloring mode the Metal ray tracing scene-debug dispatch uses, checked alongside {@link
+     * #debugView}'s {@code METAL_RT_SCENE_DEBUG} entry. macOS/Apple Silicon only, same gate as
+     * {@link #rayTracing}.
+     *
+     * <p>Defaults to {@link RtDebugMode#OFF}: unlike {@link #rayTracing}, this dispatch is a
+     * debugging aid rather than a real shadow contribution, so it stays off until a mode is
+     * explicitly picked rather than defaulting on wherever the hardware allows it.
+     */
+    public RtDebugMode rtDebugMode = RtDebugMode.OFF;
+
+    /**
      * The SSAA FACTOR -- how hard to supersample once {@link #aaMethod} selects {@code SSAA};
      * ignored under every other method ({@code SsaaManager#applyCurrentScale()} gates on the
      * method, so this never activates supersampling by itself). On/off lives on {@link #aaMethod}
@@ -252,6 +273,21 @@ public class FornaxSettings {
         // and HALF is what that byte budget already produced on the packs the setting exists for.
         if (settings.sidecarMapResolution == null) {
             settings.sidecarMapResolution = SidecarMapResolution.HALF;
+        }
+        // Not version-gated, same reasoning as the other enum fields above: a removed
+        // RayTracingMode constant maps to null at any persisted version. A file written before
+        // this field existed has no key for it at all, and Gson resolves a missing enum field to
+        // the class's own field initializer (AUTO), not null, so this guard only fires for an
+        // explicit null, meaning a genuinely removed constant.
+        if (settings.rayTracing == null) {
+            settings.rayTracing = RayTracingMode.AUTO;
+        }
+        // Same reasoning as rayTracing above: a removed RtDebugMode constant maps to null at any
+        // persisted version, and a file written before this field existed has no key for it at
+        // all, which Gson resolves to the class's own field initializer (OFF), not null. So this
+        // guard only fires for an explicit null, meaning a genuinely removed constant.
+        if (settings.rtDebugMode == null) {
+            settings.rtDebugMode = RtDebugMode.OFF;
         }
         settings.schemaVersion = CURRENT_SCHEMA_VERSION;
         return settings;

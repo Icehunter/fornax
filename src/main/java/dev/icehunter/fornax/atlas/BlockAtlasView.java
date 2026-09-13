@@ -33,21 +33,37 @@ public final class BlockAtlasView {
     private static GpuTexture texture;
     @Nullable
     private static GpuTextureView textureView;
+    private static int generation;
 
     private BlockAtlasView() {
     }
 
     /** Installs {@code texture}/{@code view}, captured by {@code TextureAtlasBlockHookMixin} at the
-     * block atlas's upload hook. Overwrites any previous capture in place (see class doc). */
+     * block atlas's upload hook. Overwrites any previous capture in place (see class doc), and bumps
+     * {@link #generation()} so a consumer holding a copy made from the previous texture reference
+     * (e.g. a Metal-visible export) knows to refresh it. */
     public static void capture(@Nullable GpuTexture texture, @Nullable GpuTextureView view) {
         BlockAtlasView.texture = texture;
         BlockAtlasView.textureView = view;
+        generation++;
     }
 
-    /** Clears both references -- see the class doc's garbage-VRAM law. */
+    /** Clears both references, per the class doc's garbage-VRAM law. Also bumps {@link
+     * #generation()}: replacing the reference with {@code null} counts the same as a real
+     * capture. */
     public static void clear() {
         texture = null;
         textureView = null;
+        generation++;
+    }
+
+    /** Increments every time {@link #capture} or {@link #clear} replaces the texture reference,
+     * starting at 0 before either has ever run this session. A consumer that copies the atlas
+     * elsewhere (rather than sampling it directly) compares this against the value it last copied
+     * and only re-copies when it has moved. Atlas reloads are rare, so this saves a copy on most
+     * frames. */
+    public static int generation() {
+        return generation;
     }
 
     /** The block atlas GPU texture, or {@code null} if never captured this session. */

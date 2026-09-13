@@ -420,18 +420,18 @@ public final class FullscreenPassRunner implements AutoCloseable {
     /**
      * Pure classification, extracted so the shadow-map comparison-vs-raw split is a single line a
      * unit test can pin directly, rather than living only inside {@link #runFrame}'s large per-input
-     * branch where nothing but a comment guarded it -- see {@link ShadowMapManager#RAW_TARGET}'s own
+     * branch where nothing but a comment guarded it. See {@link ShadowMapManager#RAW_TARGET}'s own
      * doc for why two pack-visible names exist for one texture.
      *
-     * <p>{@code ref.equals(ShadowMapManager.TARGET)} is the ONLY way to reach {@code
-     * SHADOW_COMPARISON}: {@link ShadowMapManager#RAW_TARGET} is a different string, so it can never
-     * match here and always falls through to {@code NEAREST_CLAMP} like any other input -- that
-     * fall-through, not a second explicit branch, is what makes the split structural rather than a
-     * maintained invariant. {@code ShadowMapManagerSamplerKindTest} pins both directions.
+     * <p>The combined and entity-only depth targets reach {@code SHADOW_COMPARISON}.
+     * {@link ShadowMapManager#RAW_TARGET} is a different string, so it can never match here and
+     * always falls through to {@code NEAREST_CLAMP} like any other input. That fall-through, not a
+     * second explicit branch, is what makes the split structural rather than a maintained invariant.
+     * {@code ShadowMapManagerSamplerKindTest} pins both directions.
      */
     static InputSamplerKind samplerKindFor(String ref, boolean packTexture, boolean builtinNoise,
             TargetFilter filter) {
-        if (ref.equals(ShadowMapManager.TARGET)) {
+        if (ref.equals(ShadowMapManager.TARGET) || ref.equals(ShadowMapManager.ENTITY_TARGET)) {
             return InputSamplerKind.SHADOW_COMPARISON;
         }
         if (packTexture) {

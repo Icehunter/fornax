@@ -39,6 +39,10 @@ import dev.icehunter.fornax.pack.option.PackOption;
 import dev.icehunter.fornax.pass.FrameGenPresenter;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import dev.icehunter.fornax.pipeline.FrameUniformValues;
+import dev.icehunter.fornax.pass.shadow.RtShadowResult;
+import dev.icehunter.fornax.metalfx.rt.MetalRtShadowPass;
+import dev.icehunter.fornax.metalfx.objc.Objc;
+import dev.icehunter.fornax.config.RayTracingMode;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pass.ssaa.SsaaManager;
@@ -764,6 +768,11 @@ public final class GraphRunner {
         long generation = ++rebuildGeneration;
 
         currentPack = pack;
+        // Declared depth inputs must resolve even when their consuming shader is gated off.
+        ShadowMapManager.setEntityMapRequested(pack.graph().passes().stream()
+                .anyMatch(p -> p.inputs().contains(ShadowMapManager.ENTITY_TARGET)
+                        || p.inputs().contains(ShadowMapManager.ENTITY_RAW_TARGET)));
+        RtShadowResult.setRequestedInputs(pack.graph().passes().stream().flatMap(p -> p.inputs().stream()));
         computeGraphicsConflicts = ComputeGraphicsWaits.compile(pack.graph().passes());
         // Deferred geometry variants embed the OLD pack's program identifiers, so every one of them
         // is stale the moment the active pack changes. Nothing else clears them, and a stale variant
@@ -1373,6 +1382,12 @@ public final class GraphRunner {
         GpuBufferSlice globals = ChunkRenderContextHolder.getUniformBuffer();
         if (globals == null) {
             return;
+        }
+
+        // The G-buffer is complete here, including deferred solid-feature writers. Publishing
+        // at renderLevel RETURN was one frame too late for every screen-space graph consumer.
+        if (Objc.PLATFORM_SUPPORTED) {
+            MetalRtShadowPass.runIfEnabled(gbuffer, FornaxConfig.get().rayTracing != RayTracingMode.OFF);
         }
 
         int width = gbuffer.getWidth();
@@ -3078,6 +3093,13 @@ public final class GraphRunner {
         // it's torn down alongside. close() is null-safe and idempotent, so this is harmless even if
         // WaterSurfaceManager was never allocated this session (SSR_WATER_MODE never exceeded 1).
         WaterSurfaceManager.close();
+
+        // RT sun-shadow result targets (see RtShadowResult's own doc): allocated unconditionally
+        // every frame the graph is active (SodiumWorldRendererOrchestrationMixin
+        // #fornax$ensureRtShadowResultTargets), same as opaqueDepth above, so they must be torn down
+        // here on every pack teardown or a pack switch/unload leaks both R8_UNORM textures and their
+        // views, same failure class ShadowMapManager.close()'s own comment describes.
+        RtShadowResult.close();
 
         for (MipchainRunner m : mipchainRunners.values()) {
             m.close();

@@ -504,10 +504,10 @@ public final class Volume3DTexture extends VulkanGpuTexture {
     /**
      * Records into a transient command buffer from the render encoder's own pool, appends it to the
      * encoder's current submission, flushes, and host-waits the fence: a same-package copy of
-     * {@code VulkanMetalInterop.recordAndFlush}, whose own version is package-private to
-     * {@code dev.icehunter.fornax.metalfx} and additionally MetalFX-scoped, so it cannot be reused
-     * from here. Structure is deliberately identical, down to the create-fence-then-submit-then-wait
-     * order.
+     * {@code VulkanMetalInterop.recordAndFlush}, whose own version is public but lives in {@code
+     * dev.icehunter.fornax.metalfx} rather than this package, so a caller here would need a
+     * cross-package dependency this class does not otherwise have. Structure is deliberately
+     * identical, down to the create-fence-then-submit-then-wait order.
      *
      * <p><b>{@code createFence()} must be taken BEFORE {@code submit()}</b>, and the failure if it
      * is not is loud and immediate rather than subtle: the fence snapshots

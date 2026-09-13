@@ -57,6 +57,7 @@ public class FeatureSolidFeaturesGraphMixin {
         // afterwards would not appear until the following frame.
         boolean wantShadowCasters = FornaxRenderState.isActive()
                 && GraphRunner.isCompileOptionEnabled("SHADOWS")
+                && GraphRunner.shadowsEnabledThisFrame()
                 && ShadowMapManager.getView() != null;
         if (!wantShadowCasters && !fornax$reportedShadowSkip) {
             fornax$reportedShadowSkip = true;

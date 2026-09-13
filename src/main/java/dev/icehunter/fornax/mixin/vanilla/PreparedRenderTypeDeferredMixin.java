@@ -1,5 +1,6 @@
 package dev.icehunter.fornax.mixin.vanilla;
 
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.blaze3d.IndexType;
@@ -226,6 +227,29 @@ public abstract class PreparedRenderTypeDeferredMixin implements PreparedRenderT
         }
     }
 
+    /** Reuse the exact staged draw for the optional independent entity depth target. Invoking
+     * the wrapped body again preserves variant/cutout filtering and never rebuilds a model or
+     * re-submits the player. The independent depth test cannot lose casters hidden by terrain
+     * that an alternative terrain shadow representation may correctly consider transparent. */
+    @WrapMethod(method = "drawFromBuffer(Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/IndexType;III)V")
+    private void fornax$replayEntityShadowDraw(GpuBuffer vertexBuffer, GpuBuffer indexBuffer,
+            IndexType indexType, int baseVertex, int firstIndex, int indexCount, Operation<Void> original) {
+        original.call(vertexBuffer, indexBuffer, indexType, baseVertex, firstIndex, indexCount);
+        if (!FornaxRenderState.isActive() || !DeferredGeometryPipelines.isShadowPhase()
+                || ShadowMapManager.getEntityView() == null
+                || ShadowMapManager.isEntityOnlyPhase()
+                || (DeferredGeometryPipelines.isPlayerCastPhase()
+                    && DeferredGeometryPipelines.PLAYER_CAST_TO_GBUFFER)) {
+            return;
+        }
+        ShadowMapManager.setEntityOnlyPhase(true);
+        try {
+            original.call(vertexBuffer, indexBuffer, indexType, baseVertex, firstIndex, indexCount);
+        } finally {
+            ShadowMapManager.setEntityOnlyPhase(false);
+        }
+    }
+
     @WrapOperation(
             method = "drawFromBuffer(Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/IndexType;III)V",
             at = @At(
@@ -249,12 +273,14 @@ public abstract class PreparedRenderTypeDeferredMixin implements PreparedRenderT
             // Shadow-casting re-execution: same prepared draws, aimed at the shadow map instead.
             // Draws with no shadow variant were already cancelled at HEAD, so anything arriving here
             // casts.
-            GpuTextureView shadowDepth = ShadowMapManager.getView();
+            GpuTextureView shadowDepth = ShadowMapManager.isEntityOnlyPhase()
+                    ? ShadowMapManager.getEntityView() : ShadowMapManager.getView();
             GpuTextureView shadowDummy = ShadowMapManager.getDummyColorView();
             if (shadowDepth == null || shadowDummy == null) {
                 return original.call(encoder, label, color, colorClear, depth, depthClear);
             }
-            RenderPassDescriptor shadowDescriptor = RenderPassDescriptor.create(() -> "Entities (Shadow)")
+            RenderPassDescriptor shadowDescriptor = RenderPassDescriptor.create(() ->
+                    ShadowMapManager.isEntityOnlyPhase() ? "Entities (Independent Shadow)" : "Entities (Shadow)")
                     .withColorAttachment(shadowDummy, Optional.empty())
                     .withDepthAttachment(shadowDepth, OptionalDouble.empty())
                     .withRenderArea(new RenderPass.RenderArea(0, 0,

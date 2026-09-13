@@ -1,11 +1,15 @@
 package dev.icehunter.fornax.voxel;
 
+import dev.icehunter.fornax.pack.graph.TargetRegistry;
 import net.minecraft.core.SectionPos;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -14,6 +18,91 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class VoxelWindowTest {
+    // Reflection into the same private static maps VoxelWindowStorageTest's own seedOwner uses --
+    // populatedSlotSections() is a pure read over exactly these two, with no public seeding path.
+    @SuppressWarnings("unchecked")
+    private static Set<Integer> populatedSlotsField() throws Exception {
+        Field field = VoxelWindow.class.getDeclaredField("populatedSlots");
+        field.setAccessible(true);
+        return (Set<Integer>) field.get(null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<Integer, SectionPos> slotOwnerField() throws Exception {
+        Field field = VoxelWindow.class.getDeclaredField("slotOwner");
+        field.setAccessible(true);
+        return (Map<Integer, SectionPos>) field.get(null);
+    }
+
+    @AfterEach
+    void clearPopulatedSlotState() throws Exception {
+        VoxelWindow.attachRegistry(null);
+        populatedSlotsField().clear();
+        slotOwnerField().clear();
+    }
+
+    @Test
+    void populatedSlotSectionsIsEmptyWhenNothingIsPopulated() throws Exception {
+        populatedSlotsField().clear();
+        slotOwnerField().clear();
+        assertTrue(VoxelWindow.populatedSlotSections().isEmpty());
+    }
+
+    @Test
+    void populatedSlotSectionsReturnsEachPopulatedSlotsCurrentOwner() throws Exception {
+        VoxelWindow.recenter(0, 4, 0, 2);
+        int slot = VoxelWindow.slotFor(0, 4, 0);
+        populatedSlotsField().add(slot);
+        slotOwnerField().put(slot, SectionPos.of(0, 4, 0));
+
+        Map<Integer, SectionPos> sections = VoxelWindow.populatedSlotSections();
+
+        assertEquals(1, sections.size());
+        assertEquals(SectionPos.of(0, 4, 0), sections.get(slot));
+    }
+
+    @Test
+    void populatedSlotSectionsDropsASlotWhoseRecordedOwnerNoLongerMapsToIt() throws Exception {
+        VoxelWindow.recenter(0, 4, 0, 2);
+        int slot = VoxelWindow.slotFor(0, 4, 0);
+        populatedSlotsField().add(slot);
+        slotOwnerField().put(slot, SectionPos.of(0, 4, 0));
+        // A large jump leaves the old owner outside the new window entirely: slotFor(0,4,0) is
+        // -1, which can never equal the stale slot, so the stale entry must not appear in the result.
+        VoxelWindow.recenter(50, 4, 50, 2);
+
+        assertTrue(VoxelWindow.populatedSlotSections().isEmpty(),
+                "a populated slot whose recorded owner does not map back to it must be dropped");
+    }
+
+    @Test
+    void populatedSlotSectionsDropsAShellClearedSlotWhoseMetadataNoLongerOwnsIt() throws Exception {
+        var graph = dev.icehunter.fornax.pack.PackTomlLoader.loadGraph(
+                new java.io.StringReader("[targets.voxelSectionState]\nkind = \"buffer\"\n"), "graph.toml");
+        VoxelWindow.attachRegistry(TargetRegistry.create(graph, Map.of()));
+
+        VoxelWindow.recenter(0, 4, 0, 2);
+        int slot = VoxelWindow.slotFor(0, 4, 0);
+        SectionPos owner = SectionPos.of(0, 4, 0);
+        populatedSlotsField().add(slot);
+        slotOwnerField().put(slot, owner);
+
+        Field statesField = VoxelWindow.class.getDeclaredField("sectionStates");
+        statesField.setAccessible(true);
+        VoxelSectionState states = (VoxelSectionState) statesField.get(null);
+        states.geometry(slot, owner);
+        assertEquals(1, VoxelWindow.populatedSlotSections().size(),
+                "metadata currently agrees this slot belongs to its recorded owner");
+
+        // A shell clear removes the slot's geometry snapshot but leaves slotOwner/populatedSlots
+        // untouched: this is VoxelWindow's "retains the CPU owner record but revokes validity" rule,
+        // shared between hasValidData and populatedSlotSections via slotIsValid.
+        states.invalidate(List.of(slot));
+
+        assertTrue(VoxelWindow.populatedSlotSections().isEmpty(),
+                "a shell-cleared slot's metadata does not own it and must be dropped");
+    }
+
     @Test
     void slotIsMinusOneOutsideTheCurrentWindow() {
         VoxelWindow.recenter(0, 4, 0, 2);

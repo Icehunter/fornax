@@ -5,6 +5,7 @@ import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.debug.FornaxDebugKeys;
 import dev.icehunter.fornax.metalfx.MetalFxSupport;
 import dev.icehunter.fornax.metalfx.MetalHudControl;
+import dev.icehunter.fornax.metalfx.rt.MetalRtShadowPass;
 import dev.icehunter.fornax.pack.PackReload;
 import dev.icehunter.fornax.pack.layout.RuntimeShaderPack;
 import dev.icehunter.fornax.pack.material.MaterialResolution;
@@ -81,6 +82,7 @@ public class FornaxMod implements ClientModInitializer {
             PersistentPipelineCache.destroy();
             ComputeShaderCompiler.shutdown();
             LabPbrAtlasDiskCache.shutdown();
+            MetalRtShadowPass.shutdown();
         });
 
         // Tag ids in blocks.toml categories (the "#c:storage_blocks/iron" kind) don't resolve until

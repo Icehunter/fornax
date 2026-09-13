@@ -49,6 +49,7 @@ With no pack active, or with shaders disabled in the config, every one of these 
 | `.mixin.vulkan` | Raw Vulkan accessors plus the device-extension hook that enables `VK_EXT_metal_objects` for MetalFX interop |
 | `.mixin.yacl` | YACL screen chrome, close/apply behaviour, and private-widget accessors |
 | `.metalfx` / `.metalfx.objc` | MetalFX temporal scaling, Vulkan/Metal shared-image and shared-event interop, and the pure-Java FFM bridge to Objective-C/Metal |
+| `.metalfx.rt` | Metal RT sun visibility beside MoltenVK. Exports a centered finite domain from the existing brick-grid source (diameter at most 17), using compact toroidal destinations and source-slot BLAS ownership. One shared 64-slot copy/build batch keeps metadata coherent. Dense sections grow and re-expand; incomplete geometry is invalid for replacement. `MetalRtShadowPass` orders Vulkan depth/normal/atlas copies, Metal expansion/BLAS/TLAS/trace, and Vulkan result copies with its shared timeline before graph consumers. Cutout intersections use current atlas alpha and certified baked CROSS models carry exact positions, UVs and offsets; unsupported geometry or mappings invalidate only the affected rays for raster fallback. |
 | `.pack` | Pack manifest records (`PackModel`, `GraphSpec`, `PassSpec`, `TargetSpec`, `BlocksSpec`, ...), TOML parsing, discovery, shader-import validation, pack reload (`PackReload`). Also `ShadersEnabledFlip`, the shared master-toggle-only apply path (render-state latch), and `PackSwitch`, the shared active-pack-selection apply path (same rule): both are invoked only by `screen.FornaxPacksTab`'s self-applying Apply flow (the Engine save callback routes only `{SAVE_ONLY, PACK_REAPPLY}`, never these) |
 | `.pack.graph` | The graph interpreter: `GraphRunner`, target allocation (`TargetRegistry`/`TargetPlan`/`TargetInstance`), per-pass-type runners, VRAM (the graphics card's own memory) reporting |
 | `.pack.layout` | Shader source rewriting (`DefineRewriter`), the `u_PackOptions` layout/buffer, the synthetic `RuntimeShaderPack` |
@@ -56,7 +57,7 @@ With no pack active, or with shaders disabled in the config, every one of these 
 | `.pack.option` | Annotated-`#define` option grammar parsing and cross-file merging |
 | `.pass.ssaa` / `.pass.taa` / `.pass.reconstruct` | The general render-scale target lifecycle: SSAA (render bigger, then shrink down for smoother edges) box downsample, TAA/TAAU temporal reconstruct (spreading anti-aliasing work across several frames using motion history) plus presentation sharpen, and the camera jitter sequence |
 | `.profile` | GPU per-pass timing (`PassTimer` for graphics-encoder work and `ComputePassTimer` for raw compute-queue dispatches, both ring-buffered across frames-in-flight) feeding a pure-JVM rolling-stats aggregator (`FrameProfiler`); `ProfilerOverlay` (top-left HUD) and `ProfilerLogDump` (full-table log dump) read it, both graded against the 11.1 ms / 90 FPS budget |
-| `.pipeline` | Shared per-frame state: `GBuffer`/`GBufferManager` (the G-buffer is the set of full-screen images, such as surface colour, normal direction, and depth, that the deferred step stores before lighting runs), `FornaxChunkVertex`, the render-state latch, push-constant layout, previous-frame camera transform, per-thread material ID, the engine-guaranteed `SceneHistory` target |
+| `.pipeline` | Shared per-frame state: `GBuffer`/`GBufferManager` (the G-buffer is the set of full-screen images, such as surface colour, normal direction, and depth, that the deferred step stores before lighting runs), `FornaxChunkVertex`, the render-state latch, push-constant layout, previous-frame camera transform, per-thread material ID, the engine-guaranteed `SceneHistory` target, `FrameCameraState` (this frame's inverse projection*modelView matrix as a plain float array, for the Metal ray-tracing pass) |
 | `.screen` | Pack settings UI: `PackManageScreen` (the pack-agnostic YACL "Manage" entry point, a Shader Options bridge; Import/Export/Defaults live as `mixin.yacl.CategoryTabMixin`-injected chrome, scoped via `PackChromeActions`) and its session-free `PackValuesActions` helper, the legacy bespoke option pages (`PackSettingsScreen`), the YACL-hosted engine-settings factory (`FornaxSettingsScreen`) opened from the pause/title menu, Sodium's video settings, and the open-settings keybind, and its custom Shader Packs tab (`FornaxPacksTab` + the pure `PackListState`) |
 | `.util` | VRAM estimation, renderer-reload request plumbing, sun-direction math |
 
@@ -73,13 +74,15 @@ SodiumWorldRenderer.drawChunkLayer(OPAQUE, ...)
              submit independent lighting compute in graph order
              insert one final compute -> graphics semaphore wait
   [Sodium's own SOLID/CUTOUT terrain draws run here, into the shared G-buffer]
-  RETURN -> GraphRunner.finish(matrices, x, y, z)
+  RETURN -> GraphRunner.finish(matrices, x, y, z), deferred until solid features when needed
+             publish current-frame Metal RT masks before graph consumers
              record graphics-read engine buffer uploads (transient command buffer, no flush)
 
 GameRenderer.renderLevel(...)
   RETURN -> restore native target
             copy scene history
             present graph/debug consumers
+            present the already-produced RT sun mask or scene debug if selected
             record graphics -> next-compute timeline signals
             advance camera jitter
 ```
@@ -633,19 +636,52 @@ channel carries the vanilla sky-light level (0-1, the lightmap Y coordinate) rat
 texture's own alpha; the pack-side terrain shader repurposes that lane once ALPHA_CUTOUT has already
 consumed any meaningful alpha-test value, since no downstream resolve consumer reads the resolve
 pass's own output alpha. `gbuffer_resolve.fsh` decodes it to gate SSR's sky-miss fallback, the
-sun-shadow distance fade, and atmospheric fog's cave damping. Three further engine-owned names are
+sun-shadow distance fade, and atmospheric fog's cave damping. Several further engine-owned names are
 validated separately, each carrying an extra structural rule `GraphValidator.checkInputRef` enforces
 on top of plain resolvability: `sunShadowMap` (`ShadowMapManager.TARGET`, no history slot),
 `sceneHistory` (`SceneHistory.TARGET`, previous-frame-only, must be referenced as
-`sceneHistory.history`), and `builtin.depth_opaque` (`OpaqueDepth.NAME`, an engine-owned,
+`sceneHistory.history`), `builtin.depth_opaque` (`OpaqueDepth.NAME`, an engine-owned,
 self-managed D32 copy of the opaque G-buffer depth, not a `TargetRegistry` target since
 `TargetFormat` has no depth format; captured at the finish-opaque boundary and cleared to the
-reversed-Z far value at allocation; see its own subsection below). Every name resolves through
-`GraphInputResolver`'s two switches (`resolveBuiltinView`/`resolveBuiltinTexture`), null-safe
+reversed-Z far value at allocation; see its own subsection below), and `rtSunVisibility`/
+`rtSunValid` (`RtShadowResult.TARGET`/`RtShadowResult.VALID_TARGET`, validated together by
+`RtShadowResult.isRtShadowRef`, same no-history-slot rule as `sunShadowMap`). Every name resolves
+through `GraphInputResolver`'s two switches (`resolveBuiltinView`/`resolveBuiltinTexture`), null-safe
 against a resource that hasn't been captured/allocated yet. `ShadowMapManager.close()` runs inside
 `GraphRunner.closeCurrent()` after its single device-idle-before-destroy boundary, so the D32 map
 and dummy colour attachment are released on pack unload/switch the same way as `OpaqueDepth` and
 water-prepass targets.
+
+Packs declaring `sunEntityShadowMap` receive an independent forward-Z D32 entity/player depth
+map with the same light projection and comparison sampler as `sunShadowMap`. It is requested at
+graph rebuild, allocated with the shadow map, and cleared every frame before disabled-shadow
+returns. Existing prepared shadow draws replay their already-uploaded buffers into this target;
+there is no second player submission or CPU geometry extraction. Terrain never writes or tests
+against its depth. `ShadowMapManager.close()` retires both maps at the existing idle boundary.
+The combined map remains available unchanged; choosing how to combine the independent map with
+alternative terrain visibility belongs to the pack.
+
+`RtShadowResult` owns render-resolution R8 `rtSunVisibility` and `rtSunValid` targets. They always
+resolve for an active graph. `GraphRunner.finish()` dispatches RT after the required G-buffer
+writers and before graph consumers; end-of-frame code only presents the completed debug mask.
+Both targets clear to zero on allocation and on unavailable/inactive transitions. Validity is
+binary: zero selects the pack's raster fallback, one certifies a current trace in the finite
+centered export domain. It does not certify visibility beyond that domain.
+
+`MetalRtGeometry` maps source slots into a centered radius-at-most-eight domain with stable
+absolute-coordinate modulo destinations. Source owner changes invalidate BLASes; the instance map
+contains compact export indices for palette/face-texture reads. Copying and rebuilding use the
+same selected batch, so a deferred slot's old primitive indices cannot read new palette metadata.
+Missing, queued, read-but-not-committed, or RT-unpublished domain geometry invalidates replacement.
+Known-empty committed sections qualify; distant work outside the finite domain does not block it.
+
+`MetalRtAcceleration` starts each slot with `RT_INITIAL_TRIS_PER_SLOT` capacity, reads the complete
+GPU expansion count, grows only overflowing slots to that requirement, and re-expands before
+building. It retains grown buffers until eviction. Incomplete or corrupt counts fail closed rather
+than publishing a truncated caster set. Cutout shared faces are retained unless opacity establishes
+that removing them is safe. Native capacity fixtures exercise production recovery with 24,576
+opaque checkerboard triangles and 6,144 cutout triangles, plus reuse; they do not establish live
+Vulkan synchronization, visual quality, or FPS.
 
 `builtin.noise` is the engine-generated 512×512 RGBA8 tileable noise texture (`NoiseTexture`),
 lazily created once per session from a fixed seed, never re-rolled, never pack-supplied. It is the
@@ -1470,6 +1506,8 @@ sibling pack's settings declarations). What remains is genuinely independent of 
 | `reconstructSharpen` | float | `0.5` | Contrast-adaptive sharpen strength `ReconstructPass` applies after the temporal blend; TAAU enforces a ratio-scaled floor over it (see "Temporal reconstruct") |
 | `frameGenMode` | enum (`FrameGenMode`) | `OFF` | Experimental MetalFX frame generation: interpolates one frame between real frames. Requires `aaMethod = METALFX` and vsync (FIFO present mode); adds roughly 1 frame of latency when engaged. `OFF` disarms `FrameGenPass.armed()` entirely. `AUTO` adaptively engages/disengages the actual double-present per frame (hysteresis around render fps vs. display refresh; see "Adaptive pacing" below), so arming this does not guarantee constant latency/cost, only that the machine genuinely needs the assist. `ALWAYS` bypasses that pacing and double-presents every armed frame unconditionally, holding real fps at roughly half the display refresh under FIFO for as long as it is selected: the deliberate escape hatch for a player who has already capped their own frame rate there (see "Adaptive pacing"). macOS 26+ Apple Silicon only; the settings-screen toggle is built only when `MetalFxSupport.isFrameInterpolationAvailable()`, greyed out/hidden otherwise. Live-read every frame by `FrameGenPass.armed()`/`FrameGenPass.mode()` (no pack recompile needed). Transitioning to `OFF`, or switching `aaMethod` away from `METALFX`, releases `FrameGenPass`/`UiLayerCapture`/`FrameGenPresenter`'s interop resources via the shared `FrameGenPresenter.deactivateAll()`, called from two places: `SettingsApplyRouter`'s `FRAMEGEN_DEACTIVATE` action at save time (the before/after field diff, same mechanism as `PACK_REAPPLY`/`SAVE_ONLY`; never from the option's own YACL listener, since YACL applies every option's binding before any listener fires, so a listener can't tell whether this is the transition frame), and `GraphRunner.closeCurrent()` on every pack teardown (frame generation runs independently of pack state and would otherwise keep presenting against GPU state a pack reload just tore down); `AUTO`<->`ALWAYS` does not route that action, since both keep the same resources armed and only `FrameGenPacer`'s per-frame decision differs. A pre-`frameGenMode` config's boolean `frameGeneration` field migrates `true` to `AUTO` and `false` to `OFF` (schema v3 -> v4; see "Migration") |
 | `metalHud` | boolean | `false` | Apple's Metal Performance HUD overlay (`CAMetalLayer.developerHUDProperties`, macOS 13+), replacing a manual `MTL_HUD_ENABLED` export with a settings toggle, independent of `aaMethod`. `FornaxPreLaunch` calls `MetalHudEnv.enableIfConfigured()` when true: a native `setenv("MTL_HUD_ENABLED", "1", 1)` before Minecraft's `main()`, since the HUD subsystem must exist before `Metal.framework` loads. Restart-to-apply in both directions under MoltenVK (see "Known laws"): `MetalHudControl.apply(enabled)` sets/clears the layer's `mode` key and logs a verdict from a live save, but only the `CLIENT_STARTED` call (config already true at boot) ever visibly shows the HUD. Toggle built only when `Objc.isLoaded()`. Fails closed: any resolution failure logs once at WARN and does nothing |
+| `rayTracing` | enum (`RayTracingMode`) | `AUTO` | Whether the Metal ray tracing sun-shadow pass may run: `OFF` never runs it, `AUTO` runs it when the device reports ray tracing support on GPU family Apple9 or later, `FORCE` runs it whenever the device reports ray tracing support at all. Checked by the Metal RT probe alongside the device's own reported capability; live-read, no pack recompile needed. macOS/Apple Silicon only; the settings-screen row is built only when `Objc.isLoaded()`, same gating as `metalHud` |
+| `rtDebugMode` | enum (`RtDebugMode`) | `OFF` | Which coloring mode the `rt_debug` scene-debug dispatch uses (hit/miss, distance, normal, instance id, primitive id, ray direction); `OFF` skips that dispatch entirely rather than running some default mode, so it costs nothing until a mode is picked. Live-read, no pack recompile needed; macOS/Apple Silicon only, same `Objc.isLoaded()` gating as `rayTracing` |
 | `schemaVersion` | int | `0` | Config-file migration marker only, not a rendering setting; see "Migration" below |
 
 **Storage.** A plain Gson-serialized JSON file in the Fabric config directory. Load tolerates a
@@ -2171,16 +2209,83 @@ old "Active Pack" category: the router never sees `shadersEnabled` or `activePac
 now, since `FornaxPacksTab` self-applies both through `ShadersEnabledFlip`/`PackSwitch` outside this
 save cycle before the router ever runs.
 
+### Finite-domain ray-traced sun depth
+
+A graph declaring `rtSunDepth` receives an engine-owned RGBA32_FLOAT image at the exact
+`ShadowMapManager` resolution. R is nearest alpha-tested forward shadow depth (1 for a miss),
+G/B are finite-domain entry/exit depths, and A is validity. The image is allocated and explicitly
+zero-cleared even when ray tracing is unavailable. Disabled, failed, empty-structure and resize
+paths preserve A=0 rather than exposing a stale trace. `sunEntityShadowMapRaw` is a raw sampler
+alias of the independent entity map; `sunShadowMapRaw` remains the combined raw map. A pack
+unions matching texel depths before comparison/filtering and owns softness, strength and fades.
+Packs that do not declare `rtSunDepth` allocate no such texture; declared consumers retain a
+matching shadow-resolution, zero-invalid descriptor when RT is off or unsupported.
+
+`rt_sun_depth.metal` inverts the current `ShadowFrameState` matrix and radial warp, traces along
+increasing light depth, and shares the exact alpha intersection routine in `rt_trace.metal`.
+It has no PCF pattern or style controls. Certified CROSS cells carry a direct `SingleVariant`'s
+known `SimpleModelWrapper` baked quads and `BlockState.getOffset` at the absolute position.
+Harvest never enters the live Fabric model-emission hook: connected-texture processing belongs
+to the renderer's own lifecycle, including during chunk rebuilds. Custom models/parts and composite
+models remain unknown because collected fallback parts do not certify their final rendered quads.
+They are not unwrapped. Per-vertex UVs and individual face winding survive into supplemental
+triangles; backface culling preserves distinct front/back alpha mappings. Unsupported partial
+shapes and missing current alpha data also remain unknown, with no opaque-proxy claim. Affected
+rays retain raster shadows. The supplement does not change the voxel lighting palette.
+
+A section DDA checks only coherent owning sections before
+the closest committed hit (the full interval for a miss). Because accepted supplemental geometry
+may extend one block beyond its section, it also checks intersected expanded neighbor bounds;
+the finite coverage excludes that same outer shell. Missing, stale, pending or unsupported owners
+are unknown. Unrelated owner updates do not change a ray's validity. Legacy screen visibility/valid
+builtins keep their ABI, but their full render-resolution dispatch and G-buffer copies run only
+for a declared legacy consumer or the sun-mask debug view.
+
+The frame captures supplementary section results under the same queue lock as the bounded
+64-slot Vulkan metadata copy, passes that immutable capture to the matching 64-slot BLAS build,
+and uploads a per-frame readiness buffer after publication. The buffer lives through Metal command
+completion without being overwritten by another frame. Both output copy-back paths use the same
+Vulkan/Metal timeline handshake, including destruction on resolution changes. Atlas contents are
+copied each RT frame because sprite animation changes texels without changing texture identity.
+A cleared current atlas invalidates alpha queries even if an earlier exported copy still exists.
+Native tests execute the shipped kernels for projection/warp round-trips, closest/miss depths,
+unknown-before/behind-hit, unrelated owners, diagonal boundaries, displaced neighbors, exact
+mirrored/cropped alpha and front/back culling. They do not establish client appearance or live cost.
+
 ## 11. Debug views
 
 `GBufferDebugView` has grown well past a small fixed list as new passes gained their own diagnostic
-view (52 constants as of this writing, off plus everything from raw G-buffer channels through the
-tonemap/bloom/exposure terminal-pass branches and a 9-view env-specular series). Treat
+view (54 constants: off plus everything from raw G-buffer channels through the
+tonemap/bloom/exposure terminal-pass branches, a 9-view env-specular series, and the two Metal ray
+tracing overrides). Treat
 `GBufferDebugView.java` itself as the list; its own doc comment explains which ordinals are resolve
 branches versus terminal-pass branches. Selection rides the same generic per-pass-params mechanism
 every fullscreen pass uses (see §6); the resolve pass alone receives the current debug-view ordinal
 as one of its two generic per-pass scalars, decoded shader-side into an integer branch. There is no
 dedicated debug-view uniform; it is one value of a mechanism built for something else entirely.
+
+`METAL_RT_SUN_MASK` is, like `WATER_PREPASS`, an engine-owned bypass rather than a resolve/tonemap
+branch: `GameRendererMixin` calls `MetalRtDebugPass.presentIfEnabled` at the same `renderLevel`
+RETURN site as the other debug presenters. It blits `MetalRtShadowPass`'s R8 sun-visibility mask
+straight over the native frame with the red-channel-as-grey shader `GraphTargetDebugPass` also uses
+for `CELESTIAL_SHADOW_VOXEL`, and no-ops on any frame `maskView()` currently returns null: before
+the pass has ever produced a mask, and again whenever it is not currently running (off,
+unsupported, or inactive), regardless of whether it produced one earlier. `MetalRtShadowPass.runIfEnabled`
+runs when a graph declares a ray-traced input or a trace debug output is requested, gated by
+`FornaxSettings#rayTracing` and `MetalRtSupport.isAvailable()`. Selecting the sun-mask view requests
+the legacy screen-space trace; a pack using only `rtSunDepth` pays only the sun-space dispatch.
+
+`METAL_RT_SCENE_DEBUG` is the same bypass shape, presented by the same `MetalRtDebugPass`, but
+blits `MetalRtShadowPass.debugSceneView()`'s colored RGBA16F output with the plain rgb passthrough
+shader `GraphTargetDebugPass` uses for its own colored graph targets, since this output (unlike the
+sun mask) carries real colour rather than a scalar. `debugSceneView()` returns null on the same
+never-stale conditions `maskView()` does, plus whenever `FornaxSettings#rtDebugMode` is `OFF`: the
+`rt_debug` dispatch itself only fires when a real mode is picked (checked inside `MetalRtShadowPass.run`
+independently of the mask's own gating), so a texture that was never written this session (or went
+stale after the mode was turned off) is never presented as current. `MetalRtDebugPass.wanted()`
+(either Metal RT view selected, `rtDebugMode` not `OFF`, or the `fornax.rt.always` system property)
+is read only by tests and reserved for this pass's own presentation policy; it plays no part in
+whether `MetalRtShadowPass.runIfEnabled` runs.
 
 ### One-shot raw fullscreen pass captures
 
@@ -2243,6 +2348,9 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
 - **A mixin absent from the mixin config fails silently.** A mixin class that exists in source
   but isn't listed in the config is never applied, with no error, warning, or log line of any kind
   distinguishing that from an intentional removal.
+- **An RT expansion overflow is a sizing result, never complete geometry.** Read the full count,
+  grow the affected slot and re-expand before building. Copy/build batches and metadata versions
+  must agree, and incomplete domain geometry must publish invalid replacement data.
 - **A constant quoted in this file is a third copy that nothing reads.** The GLSL declaration and
   the Java allocation are tied to each other by a contract test; the prose here is tied to neither,
   so it drifts on any change that updates both. The wrong number is what someone budgets a pack's
@@ -2292,6 +2400,15 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
   read by enabled fullscreen or particles passes and by no enabled compute pass. A target let in
   for a pass type that has no recorder is made, never written, and reads zeros forever with no log
   line.
+- **A pack-conditional exported buffer's reallocation gate must track its enablement, not just its
+  size.** `MetalRtGeometry.ensureBuffers` allocates the faceTexture exported buffer only when the
+  registry has `VoxelFaceTexture.TARGET` enabled; a gate keyed on diameter alone would leave that
+  buffer's allocation state stale across a pack reload that flips the enablement at an unchanged
+  diameter. `needsReallocation`/`ensureBuffers` both compare enablement alongside diameter for this
+  reason. When the buffer is not enabled, ray-traced shadows run without per-face texture data for
+  the rest of that allocation; this is logged once rather than left silent, since a ray-tracing
+  feature's world data quietly depending on a pack-side declaration is otherwise indistinguishable
+  from a working steady state.
 - **An unresolvable shader include fails silently downstream, so this engine validates eagerly.**
   The underlying shader-composition mechanism splices an error string into the composed source for
   a missing include rather than failing the load, which would otherwise surface only as a broken
@@ -2348,8 +2465,8 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
   it: `GBufferManager.ensureSize`, `TargetRegistry.reconcile`, `MipchainRunner.ensureSize`,
   `ShadowMapManager.ensureSize`, `WaterSurfaceManager.ensureSize`,
   `PackTextureRegistry.load`, `ArrayTextures.create`, `MetalFxReactiveMaskPass.ensureSize`,
-  `OpaqueDepth.ensureSize`, `BlockAtlasOverflow.build`. All ten now hoist-and-free; a new
-  multi-handle GPU-resource builder should follow the same shape.
+  `OpaqueDepth.ensureSize`, `BlockAtlasOverflow.build`, `RtShadowResult.ensureSize`. All eleven
+  hoist-and-free; a new multi-handle GPU-resource builder should follow the same shape.
 - **A real `GpuDeviceLossException` must never be swallowed as a soft, continuable failure.**
   `MetalFxUpscalePass.runIfEnabled`'s catch used to treat every exception the same way (log, mark
   `failed`, fall back to TAAU that frame). On an actual lost Vulkan device — live-caught as
@@ -2543,6 +2660,53 @@ in and came out, not a replay. Whether allocation and callbacks behave needs a l
   states "a bootstrap read and a mesh-driven harvest must come out the same colour".
   `VoxelWindow.needsHarvest()` gates the harvest before it is queued, so the no-op default state (no
   pack active) never queues one at all.
+- **Metal reads a Vulkan buffer only if its memory was allocated exportable through
+  `VK_EXT_metal_objects` at allocation time.** VMA-allocated targets are not, so the Metal ray
+  tracing pass keeps its own exported copies of the brick-grid buffers and copies only the slots
+  `BrickGridUpload` marks dirty into them each frame, rather than reading the engine's regular
+  voxel buffers directly.
+- **A Metal compute or acceleration-structure encoder left open when Java throws past it aborts the
+  whole process, not just the pass.** Metal's own validation calls `endEncoding` mandatory and
+  aborts the process on `-[_MTLCommandEncoder dealloc]` if an encoder is released without it: that
+  is a native `SIGABRT`, not a catchable Java exception, so `MetalRtShadowPass.runIfEnabled`'s
+  catch-and-disable can only help if the process survives to reach it. Every encode sequence in
+  `metalfx.rt` (`MetalRtAcceleration`'s expand/build/instance encoders, `MetalRtShadowPass`'s trace
+  encoder) therefore calls `endEncoding` from a `finally` block covering everything between
+  creating the encoder and ending it, so a bad buffer id or a nil pipeline state reaches the
+  catch-and-disable path instead of taking the whole process down with it. Any new encode sequence
+  added to this package must keep that shape: nothing that can throw runs outside the try, and
+  `endEncoding` runs in the finally unconditionally.
+- **A screen-space shadow ray's origin bias must follow the surface normal, not the light direction.** Biasing
+  along the sun direction shrinks the effective offset toward zero as the sun angle grazes the
+  surface, exactly the geometry where self-intersection is most likely. At a shallow sun
+  angle the ray starts too close to its own triangle and flickers frame to frame as camera/TAA
+  jitter nudges which side of the face the origin lands on. There is no compile error and no wrong
+  colour to spot in a single frame; it only shows as noise across several. `rt_trace` biases along
+  a per-pixel surface normal instead, and falls back to the sun direction only when that normal
+  reads back a zero vector (no real G-buffer bound).
+- **A ray-origin self-intersection bias must use the flat, axis-aligned face normal, never a
+  bump-mapped shading normal.** `gNormalOut.rgb` carries terrain.fsh's LabPBR
+  tangent-space-perturbed `worldNormal`, not the flat face normal it is built from; a textured face
+  with real per-texel bump detail can tilt that vector far enough off vertical to shrink the bias's
+  clearance below the reconstruction's own floating-point slack, letting the ray self-intersect the
+  voxel it started on. The correct bias direction is the mesh's geometric normal, never a value
+  sampled through a normal map. The legacy screen-space `rt_trace` decodes it from
+  `gNormalOut.a`, whose SNORM16 codes carry exact axis normals or an octahedral general normal.
+  The sun-space depth trace starts at the finite light-ray interval and needs no receiver bias.
+- **`intersection_query` geometry built `setOpaque:true` auto-commits every candidate with no error
+  and no way to inspect it, unless `intersection_params::force_opacity(forced_opacity::non_opaque)`
+  overrides that per query.** The acceleration structure's own opaque flag (set once, at build time,
+  for the closest-hit convenience API's fast path) silently wins over a manual any-hit-style loop
+  otherwise: every candidate reports as already committed, a per-candidate alpha test never runs,
+  and the ray behaves exactly as if cutout testing were never added. No compile error, no wrong
+  colour in a single frame, just every leaf staying fully solid. `rt_trace` sets this override
+  before every `intersection_query<triangle_data, instancing>::reset`.
+- **`get_candidate_primitive_data()`/`get_committed_primitive_data()` are plain, non-template
+  methods returning `const device void*`, not a templated accessor.** `query.get_candidate_
+  primitive_data<uint>()` fails to compile ("does not name a template"); the real signature demands
+  an explicit `(device const uint*)` cast at the call site, confirmed against this machine's
+  `metal_raytracing` header through the real compiler error, not assumed from another ray-tracing
+  API's shape.
 
 ### When a voxel section counts as known
 

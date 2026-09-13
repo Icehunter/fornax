@@ -11,6 +11,7 @@ import dev.icehunter.fornax.pack.layout.RuntimeShaderPack;
 import dev.icehunter.fornax.pass.compute.ComputePipelineBuilder;
 import dev.icehunter.fornax.pass.compute.ComputeShaderCompiler;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
+import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pipeline.FramePacing;
 import dev.icehunter.fornax.profile.ComputePassTimer;
@@ -382,14 +383,16 @@ public final class ComputePassRunner implements AutoCloseable {
             // determines descriptor TYPE, no GPU access needed yet).
             return VK13.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         }
-        if (ShadowMapManager.isShadowMapRef(name)) {
+        if (ShadowMapManager.isShadowMapRef(name) || RtShadowResult.isRtShadowRef(name)) {
             // Engine-owned sun shadow depth target (see ShadowMapManager), covering both its
             // pack-visible names (TARGET and RAW_TARGET -- same resource, different sampler chosen
             // downstream) -- deliberately NOT builtin.-prefixed (GraphValidator.checkInputRef treats
             // it as a peer of BUILTINS, not a member: see that method's own isShadowMapRef branch) and never
             // a TargetRegistry entry, so neither the BUILTINS check above nor the registry lookups
             // below ever match it -- without this branch a compute pass declaring "sunShadowMap"
-            // would throw here instead of building.
+            // would throw here instead of building. RtShadowResult's two names are validated on the
+            // same kind of parallel branch (GraphValidator.checkInputRef's own RtShadowResult case)
+            // and need the identical treatment here for the identical reason.
             // FullscreenPassRunner never needed an equivalent special case: it classifies every
             // non-buffer input as a plain sampler unconditionally and defers entirely to
             // GraphInputResolver.resolveView at run time, which already resolves

@@ -73,13 +73,20 @@ public final class SectionHarvester {
 
     public record Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
                          VoxelSourceSummary sourceSummary, long harvestGeneration, VoxelSourceEvidence sourceEvidence,
-                         VoxelSourcePolicy sourcePolicy) {
+                         VoxelSourcePolicy sourcePolicy, RtSectionGeometry rtGeometry) {
         public Result {
             java.util.Objects.requireNonNull(sourceSummary, "sourceSummary");
             java.util.Objects.requireNonNull(sourceEvidence, "sourceEvidence");
             java.util.Objects.requireNonNull(sourcePolicy, "sourcePolicy");
+            java.util.Objects.requireNonNull(rtGeometry, "rtGeometry");
             if (lightmap.length != VoxelLightmap.BYTES_PER_SLOT)
                 throw new IllegalArgumentException("voxel lightmap must contain one byte per section cell");
+        }
+        public Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
+                      VoxelSourceSummary sourceSummary, long harvestGeneration, VoxelSourceEvidence sourceEvidence,
+                      VoxelSourcePolicy sourcePolicy) {
+            this(paletteIndices, palette, lightmap, sourceSummary, harvestGeneration, sourceEvidence,
+                    sourcePolicy, RtSectionGeometry.legacy(palette));
         }
         public Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
                       VoxelSourceSummary sourceSummary, long harvestGeneration, VoxelSourceEvidence sourceEvidence) {
@@ -90,7 +97,7 @@ public final class SectionHarvester {
             this(paletteIndices, palette, lightmap, sourceSummary, harvestGeneration, VoxelSourceEvidence.UNAVAILABLE);
         }
         public Result withLightmap(byte[] updated) {
-            return new Result(paletteIndices, palette, updated, sourceSummary, harvestGeneration, sourceEvidence, sourcePolicy);
+            return new Result(paletteIndices, palette, updated, sourceSummary, harvestGeneration, sourceEvidence, sourcePolicy, rtGeometry);
         }
         public Result(byte[] paletteIndices, SectionPalette palette, byte[] lightmap,
                       VoxelSourceSummary sourceSummary) {
@@ -194,13 +201,18 @@ public final class SectionHarvester {
                 sourceEvidence.copy(baseIndex);
             }
         });
+        var rtGeometry = new RtSectionGeometry.Builder();
         byte[] paletteIndices = new byte[16 * 16 * 16];
         for (int y = 0; y < 16; y++) {
             for (int z = 0; z < 16; z++) {
                 for (int x = 0; x < 16; x++) {
                     BlockState state = blockData.get(x, y, z);
                     Integer index = indexByState.get(state);
-                    if (index == null) sourcePolicy.markIncomplete();
+                    if (index == null) { sourcePolicy.markIncomplete(); rtGeometry.unknown(); }
+                    else if (entries.get(index).shapeKind() == VoxelShapeKind.CROSS)
+                        rtGeometry.harvest(state, entries.get(index), (y << 8) | (z << 4) | x, index,
+                                new BlockPos(originX + x, originY + y, originZ + z));
+                    else if (entries.get(index).shapeKind() == VoxelShapeKind.PARTIAL) rtGeometry.unknown();
                     // A state that was skipped above (palette overflow past MAX_PALETTE_ENTRIES) has no
                     // entry here -- fall back to index 0 deterministically rather than unboxing null.
                     paletteIndices[(y << 8) | (z << 4) | x] = (byte) (index != null ? index : 0);
@@ -232,7 +244,7 @@ public final class SectionHarvester {
                 VoxelLightmap.capture(tintSource, originX, originY, originZ),
                 sourceInventory == null ? VoxelSourceSummary.EMPTY : sourceInventory.finish(overflowLogged[0]),
                 harvestGeneration, sourceEvidence == null ? VoxelSourceEvidence.UNAVAILABLE
-                        : sourceEvidence.finish(overflowLogged[0]), sourcePolicy.finish(overflowLogged[0]));
+                        : sourceEvidence.finish(overflowLogged[0]), sourcePolicy.finish(overflowLogged[0]), rtGeometry.finish());
     }
 
     /**

@@ -134,6 +134,16 @@ class SettingsApplyRouterTest {
     }
 
     @Test
+    void rayTracingChangeRoutesSaveOnly() {
+        FornaxSettings before = new FornaxSettings();
+        before.rayTracing = RayTracingMode.AUTO;
+        FornaxSettings after = new FornaxSettings();
+        after.rayTracing = RayTracingMode.FORCE;
+
+        assertEquals(Set.of(Action.SAVE_ONLY), SettingsApplyRouter.route(before, after));
+    }
+
+    @Test
     void metalHudEnabledRoutesSaveOnlyAndApply() {
         FornaxSettings before = new FornaxSettings();
         before.metalHud = false;

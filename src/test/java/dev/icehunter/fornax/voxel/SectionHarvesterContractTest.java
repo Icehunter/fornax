@@ -23,6 +23,16 @@ class SectionHarvesterContractTest {
                 "SectionHarvester must call VoxelModelShape.reconstruct to get a PARTIAL cell's rendered boxes");
     }
 
+    /** The RT supplement is reached by the same background harvest, even when RT is disabled.
+     * This pins that helper too; checking only the entrypoint cannot detect an indirect callback. */
+    @Test void rtSupplementCannotInvokeLiveModelEmissionFromBackgroundHarvest() throws IOException {
+        String source = Files.readString(SOURCE.resolveSibling("RtSectionGeometry.java"));
+        assertFalse(source.contains(".emitQuads("),
+                "RT metadata collection must not invoke live model emission on the harvest worker");
+        assertFalse(source.contains("Renderer.get("),
+                "Background harvest must not borrow a live renderer to collect RT geometry");
+    }
+
     @Test void neverReintroducesTheLiveModelEmissionPath() throws IOException {
         String source = Files.readString(SOURCE);
         assertFalse(source.contains("VoxelModelShape.Resolver"),

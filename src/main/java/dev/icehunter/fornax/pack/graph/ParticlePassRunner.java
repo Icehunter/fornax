@@ -21,6 +21,7 @@ import dev.icehunter.fornax.pack.layout.RuntimeShaderPack;
 import dev.icehunter.fornax.pass.compute.ComputeShaderCompiler;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import dev.icehunter.fornax.pass.particle.ParticlePipelineBuilder;
+import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pipeline.FramePacing;
 import dev.icehunter.fornax.pipeline.GBuffer;
@@ -254,7 +255,8 @@ public final class ParticlePassRunner implements AutoCloseable {
         if (name.equals(ComputePassRunner.PACK_OPTIONS_INPUT) || name.equals(GLOBALS_INPUT)) {
             return VK13.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         }
-        if (GraphValidator.BUILTINS.contains(name) || ShadowMapManager.isShadowMapRef(name)) {
+        if (GraphValidator.BUILTINS.contains(name) || ShadowMapManager.isShadowMapRef(name)
+                || RtShadowResult.isRtShadowRef(name)) {
             return VK13.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         }
         if (registry.getBuffer(name) != null) {

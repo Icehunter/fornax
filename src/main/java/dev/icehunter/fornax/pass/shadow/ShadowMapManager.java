@@ -17,6 +17,11 @@ import org.jspecify.annotations.Nullable;
  * {@link #getView()} from {@link dev.icehunter.fornax.pass.shadow.ShadowCamera}'s light matrices; a
  * pack's resolve shader then samples it via {@code sunShadowMap}.
  *
+ * <p>Packs declaring {@link #ENTITY_TARGET} also receive an independent entity-only depth target.
+ * It shares the light projection, resolution and unused color attachment, but never the combined
+ * map's terrain depth. Existing entity shadow draws replay their GPU buffers into it before the
+ * graph runs; packs choose how to combine that signal with their terrain visibility.
+ *
  * <p>Deliberately NOT a {@code TargetRegistry} target, for three independent reasons: {@code
  * TargetRegistry}'s {@code TargetFormat} enum carries only color formats ({@code
  * TargetRegistry.gpuFormat}: rgba8/rgba16_snorm/rgba16f/rg16f/r8/r32f, no depth format); its sizing
@@ -65,6 +70,13 @@ public final class ShadowMapManager {
      */
     public static final String TARGET = "sunShadowMap";
 
+    /** Independent entity-only depth, with the same projection and comparison sampler as TARGET.
+     * Terrain never writes or depth-tests this target; a pack can replace terrain shadows while
+     * retaining casters absent from its alternative terrain representation. */
+    public static final String ENTITY_TARGET = "sunEntityShadowMap";
+    /** Raw sampler alias for the independent entity depth; texel-wise caster composition. */
+    public static final String ENTITY_RAW_TARGET = "sunEntityShadowMapRaw";
+
     /**
      * Second pack-visible name for the SAME depth target as {@link #TARGET} -- resolves to the
      * identical texture/view, differing only in which sampler {@code FullscreenPassRunner} binds it
@@ -86,15 +98,12 @@ public final class ShadowMapManager {
     public static final String RAW_TARGET = "sunShadowMapRaw";
 
     /**
-     * True for either pack-visible name resolving to this engine-owned depth target. {@link #TARGET}
-     * and {@link #RAW_TARGET} share resolution, lifecycle, and history-slot rules (see {@link
-     * #TARGET}'s own doc) -- every site that resolves, validates, or classifies a shadow-map input
-     * reference (rather than picking its sampler) should go through this, not a direct {@code
-     * .equals(TARGET)} check, or the raw alias will fail to resolve/validate even though it is a
-     * legal input.
+     * Recognizes the combined depth, its raw alias and the independent entity depth. All share
+     * resolution, lifecycle and no-history rules. Resolver/validator/classification sites must
+     * recognize the whole set; sampler selection distinguishes the raw alias separately.
      */
     public static boolean isShadowMapRef(String ref) {
-        return ref.equals(TARGET) || ref.equals(RAW_TARGET);
+        return ref.equals(TARGET) || ref.equals(RAW_TARGET) || ref.equals(ENTITY_TARGET) || ref.equals(ENTITY_RAW_TARGET);
     }
 
     @Nullable
@@ -105,7 +114,27 @@ public final class ShadowMapManager {
     private static volatile GpuTexture dummyColorTexture;
     @Nullable
     private static volatile GpuTextureView dummyColorView;
+    @Nullable
+    private static volatile GpuTexture entityTexture;
+    @Nullable
+    private static volatile GpuTextureView entityView;
+    private static boolean entityMapRequested;
+    private static boolean entityOnlyPhase;
     private static int resolution = -1;
+
+    /** Set at graph rebuild from declared inputs, before any frame can resolve the target. */
+    public static void setEntityMapRequested(boolean requested) {
+        entityMapRequested = requested;
+    }
+
+    /** Render-thread routing for a second draw of already prepared shadow geometry. */
+    public static boolean isEntityOnlyPhase() {
+        return entityOnlyPhase;
+    }
+
+    public static void setEntityOnlyPhase(boolean value) {
+        entityOnlyPhase = value;
+    }
 
     private ShadowMapManager() {
     }
@@ -117,7 +146,11 @@ public final class ShadowMapManager {
      * requested resolution matches the current instance.
      */
     public static void ensureSize(int resolution) {
-        if (texture != null && ShadowMapManager.resolution == resolution) {
+        // A declared consumer still needs its descriptor with RT off or unsupported hardware.
+        // Packs without that input must not reserve a full float32 RT map.
+        if (RtShadowResult.sunDepthRequested()) RtShadowResult.ensureSunSize(resolution);
+        if (texture != null && ShadowMapManager.resolution == resolution
+                && (entityTexture != null) == entityMapRequested) {
             return;
         }
 
@@ -138,6 +171,8 @@ public final class ShadowMapManager {
         GpuTextureView nextView = null;
         GpuTexture nextDummyColorTexture = null;
         GpuTextureView nextDummyColorView = null;
+        GpuTexture nextEntityTexture = null;
+        GpuTextureView nextEntityView = null;
         try {
             nextTexture = device.createTexture("Fornax Sun Shadow Map",
                     GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
@@ -154,6 +189,16 @@ public final class ShadowMapManager {
             // itself).
             device.createCommandEncoder().clearDepthTexture(nextTexture, 1.0f);
 
+            if (entityMapRequested) {
+                nextEntityTexture = device.createTexture("Fornax Entity Sun Shadow Map",
+                        GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING
+                                | GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_COPY_SRC,
+                        GpuFormat.D32_FLOAT, resolution, resolution, 1, 1);
+                nextEntityView = device.createTextureView(nextEntityTexture);
+                // Same forward-Z light projection as the combined map: far/empty is one.
+                device.createCommandEncoder().clearDepthTexture(nextEntityTexture, 1.0f);
+            }
+
             // See this class's javadoc: a real, unread RGBA8_UNORM color attachment matching the
             // shadow pipeline's Blaze3D-forced single ColorTargetState.DEFAULT, required only to
             // keep RenderPass.setPipeline's attachment-count invariant satisfied. Same resolution as
@@ -166,6 +211,8 @@ public final class ShadowMapManager {
                     GpuFormat.RGBA8_UNORM, resolution, resolution, 1, 1);
             nextDummyColorView = device.createTextureView(nextDummyColorTexture);
         } catch (RuntimeException e) {
+            if (nextEntityView != null) nextEntityView.close();
+            if (nextEntityTexture != null) nextEntityTexture.close();
             if (nextDummyColorView != null) nextDummyColorView.close();
             if (nextDummyColorTexture != null) nextDummyColorTexture.close();
             if (nextView != null) nextView.close();
@@ -177,13 +224,18 @@ public final class ShadowMapManager {
         GpuTextureView oldView = view;
         GpuTexture oldDummyColorTexture = dummyColorTexture;
         GpuTextureView oldDummyColorView = dummyColorView;
+        GpuTexture oldEntityTexture = entityTexture;
+        GpuTextureView oldEntityView = entityView;
         texture = nextTexture;
         view = nextView;
         dummyColorTexture = nextDummyColorTexture;
         dummyColorView = nextDummyColorView;
+        entityTexture = nextEntityTexture;
+        entityView = nextEntityView;
         ShadowMapManager.resolution = resolution;
 
-        if (oldView != null || oldTexture != null || oldDummyColorView != null || oldDummyColorTexture != null) {
+        if (oldView != null || oldTexture != null || oldDummyColorView != null
+                || oldDummyColorTexture != null || oldEntityTexture != null) {
             // Live per-frame resize path (SHADOW_RESOLUTION change, or the shadows-off 64x64
             // fallback), reached every frame this pack is active from a mixin HEAD inject
             // (SodiumWorldRendererOrchestrationMixin#fornax$renderShadowPass) on the SAME live
@@ -207,6 +259,13 @@ public final class ShadowMapManager {
             oldDummyColorTexture.close();
         }
 
+        if (oldEntityView != null) {
+            oldEntityView.close();
+        }
+        if (oldEntityTexture != null) {
+            oldEntityTexture.close();
+        }
+
         FornaxMod.LOGGER.info("[ShadowMap] (Re)built at {}x{}", resolution, resolution);
     }
 
@@ -223,6 +282,24 @@ public final class ShadowMapManager {
         }
         RenderSystem.getDevice().createCommandEncoder()
                 .clearDepthTexture(current, 1.0f);
+    }
+
+    /** Cleared every frame, including disabled shadows, so the optional input never goes stale. */
+    public static void clearEntity() {
+        GpuTexture current = entityTexture;
+        if (current != null) {
+            RenderSystem.getDevice().createCommandEncoder().clearDepthTexture(current, 1.0f);
+        }
+    }
+
+    @Nullable
+    public static GpuTextureView getEntityView() {
+        return entityView;
+    }
+
+    @Nullable
+    public static GpuTexture getEntityTexture() {
+        return entityTexture;
     }
 
     @Nullable
@@ -252,10 +329,16 @@ public final class ShadowMapManager {
         GpuTexture currentTexture = texture;
         GpuTextureView currentDummyColorView = dummyColorView;
         GpuTexture currentDummyColorTexture = dummyColorTexture;
+        GpuTextureView currentEntityView = entityView;
+        GpuTexture currentEntityTexture = entityTexture;
         view = null;
         texture = null;
         dummyColorView = null;
         dummyColorTexture = null;
+        entityView = null;
+        entityTexture = null;
+        entityMapRequested = false;
+        entityOnlyPhase = false;
         resolution = -1;
 
         if (currentView != null) {
@@ -263,6 +346,12 @@ public final class ShadowMapManager {
         }
         if (currentTexture != null) {
             currentTexture.close();
+        }
+        if (currentEntityView != null) {
+            currentEntityView.close();
+        }
+        if (currentEntityTexture != null) {
+            currentEntityTexture.close();
         }
         if (currentDummyColorView != null) {
             currentDummyColorView.close();

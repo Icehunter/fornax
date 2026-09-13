@@ -6,6 +6,7 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.icehunter.fornax.atlas.BlockAtlasView;
 import dev.icehunter.fornax.atlas.BlockAtlasOverflow;
 import dev.icehunter.fornax.atlas.LabPbrNeutralTextures;
+import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
 import dev.icehunter.fornax.pipeline.CelestialSprites;
@@ -47,6 +48,10 @@ import java.util.Map;
  * WaterSurfaceManager}'s live instance the same nullable way as the shadow map -- both are written
  * at the OPAQUE stage HEAD (before {@code OpaqueDepth}'s own mid-{@code finish()} capture), so
  * unlike {@code builtin.depth_opaque} they carry no {@code PassType} restriction.
+ * {@link RtShadowResult#TARGET}/{@link RtShadowResult#VALID_TARGET} ({@code rtSunVisibility}/
+ * {@code rtSunValid}) resolve against {@link RtShadowResult}'s live instance the same nullable way
+ * as the shadow map. They are not {@code builtin.}-prefixed: like {@link ShadowMapManager#TARGET}
+ * they are engine-owned but not G-buffer attachments.
  *
  * <p>A {@code mipchainTargets} map is threaded through separately from {@link TargetRegistry}:
  * {@link MipchainRunner} owns its own multi-level texture independently of the registry (a pack
@@ -189,8 +194,13 @@ final class GraphInputResolver {
             // doc for why a second name exists (a different sampler downstream, not a different
             // resource here).
             case ShadowMapManager.TARGET, ShadowMapManager.RAW_TARGET -> ShadowMapManager.getView();
+            case ShadowMapManager.ENTITY_TARGET -> ShadowMapManager.getEntityView();
+            case ShadowMapManager.ENTITY_RAW_TARGET -> ShadowMapManager.getEntityView();
             case WaterSurfaceManager.NORMAL_NAME -> WaterSurfaceManager.getNormalView();
             case WaterSurfaceManager.DEPTH_NAME -> WaterSurfaceManager.getDepthView();
+            case RtShadowResult.TARGET -> RtShadowResult.getVisibilityView();
+            case RtShadowResult.VALID_TARGET -> RtShadowResult.getValidView();
+            case RtShadowResult.DEPTH_TARGET -> RtShadowResult.getDepthView();
             default -> null;
         };
     }
@@ -231,8 +241,13 @@ final class GraphInputResolver {
             case "builtin.noise" -> NoiseTexture.getTexture();
             case OpaqueDepth.NAME -> GraphRunner.opaqueDepth().getTexture();
             case ShadowMapManager.TARGET, ShadowMapManager.RAW_TARGET -> ShadowMapManager.getTexture();
+            case ShadowMapManager.ENTITY_TARGET -> ShadowMapManager.getEntityTexture();
+            case ShadowMapManager.ENTITY_RAW_TARGET -> ShadowMapManager.getEntityTexture();
             case WaterSurfaceManager.NORMAL_NAME -> WaterSurfaceManager.getNormalTexture();
             case WaterSurfaceManager.DEPTH_NAME -> WaterSurfaceManager.getDepthTexture();
+            case RtShadowResult.TARGET -> RtShadowResult.getVisibilityTexture();
+            case RtShadowResult.VALID_TARGET -> RtShadowResult.getValidTexture();
+            case RtShadowResult.DEPTH_TARGET -> RtShadowResult.getDepthTexture();
             default -> null;
         };
     }

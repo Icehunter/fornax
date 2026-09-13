@@ -113,7 +113,9 @@ public final class SettingsApplyRouter {
                 || before.frameGenMode != after.frameGenMode
                 || before.metalHud != after.metalHud
                 || before.voxelReachIgnoresRenderDistance != after.voxelReachIgnoresRenderDistance
-                || before.sunPathRotation != after.sunPathRotation;
+                || before.sunPathRotation != after.sunPathRotation
+                || before.rayTracing != after.rayTracing
+                || before.rtDebugMode != after.rtDebugMode;
         boolean resourceReloadNeeded = before.sidecarMapResolution != after.sidecarMapResolution;
         boolean anythingChanged = packReapplyNeeded || plainSaveNeeded || resourceReloadNeeded;
         // AUTO<->ALWAYS deliberately does NOT deactivate: FrameGenPacer reads the mode live every

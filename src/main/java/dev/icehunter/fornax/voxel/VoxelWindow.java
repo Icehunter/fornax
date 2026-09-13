@@ -9,6 +9,7 @@ import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -272,6 +273,66 @@ public final class VoxelWindow {
         return state;
     }
 
+    /** A snapshot of every populated slot's owning section, for a consumer that needs the CPU-side
+     * slot -> section mapping directly (currently the Metal ray-tracing pass's per-slot instance
+     * placement) rather than testing one section at a time through {@link #hasValidData}. Two
+     * checks, both required: the recorded owner still maps back to this same slot under the CURRENT
+     * window geometry (what keeps a slot's owner record from a shell the window has since moved past
+     * out of the snapshot), and {@link #slotIsValid}, the exact three-leg test {@link
+     * #hasValidData} runs, so a shell-cleared slot (owner record retained, geometry validity
+     * revoked) is dropped here too. Empty before the window is populated. */
+    public static Map<Integer, SectionPos> populatedSlotSections() {
+        WindowState local = state;
+        Map<Integer, SectionPos> sections = new HashMap<>();
+        for (int slot : populatedSlots) {
+            SectionPos owner = slotOwner.get(slot);
+            if (owner != null && slotFor(local, owner.x(), owner.y(), owner.z()) == slot
+                    && slotIsValid(slot, owner)) {
+                sections.put(slot, owner);
+            }
+        }
+        return sections;
+    }
+
+    /** Whether this exact section has current, GPU-committed geometry. Missing sections are
+     * unknown, including air that has never been read; a completed empty harvest is ready.
+     * Callers may retain SHARED_QUEUE_LOCK across this check and their corresponding data copy. */
+    public static boolean isGeometryReady(SectionPos owner) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            int slot = slotFor(owner.x(), owner.y(), owner.z());
+            if (slot < 0 || !slotIsValid(slot, owner)) return false;
+            Long committed = slotCommittedReadRevision.get(slot);
+            return committed != null && committed.equals(slotReadRevision.get(slot))
+                    && committed == meshRevisionAt(owner);
+        }
+    }
+
+    /** The CPU result matching a ready source slot, or null while missing/reowned/uncommitted.
+     * Consumers must capture this under the same SHARED_QUEUE_LOCK scope as their GPU metadata
+     * copy: looking it up later could pair a newer CPU result with older copied palette bytes. */
+    public static SectionHarvester.@Nullable Result committedSectionData(int sourceSlot, SectionPos owner) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            if (slotFor(owner.x(), owner.y(), owner.z()) != sourceSlot || !isGeometryReady(owner)) return null;
+            return slotData.get(sourceSlot);
+        }
+    }
+
+    /** True until every section in this finite domain has current, GPU-committed geometry.
+     * Missing/unloaded sections are unknown, not empty; a pending CPU harvest cannot certify light.
+     * Caller may hold SHARED_QUEUE_LOCK across this check and its snapshot copy. */
+    public static boolean hasPendingGeometry(WindowState domain) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            for (int y = domain.centerY() - domain.radius(); y <= domain.centerY() + domain.radius(); y++) {
+                for (int z = domain.centerZ() - domain.radius(); z <= domain.centerZ() + domain.radius(); z++) {
+                    for (int x = domain.centerX() - domain.radius(); x <= domain.centerX() + domain.radius(); x++) {
+                        if (!isGeometryReady(SectionPos.of(x, y, z))) return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
     /** Dedicated single background thread that runs the shell enumeration + per-section harvest + GPU
      * upload that {@link #recenterAndResync} dispatches off the render thread. A single thread is
      * deliberate: it serializes all resync tasks against each other in submission order with no extra
@@ -478,13 +539,24 @@ public final class VoxelWindow {
         if (slot < 0) {
             return false;
         }
-        SectionPos expected = SectionPos.of(sectionX, sectionY, sectionZ);
+        return slotIsValid(slot, SectionPos.of(sectionX, sectionY, sectionZ));
+    }
+
+    /** The three checks {@link #hasValidData} and {@link #populatedSlotSections} both need, factored
+     * out so they cannot drift apart: {@code slot} is currently populated, its recorded owner is
+     * exactly {@code owner}, and, when diagnostic section metadata is enabled, that metadata still
+     * agrees {@code owner} holds {@code slot}. A shell clear retains the CPU owner record in {@link
+     * #slotOwner} but revokes this third leg (see {@code VoxelSectionState.invalidate}), which is
+     * exactly the case this method exists to catch; light ownership is tracked separately. Does not
+     * itself check that {@code owner} maps back to {@code slot} under the live window geometry:
+     * {@link #hasValidData} bakes that into how it derives {@code slot} from {@code owner}'s own
+     * coordinates before calling this; {@link #populatedSlotSections} checks it separately since it
+     * starts from the slot rather than the section. */
+    private static boolean slotIsValid(int slot, SectionPos owner) {
         TargetRegistry r = registry;
-        // A shell clear retains the CPU owner record but revokes geometry validity,
-        // including with diagnostic metadata off. Light ownership is tracked separately.
-        return populatedSlots.contains(slot) && expected.equals(slotOwner.get(slot))
+        return populatedSlots.contains(slot) && owner.equals(slotOwner.get(slot))
                 && (r == null || !sectionMetadataEnabled(r)
-                    || sectionStates.hasOwner(slot, expected));
+                    || sectionStates.hasOwner(slot, owner));
     }
 
     public static void onSectionHarvested(SectionPos position, SectionHarvester.Result result) {
@@ -877,6 +949,9 @@ public final class VoxelWindow {
         lightUpdates.meshPublished(position);
         slotOwner.put(slot, position);
         slotData.put(slot, result);
+        // A new read (including a same-revision refill or wrapped owner) needs its own upload.
+        // Retaining the old completion would certify CPU content the GPU has never received.
+        slotCommittedReadRevision.remove(slot);
         slotReadRevision.put(slot, meshRevisionAt(position));
         if (sourceWindow != null) sourceWindow.pending(slot);
         populatedSlots.add(slot); // harvest publish -- see the field's own doc

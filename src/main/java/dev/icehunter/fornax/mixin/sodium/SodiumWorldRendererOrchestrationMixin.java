@@ -6,6 +6,7 @@ import dev.icehunter.fornax.pack.layout.PackOptionsBuffer;
 import dev.icehunter.fornax.pass.shadow.ShadowCamera;
 import dev.icehunter.fornax.pass.shadow.ShadowCasterLists;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
+import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
 import dev.icehunter.fornax.pipeline.CameraMotionState;
@@ -117,9 +118,42 @@ public class SodiumWorldRendererOrchestrationMixin {
             CameraMotionState.commit(x, y, z);
             LocalActorFrameState.commitFromClient();
             GraphRunner.prepare(matrices, x, y, z);
+            fornax$ensureRtShadowResultTargets();
             fornax$renderShadowPass(matrices, x, y, z, terrainSampler);
             fornax$renderWaterPrepass(matrices, x, y, z, terrainSampler);
         }
+    }
+
+    /**
+     * Builds {@link RtShadowResult}'s pair of render-resolution targets every frame the graph is
+     * active, no matter the ray tracing setting or platform support. {@code rtSunVisibility} and
+     * {@code rtSunValid} are pack-visible builtin input names a resolve shader can declare at any
+     * time (the same descriptor-stays-valid, content-changes shape as {@code sunShadowMap}; see
+     * {@link #fornax$renderShadowPass}'s own SHADOWS-off doc). {@code GraphInputResolver.resolveView}
+     * reads them every frame no matter what wrote them last, so an unallocated {@link
+     * RtShadowResult} on any frame throws "Fornax graph: input 'rtSunVisibility' resolved to no
+     * allocated target" and disables the referencing pass for the rest of the session.
+     *
+     * <p>Not gated on {@code FornaxConfig.get().rayTracing} or {@code Objc.PLATFORM_SUPPORTED},
+     * unlike {@code MetalRtShadowPass.runIfEnabled}'s own call site in {@code GameRendererMixin}.
+     * That pass only writes a real trace result into these targets when ray tracing is available;
+     * the targets themselves must resolve on every platform, so a pack can read {@code rtSunValid}
+     * and fall back to its own non-RT shadow with no pack-side branching. {@link
+     * RtShadowResult#ensureSize} clears both to zero at allocation and does nothing once the
+     * requested size already matches, so calling it every frame costs nothing once the size settles.
+     *
+     * <p>Sized to the live render resolution, the same width and height basis as {@link
+     * #fornax$renderWaterPrepass}'s {@code WaterSurfaceManager} call: a screen-space trace result is
+     * one sample per rendered pixel, not a pack-configured square resolution like {@link
+     * ShadowMapManager}.
+     */
+    private void fornax$ensureRtShadowResultTargets() {
+        if (!GraphRunner.isActive()) {
+            return;
+        }
+        int width = Minecraft.getInstance().gameRenderer.mainRenderTarget().width;
+        int height = Minecraft.getInstance().gameRenderer.mainRenderTarget().height;
+        RtShadowResult.ensureSize(width, height);
     }
 
     /**
@@ -235,6 +269,7 @@ public class SodiumWorldRendererOrchestrationMixin {
             // anywhere", which is semantically correct for shadows-off and is never actually sampled
             // since the shader-side #ifdef compiles that read out.
             ShadowMapManager.ensureSize(64);
+            ShadowMapManager.clearEntity();
             return;
         }
 
@@ -251,6 +286,7 @@ public class SodiumWorldRendererOrchestrationMixin {
                 : FALLBACK_SHADOW_DISTANCE_BLOCKS;
 
         ShadowMapManager.ensureSize(resolution);
+        ShadowMapManager.clearEntity();
 
         // The pack gated its shadow-caster pass off here, so skip the clear, the camera and the
         // draws. After ensureSize, never instead of it: the map keeps the size it had. Sizing it
