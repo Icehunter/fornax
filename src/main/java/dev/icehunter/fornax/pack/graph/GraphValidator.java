@@ -5,6 +5,7 @@ import dev.icehunter.fornax.pack.GeometrySlot;
 import dev.icehunter.fornax.pack.GraphSpec;
 import dev.icehunter.fornax.pack.PassSpec;
 import dev.icehunter.fornax.pack.PassType;
+import dev.icehunter.fornax.pack.RayTracedShadowSpec;
 import dev.icehunter.fornax.pack.TargetSpec;
 import dev.icehunter.fornax.pack.option.OptionType;
 import dev.icehunter.fornax.pack.option.PackOption;
@@ -117,6 +118,7 @@ public final class GraphValidator {
 
     public static VramReport validate(GraphSpec graph, Map<String, PackOption> options,
                                       int renderWidth, int renderHeight, int outputWidth, int outputHeight) {
+        checkRayTracedShadows(graph.rayTracedShadows(), options);
         for (TargetSpec t : graph.targets().values()) {
             if (t.kind() == TargetKind.TEXTURE) {
                 TargetFormat.parse(t.format(), t.name(), FILE);
@@ -985,6 +987,38 @@ public final class GraphValidator {
         if (!targets.containsKey(ref)) {
             throw new FornaxPackError(FILE, "pass." + pass.name() + ".outputs",
                     "output '" + ref + "' references no declared target");
+        }
+    }
+
+    private static void checkRayTracedShadows(RayTracedShadowSpec spec, Map<String, PackOption> options) {
+        if (spec == null) return;
+        checkEnabledIf(spec.enabledIf(), options, "ray_traced_shadows.enabled_if");
+        String key = "ray_traced_shadows.distance_option";
+        PackOption radius = options.get(spec.distanceOption());
+        if (radius == null) {
+            throw new FornaxPackError(FILE, key, "unknown option '" + spec.distanceOption() + "'");
+        }
+        if (radius.type() != OptionType.RUNTIME || radius.isBoolean()) {
+            throw new FornaxPackError(FILE, key,
+                    "'" + spec.distanceOption() + "' must be a numeric runtime option");
+        }
+        boolean numeric = finiteNumber(radius.defaultValue())
+                && radius.allowedValues().stream().allMatch(GraphValidator::finiteNumber);
+        if (radius.range() != null) {
+            numeric &= Double.isFinite(radius.range().min()) && Double.isFinite(radius.range().max())
+                    && Double.isFinite(radius.range().step());
+        }
+        if (!numeric) {
+            throw new FornaxPackError(FILE, key,
+                    "'" + spec.distanceOption() + "' must contain only finite numeric values");
+        }
+    }
+
+    private static boolean finiteNumber(String value) {
+        try {
+            return Double.isFinite(Double.parseDouble(value));
+        } catch (NumberFormatException e) {
+            return false;
         }
     }
 

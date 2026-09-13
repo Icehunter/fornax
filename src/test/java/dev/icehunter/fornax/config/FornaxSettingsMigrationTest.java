@@ -222,6 +222,32 @@ class FornaxSettingsMigrationTest {
     }
 
     @Test
+    void savedLegacyRtDiagnosticsAreDisabledBeforeRenderingAtEverySchemaVersion() {
+        for (int version : new int[]{0, FornaxSettings.CURRENT_SCHEMA_VERSION}) {
+            for (String view : new String[]{"METAL_RT_SUN_MASK", "METAL_RT_SCENE_DEBUG"}) {
+                for (RtDebugMode mode : RtDebugMode.values()) {
+                    String json = "{\"schemaVersion\":%d,\"debugView\":\"%s\",\"rtDebugMode\":\"%s\"}"
+                            .formatted(version, view, mode.name());
+                    var result = FornaxSettings.migrate(new Gson().fromJson(json, FornaxSettings.class));
+                    assertEquals(GBufferDebugView.OFF, result.debugView);
+                    assertEquals(RtDebugMode.OFF, result.rtDebugMode);
+                }
+            }
+        }
+    }
+
+    @Test
+    void retiredSceneModeCannotRunBehindTheCurrentShadowCoverageView() {
+        var settings = new FornaxSettings();
+        settings.schemaVersion = FornaxSettings.CURRENT_SCHEMA_VERSION;
+        settings.debugView = GBufferDebugView.RT_SHADOW;
+        settings.rtDebugMode = RtDebugMode.HIT_MISS;
+        var result = FornaxSettings.migrate(settings);
+        assertEquals(GBufferDebugView.RT_SHADOW, result.debugView);
+        assertEquals(RtDebugMode.OFF, result.rtDebugMode);
+    }
+
+    @Test
     void migrationIsIdempotentAcrossRepeatedCalls() {
         FornaxSettings legacy = new FornaxSettings();
         legacy.schemaVersion = 0;

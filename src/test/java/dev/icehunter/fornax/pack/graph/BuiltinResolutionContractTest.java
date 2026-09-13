@@ -87,6 +87,10 @@ class BuiltinResolutionContractTest {
                         + " declared target or built-in'");
 
         String resolver = Files.readString(RESOLVER);
+        assertTrue(RtShadowResult.isRtShadowRef("rtTerrainShadowDepth"));
+        assertFalse(RtShadowResult.isLegacyRtShadowRef("rtTerrainShadowDepth"));
+        assertTrue(resolver.contains("case TerrainShadowResult.TARGET -> TerrainShadowResult.view()"));
+        assertTrue(resolver.contains("case TerrainShadowResult.TARGET -> TerrainShadowResult.texture()"));
         assertTrue(resolver.contains("RtShadowResult.TARGET"),
                 "GraphInputResolver has no case for RtShadowResult.TARGET (rtSunVisibility) -- a pack"
                         + " referencing it would load clean and then silently disable the referencing"

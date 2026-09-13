@@ -65,6 +65,50 @@ A frame is built by rendering into a series of off-screen images, each one readi
 the ones before it, until something finally writes to the screen. `graph.toml` declares both halves
 of that: the **targets** (the images) and the **passes** (the steps).
 
+### Ray-traced shadow ownership
+
+An optional graph-level table declares a celestial RT subscriber:
+
+```toml
+[ray_traced_shadows]
+enabled_if = "TRACE_ENABLED"
+distance_option = "u_TraceDistance"
+blocks_per_unit = 16
+filter_guard_texels = 0.0
+```
+
+The names are examples; declare your own options in shader source. `enabled_if` uses the same
+compile-expression rules as pass gates. `distance_option` must name a finite numeric runtime option.
+Its value multiplied by the positive integer `blocks_per_unit` (default `1`) gives horizontal
+camera-to-receiver distance in blocks. The effective distance is capped by the shadow camera's
+configured extent. `filter_guard_texels` is a finite nonnegative bound on the pack's largest shadow
+filter offset, including bilinear support (default zero for point sampling). Understating this guard
+can cause individual filter taps to fall back near the RT boundary. Unknown fields fail load.
+
+A declaration, an enabled consumer of `rtTerrainShadowDepth`, and an available selected backend are
+all required before terrain copies or tracing start. Consumer compile and per-frame gates apply.
+Automatic is the default engine backend policy; None disables RT, and the UI offers only supported,
+implemented explicit backends. GPU vendors are not separate RT APIs.
+
+`rtTerrainShadowDepth` is a read-only RGBA32F builtin at shadow-map resolution: R is nearest forward
+light depth (1 for a miss), A is current valid trace coverage, and G/B are reserved. Invalid A must
+select raster. Its descriptor exists with zero validity even when RT is unavailable. The target is
+separate from the older voxel-based `rtSunDepth`; reading the mesh result never requests that pass.
+
+The caster scene includes accepted SOLID/CUTOUT meshes throughout the relevant loaded light volume,
+including blockers outside the receiving distance. Final uploaded atlas UVs preserve connected
+textures; model emission and voxel harvesting are not part of this path. Only light rays reaching
+the receiving region plus filter support need traversal, but each traces the full light-depth span.
+A narrow receiving-distance transition belongs to the pack, evaluated at the actual world sample
+position (including water, reflected surfaces and fog). The pack unions RT terrain depth with
+`sunEntityShadowMapRaw` before filtering. `sunShadowMap`/`sunShadowMapRaw` retain complete raster
+terrain and entities for distant receivers and fallback. Cloud-volume transmission remains separate.
+
+The profiler values `rt_shadow_distance_blocks` and `rt_shadow_meshes` report active mesh RT coverage;
+zero distance means raster fallback. The backend does not remove nearby raster casters, since those
+can shadow distant receivers. Distance reduces eligible RT rays, not all BVH maintenance or raster
+cost. The old voxel debug scene requires its own active pack subscriber and is not the mesh result.
+
 ### Targets
 
 A target is an off-screen image the engine allocates for you.

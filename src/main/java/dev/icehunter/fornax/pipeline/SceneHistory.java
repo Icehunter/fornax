@@ -60,7 +60,7 @@ public final class SceneHistory {
         }
         Map<String, TargetSpec> targets = new LinkedHashMap<>(graph.targets());
         targets.put(TARGET, spec());
-        return new GraphSpec(targets, graph.textures(), graph.passes());
+        return new GraphSpec(targets, graph.textures(), graph.passes(), graph.rayTracedShadows());
     }
 
     /**

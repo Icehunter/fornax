@@ -101,6 +101,10 @@ public final class RtShadowResult {
      * through this, not a direct {@code .equals(TARGET)}/{@code .equals(VALID_TARGET)} check,
      * mirroring {@link ShadowMapManager#isShadowMapRef}. */
     public static boolean isRtShadowRef(String ref) {
+        return ref.equals(TerrainShadowResult.TARGET) || isLegacyRtShadowRef(ref);
+    }
+
+    public static boolean isLegacyRtShadowRef(String ref) {
         return ref.equals(TARGET) || ref.equals(VALID_TARGET) || ref.equals(DEPTH_TARGET);
     }
 

@@ -49,7 +49,8 @@ public final class PackTomlLoader {
 
     public static GraphSpec loadGraph(Reader reader, String file) {
         Config root = parse(reader, file);
-        TomlSupport.rejectUnknownKeys(root, Set.of("targets", "textures", "pass"), file);
+        TomlSupport.rejectUnknownKeys(root, Set.of("targets", "textures", "pass", "ray_traced_shadows"), file);
+        RayTracedShadowSpec rayTracedShadows = parseRayTracedShadows(root, file);
         Map<String, TargetSpec> targets = new LinkedHashMap<>();
         if (root.contains("targets")) {
             Config t = requireTable(root.get("targets"), "targets", file);
@@ -237,7 +238,50 @@ public final class PackTomlLoader {
                         parseComputeReuse(p, type, name, file)));
             }
         }
-        return new GraphSpec(targets, textures, passes);
+        return new GraphSpec(targets, textures, passes, rayTracedShadows);
+    }
+
+    private static @Nullable RayTracedShadowSpec parseRayTracedShadows(Config root, String file) {
+        String key = "ray_traced_shadows";
+        if (!root.contains(key)) return null;
+        Config spec = requireTable(root.get(key), key, file);
+        Set<String> fields = Set.of("enabled_if", "distance_option", "blocks_per_unit", "filter_guard_texels");
+        for (Config.Entry entry : spec.entrySet()) {
+            if (!fields.contains(entry.getKey())) {
+                throw new FornaxPackError(file, key + "." + entry.getKey(),
+                        "unknown key '" + entry.getKey() + "'");
+            }
+        }
+        String enabledIf = TomlSupport.requireString(root, key + ".enabled_if", file);
+        String distanceOption = TomlSupport.requireString(root, key + ".distance_option", file);
+        if (enabledIf.isBlank()) {
+            throw new FornaxPackError(file, key + ".enabled_if", "must not be empty");
+        }
+        if (distanceOption.isBlank()) {
+            throw new FornaxPackError(file, key + ".distance_option", "must not be empty");
+        }
+        // Identity conversion: an omitted unit scale measures the radius directly in blocks.
+        int blocksPerUnit = 1;
+        String unitsKey = key + ".blocks_per_unit";
+        if (root.contains(unitsKey)) {
+            try {
+                blocksPerUnit = TomlSupport.requireInt(root, unitsKey, file);
+            } catch (ArithmeticException e) {
+                throw new FornaxPackError(file, unitsKey, "integer is out of range");
+            }
+            if (blocksPerUnit <= 0) {
+                throw new FornaxPackError(file, unitsKey, "must be a positive integer");
+            }
+        }
+        float filterGuard = 0;
+        String guardKey = key + ".filter_guard_texels";
+        if (root.contains(guardKey)) {
+            Object value = root.get(guardKey);
+            if (!(value instanceof Number number) || !Float.isFinite(number.floatValue()) || number.floatValue() < 0)
+                throw new FornaxPackError(file, guardKey, "must be a finite nonnegative number");
+            filterGuard = number.floatValue();
+        }
+        return new RayTracedShadowSpec(enabledIf, distanceOption, blocksPerUnit, filterGuard);
     }
 
     private static ComputeReuseSpec parseComputeReuse(Config pass, PassType type, String name, String file) {

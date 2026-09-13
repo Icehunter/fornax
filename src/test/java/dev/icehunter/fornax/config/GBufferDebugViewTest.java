@@ -44,6 +44,7 @@ class GBufferDebugViewTest {
         // see gbuffer_resolve.fsh's "debugView == 12" branch. Not the last value: the HDR+bloom
         // milestone appended three terminal-pass (tonemap.fsh) views after it.
         assertEquals(12, GBufferDebugView.RT_SHADOW.ordinal());
+        assertEquals("RT shadow coverage", GBufferDebugView.RT_SHADOW.label());
     }
 
     @Test
@@ -252,9 +253,9 @@ class GBufferDebugViewTest {
         // so nothing earlier shifts. METAL_RT_SCENE_DEBUG is appended right after this one; see
         // metalRtSceneDebugIsAppendedLast below for the current values().length.
         assertEquals(52, GBufferDebugView.METAL_RT_SUN_MASK.ordinal());
-        assertTrue(GBufferDebugView.METAL_RT_SUN_MASK.isSelectable(),
-                "MetalRtDebugPass is hooked and presents every frame; the cycle must reach it");
-        assertEquals("Metal RT sun mask", GBufferDebugView.METAL_RT_SUN_MASK.label());
+        assertFalse(GBufferDebugView.METAL_RT_SUN_MASK.isSelectable(),
+                "retired diagnostics must stay out of settings and keyboard cycling");
+        assertEquals("Legacy voxel RT sun mask", GBufferDebugView.METAL_RT_SUN_MASK.label());
         // No shader branch id: this view bypasses gbuffer_resolve.fsh/tonemap.fsh entirely, same
         // as WATER_PREPASS, so it falls back to the default (ordinal) shaderId and empty
         // graphTargetCandidates rather than colliding with a resolve-branched id.
@@ -270,9 +271,9 @@ class GBufferDebugViewTest {
         // Appended right after it, so nothing earlier shifts.
         assertEquals(53, GBufferDebugView.METAL_RT_SCENE_DEBUG.ordinal());
         assertEquals(54, GBufferDebugView.values().length);
-        assertTrue(GBufferDebugView.METAL_RT_SCENE_DEBUG.isSelectable(),
-                "MetalRtDebugPass is hooked and presents every frame; the cycle must reach it");
-        assertEquals("Metal RT scene debug", GBufferDebugView.METAL_RT_SCENE_DEBUG.label());
+        assertFalse(GBufferDebugView.METAL_RT_SCENE_DEBUG.isSelectable(),
+                "retired diagnostics must stay out of settings and keyboard cycling");
+        assertEquals("Legacy voxel RT scene", GBufferDebugView.METAL_RT_SCENE_DEBUG.label());
         assertEquals(GBufferDebugView.METAL_RT_SCENE_DEBUG.ordinal(),
                 GBufferDebugView.METAL_RT_SCENE_DEBUG.shaderId());
         assertTrue(GBufferDebugView.METAL_RT_SCENE_DEBUG.graphTargetCandidates().isEmpty());

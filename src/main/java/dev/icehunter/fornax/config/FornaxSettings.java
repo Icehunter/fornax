@@ -37,24 +37,17 @@ public class FornaxSettings {
     public GBufferDebugView debugView = GBufferDebugView.OFF;
 
     /**
-     * Whether the Metal ray tracing sun-shadow pass may run, checked by the Metal RT probe
-     * alongside the device's own reported capability. macOS/Apple Silicon only.
+     * Engine ray tracing backend: Automatic (default), None, or Metal RT. The persisted enum names
+     * AUTO/OFF/FORCE remain compatible with older configuration files. This selects a supported
+     * API; it does no rendering work unless the active pack subscribes to a ray tracing feature.
      *
-     * <p>Defaults to {@link RayTracingMode#AUTO} rather than {@code OFF}: the pass fails closed on
-     * every platform and hardware tier that cannot run it, so a default that only takes effect
-     * where it is already known to work costs nothing on hardware that does not qualify.
+     * <p>Metal RT is currently the only implemented backend, on macOS/Apple Silicon. Automatic
+     * uses the device's reported capability, with normal pack fallback when none is available.
      */
     public RayTracingMode rayTracing = RayTracingMode.AUTO;
 
-    /**
-     * Which coloring mode the Metal ray tracing scene-debug dispatch uses, checked alongside {@link
-     * #debugView}'s {@code METAL_RT_SCENE_DEBUG} entry. macOS/Apple Silicon only, same gate as
-     * {@link #rayTracing}.
-     *
-     * <p>Defaults to {@link RtDebugMode#OFF}: unlike {@link #rayTracing}, this dispatch is a
-     * debugging aid rather than a real shadow contribution, so it stays off until a mode is
-     * explicitly picked rather than defaulting on wherever the hardware allows it.
-     */
+    /** Serialized compatibility field only. Migration disables every retired scene-debug mode
+     * before settings reach the renderer; no settings control exposes it. */
     public RtDebugMode rtDebugMode = RtDebugMode.OFF;
 
     /**
@@ -250,7 +243,8 @@ public class FornaxSettings {
         }
         // Gson maps persisted enum names that no longer exist to null. Keep old config files safe
         // across diagnostic-view removals before render code calls debugView.shaderId().
-        if (settings.debugView == null) {
+        if (settings.debugView == null || settings.debugView == GBufferDebugView.METAL_RT_SUN_MASK
+                || settings.debugView == GBufferDebugView.METAL_RT_SCENE_DEBUG) {
             settings.debugView = GBufferDebugView.OFF;
         }
         if (settings.schemaVersion < 4) {
@@ -282,13 +276,8 @@ public class FornaxSettings {
         if (settings.rayTracing == null) {
             settings.rayTracing = RayTracingMode.AUTO;
         }
-        // Same reasoning as rayTracing above: a removed RtDebugMode constant maps to null at any
-        // persisted version, and a file written before this field existed has no key for it at
-        // all, which Gson resolves to the class's own field initializer (OFF), not null. So this
-        // guard only fires for an explicit null, meaning a genuinely removed constant.
-        if (settings.rtDebugMode == null) {
-            settings.rtDebugMode = RtDebugMode.OFF;
-        }
+        // An invisible persisted mode must never keep its diagnostic dispatch enabled.
+        settings.rtDebugMode = RtDebugMode.OFF;
         settings.schemaVersion = CURRENT_SCHEMA_VERSION;
         return settings;
     }

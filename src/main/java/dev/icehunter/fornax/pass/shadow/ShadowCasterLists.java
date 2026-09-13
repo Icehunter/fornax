@@ -290,13 +290,14 @@ public final class ShadowCasterLists {
      * unit shadow-ortho volume ({@code x,y in [-1,1]}, {@code z in [0,1]} -- zZeroToOne, matching
      * {@link ShadowCamera#compute}'s own convention). {@code lightViewProj} must already be
      * CAMERA-RELATIVE (as {@link ShadowCamera#compute} always builds it) -- the min/max here are
-     * therefore already camera-relative deltas, not absolute world coordinates. Package-private
-     * (not private) so {@code ShadowCasterListsTest} can exercise this pure math directly, with no
-     * Sodium/GPU dependency at all. {@code scratch} is a caller-owned, reused {@link Vector4f} --
+     * therefore already camera-relative deltas, not absolute world coordinates. Public so the mesh
+     * RT snapshot shares the same domain, and so {@code ShadowCasterListsTest} can exercise this
+     * pure math directly, with no Sodium/GPU dependency at all. {@code scratch} is a caller-owned,
+     * reused {@link Vector4f} --
      * {@code Matrix4f.transform(Vector4f)} mutates and returns its argument in place, so reusing one
      * instance across all 8 corners avoids an allocation per corner.
      */
-    static boolean aabbIntersectsShadowVolume(Matrix4f lightViewProj,
+    public static boolean aabbIntersectsShadowVolume(Matrix4f lightViewProj,
                                                double minX, double minY, double minZ,
                                                double maxX, double maxY, double maxZ,
                                                Vector4f scratch) {

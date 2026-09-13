@@ -7,15 +7,17 @@ import dev.icehunter.fornax.metalfx.MetalFxSupport;
 import dev.icehunter.fornax.metalfx.objc.Objc;
 
 /**
- * One-time Metal ray tracing hardware probe (Metal RT milestone 1). Answers whether the sun-shadow
- * pass may run: the device must report {@code supportsRaytracing}, and unless the setting is
- * {@link RayTracingMode#FORCE} it must also report GPU family Apple9 or later. Apple's own
- * {@code MTLGPUFamily.apple9} documentation lists A17, M3 and M4 as that family (M5 is the same
- * generation); Apple Tech Talk 111375 describes hardware ray tracing starting there.
+ * One-time Metal ray tracing capability probe and live backend selection. Apple's
+ * <a href="https://developer.apple.com/documentation/metal/mtldevice/supportsraytracing">
+ * supportsRaytracing</a> property answers API support. Its
+ * <a href="https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf">feature tables</a>
+ * include compute ray tracing before Apple9, so that family is a hardware-acceleration diagnostic,
+ * not an extra restriction on Automatic selection. A supported API alone does not dispatch work:
+ * {@link #isAvailableFor(boolean)} additionally requires a pack subscription.
  *
  * <p>The device query runs once and is cached forever, same as {@link MetalFxSupport} (a machine
  * fact that never changes within a run). The {@link RayTracingMode} setting is read fresh on every
- * {@link #isAvailable()} call through {@link #allowedBy}, so flipping the setting takes effect
+ * {@link #isAvailable()} call, so flipping the setting takes effect
  * immediately without re-probing the device.
  *
  * <p>The device queried here is deliberately not tied to {@link MetalFxSupport}'s own: this probe
@@ -89,6 +91,7 @@ public final class MetalRtSupport {
             // A bridge-level failure degrades to "unavailable", never a crash: this probe runs at
             // most once per process and must never take down mod init on unexpected hardware.
             failure = "probe failed: " + e;
+            raytracing = false;
         }
         probedApple9 = apple9;
         deviceFailureReason = failure;
@@ -118,8 +121,19 @@ public final class MetalRtSupport {
 
     /** Whether the pass may run: the probed device facts plus the live setting. */
     public static boolean isAvailable() {
+        RayTracingMode mode = FornaxConfig.get().rayTracing;
+        return mode != RayTracingMode.OFF && isSupported();
+    }
+
+    /** Pack dispatch gate. No subscription means no device probe or backend work. */
+    public static boolean isAvailableFor(boolean packSubscribed) {
+        return packSubscribed && isAvailable();
+    }
+
+    /** Whether this implemented backend is supported, independent of the user's selection. */
+    public static boolean isSupported() {
         probe();
-        return allowedBy(probedRaytracing, probedApple9, FornaxConfig.get().rayTracing);
+        return Boolean.TRUE.equals(probedRaytracing) && deviceFailureReason == null;
     }
 
     /** The device's own Apple9-or-later answer, independent of the current setting. */
@@ -130,23 +144,20 @@ public final class MetalRtSupport {
 
     /** Why {@link #isAvailable()} is false, or null when it is true. */
     public static String unavailableReason() {
-        probe();
         RayTracingMode mode = FornaxConfig.get().rayTracing;
-        if (allowedBy(probedRaytracing, probedApple9, mode)) {
-            return null;
-        }
         // The setting is checked before any device fact: an explicit Off is the reason on its own
         // terms, even on hardware whose device probe also failed.
         if (mode == RayTracingMode.OFF) {
-            return "ray tracing mode is Off";
+            return "ray tracing backend is None";
         }
+        probe();
         if (deviceFailureReason != null) {
             return deviceFailureReason;
         }
         if (!probedRaytracing) {
             return "device does not report supportsRaytracing";
         }
-        return "device is below GPU family Apple9; Force overrides this check";
+        return null;
     }
 
     /** The device's raw {@code supportsRaytracing} answer, independent of the current setting. */
@@ -161,14 +172,13 @@ public final class MetalRtSupport {
     }
 
     /**
-     * Pure decision the setting makes from the two device facts: {@link RayTracingMode#OFF} never
-     * runs, {@link RayTracingMode#AUTO} needs both {@code supportsRt} and {@code apple9},
-     * {@link RayTracingMode#FORCE} needs only {@code supportsRt}.
+     * Legacy signature retained for callers: Apple9 is diagnostic only. Both Automatic and explicit
+     * Metal RT require the device's actual API support; None always disables the backend.
      */
     public static boolean allowedBy(boolean supportsRt, boolean apple9, RayTracingMode mode) {
         return switch (mode) {
             case OFF -> false;
-            case AUTO -> supportsRt && apple9;
+            case AUTO -> supportsRt;
             case FORCE -> supportsRt;
         };
     }

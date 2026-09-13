@@ -5,9 +5,8 @@ package dev.icehunter.fornax.config;
  * traces a primary ray per pixel against the loaded voxel window, shown through the {@code
  * METAL_RT_SCENE_DEBUG} entry in {@link GBufferDebugView}. {@link #OFF} skips the dispatch entirely
  * rather than running it in some default mode, so the feature costs nothing unless a mode is
- * picked. The pass still runs (keeping the acceleration structure current) whenever
- * either this is non-{@code OFF} or the scene debug view is selected, but the dispatch itself only
- * fires when a real mode is chosen.
+ * picked. Diagnostic selection requires an active legacy RT pack subscriber; it never starts
+ * voxel geometry preparation by itself and does not represent uploaded-mesh terrain shadows.
  */
 public enum RtDebugMode {
     /** The {@code rt_debug} dispatch never runs. */

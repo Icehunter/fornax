@@ -25,9 +25,9 @@ class MetalRtSupportTest {
     }
 
     @Test
-    void autoIsAllowedOnlyWhenBothRaytracingAndApple9AreReported() {
+    void automaticUsesReportedRayTracingSupportWithoutADeviceFamilyPolicy() {
         assertTrue(MetalRtSupport.allowedBy(true, true, RayTracingMode.AUTO));
-        assertFalse(MetalRtSupport.allowedBy(true, false, RayTracingMode.AUTO));
+        assertTrue(MetalRtSupport.allowedBy(true, false, RayTracingMode.AUTO));
         assertFalse(MetalRtSupport.allowedBy(false, true, RayTracingMode.AUTO));
         assertFalse(MetalRtSupport.allowedBy(false, false, RayTracingMode.AUTO));
     }
@@ -56,7 +56,7 @@ class MetalRtSupportTest {
             // isAvailable() must track a live setting change without a second device probe.
             FornaxConfig.get().rayTracing = RayTracingMode.OFF;
             assertFalse(MetalRtSupport.isAvailable());
-            assertEquals("ray tracing mode is Off", MetalRtSupport.unavailableReason(),
+            assertEquals("ray tracing backend is None", MetalRtSupport.unavailableReason(),
                     "an explicit Off is reported on its own terms, ahead of any device fact");
 
             FornaxConfig.get().rayTracing = RayTracingMode.FORCE;
@@ -65,6 +65,34 @@ class MetalRtSupportTest {
             FornaxConfig.get().rayTracing = RayTracingMode.AUTO;
             assertTrue(MetalRtSupport.isAvailable());
             assertEquals(null, MetalRtSupport.unavailableReason());
+        } finally {
+            FornaxConfig.get().rayTracing = saved;
+        }
+    }
+
+    @Test
+    void noPackSubscriptionNeverProbesOrDispatchesForAnyBackendSelection() {
+        RayTracingMode saved = FornaxConfig.get().rayTracing;
+        int before = MetalRtSupport.probeRunCount();
+        try {
+            for (RayTracingMode mode : RayTracingMode.values()) {
+                FornaxConfig.get().rayTracing = mode;
+                assertFalse(MetalRtSupport.isAvailableFor(false));
+            }
+            assertEquals(before, MetalRtSupport.probeRunCount());
+        } finally {
+            FornaxConfig.get().rayTracing = saved;
+        }
+    }
+
+    @Test
+    void noneNeverProbesEvenWhenAPackSubscribes() {
+        RayTracingMode saved = FornaxConfig.get().rayTracing;
+        int before = MetalRtSupport.probeRunCount();
+        try {
+            FornaxConfig.get().rayTracing = RayTracingMode.OFF;
+            assertFalse(MetalRtSupport.isAvailableFor(true));
+            assertEquals(before, MetalRtSupport.probeRunCount());
         } finally {
             FornaxConfig.get().rayTracing = saved;
         }

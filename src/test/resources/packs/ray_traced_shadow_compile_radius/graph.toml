@@ -1,0 +1,3 @@
+[ray_traced_shadows]
+enabled_if = "TRACE_ENABLED"
+distance_option = "u_TraceRadius"

@@ -3,6 +3,7 @@ package dev.icehunter.fornax.pipeline;
 import dev.icehunter.fornax.pack.GraphSpec;
 import dev.icehunter.fornax.pack.PassSpec;
 import dev.icehunter.fornax.pack.PassType;
+import dev.icehunter.fornax.pack.RayTracedShadowSpec;
 import dev.icehunter.fornax.pack.TargetSpec;
 import dev.icehunter.fornax.pack.graph.TargetBasis;
 import org.junit.jupiter.api.Test;
@@ -37,6 +38,17 @@ class SceneHistoryTest {
         GraphSpec injected = SceneHistory.injectInto(graph);
         assertEquals(1, injected.targets().size());
         assertTrue(injected.targets().containsKey(SceneHistory.TARGET));
+    }
+
+    @Test
+    void injectIntoPreservesRayTracedShadowOwnership() {
+        RayTracedShadowSpec shadows = new RayTracedShadowSpec("TRACE_ENABLED", "u_TraceRadius", 1);
+        GraphSpec graph = new GraphSpec(Map.of(), Map.of(), List.of(), shadows);
+
+        GraphSpec injected = SceneHistory.injectInto(graph);
+
+        assertEquals(shadows, injected.rayTracedShadows());
+        assertEquals(shadows, SceneHistory.injectInto(injected).rayTracedShadows());
     }
 
     @Test

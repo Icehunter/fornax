@@ -57,20 +57,9 @@ public enum GBufferDebugView {
     // GPU, and on macOS a wedged GPU takes WindowServer down with it: a hard power-off, not a recoverable
     // crash. Selecting it does nothing; GameRendererMixin has no call site for it. The class behind
     // it lives on because it also owns the voxel grid the sun-shadow path needs every frame.
-    /**
-     * The sun/moon shadow-map visibility factor as grayscale -- 0/black = fully shadowed, 1/white =
-     * fully lit. Resolve-branch ordinal 12 (gbuffer_resolve.fsh), sourced from {@code
-     * sampleSunShadow}'s PCF-filtered depth-map compare against {@code builtin.sunShadowMap}.
-     * Instrumentation for diagnosing shadow instability: shows the visibility mask itself, isolating
-     * shadow-map sampling behavior from the lit composite.
-     *
-     * <p>The name refers to the voxel-ray-traced shadow mask ({@code rtDirect}) this ordinal no
-     * longer renders -- it shows the sun/moon shadow-map visibility factor instead -- and keeps the
-     * {@code RT_SHADOW} name (rather than {@code SUN_SHADOW}) because {@link FornaxConfig} persists
-     * {@link FornaxSettings#debugView} through Gson's default enum handling, which
-     * serializes/deserializes by {@link Enum#name()} with no fallback for unrecognized names:
-     * renaming would silently break this field on any existing {@code fornax.json}.
-     */
+    /** Pack-rendered shadow visibility and selected RT coverage, resolve-branch id 12.
+     * The pack owns diagnostic coloring; this requests its applied shadow query rather than the
+     * separate legacy voxel scene. Keep the enum name stable for saved Gson configurations. */
     RT_SHADOW,
     /**
      * Raw HDR scene color (rgba16f sceneHdr) shown WITHOUT exposure or tonemapping -- values above 1.0
@@ -497,16 +486,16 @@ public enum GBufferDebugView {
      * {@code gbuffer_resolve.fsh}/{@code tonemap.fsh} branch. White is unshadowed, black is
      * shadowed.
      */
-    METAL_RT_SUN_MASK,
+    METAL_RT_SUN_MASK, // Retained for saved-name/ordinal compatibility; not selectable.
     /**
      * Metal ray tracing scene debug: a primary ray per pixel, traced from the camera against the
      * loaded voxel window and colored by whichever {@link FornaxSettings#rtDebugMode} picks (hit/
      * miss, distance, normal, instance id, primitive id, or ray direction), presented the same
      * bypass way as {@link #METAL_RT_SUN_MASK} rather than through either resolve branch chain.
-     * Selecting this view (or setting {@code rtDebugMode} to anything but {@code OFF}) is what
-     * keeps the Metal ray tracing pass running even while the sun-mask view itself is not shown.
+     * Requires an active legacy RT pack reader; selecting this view alone never starts tracing.
+     * This is a voxel diagnostic, separate from the receiving-distance mesh shadow result.
      */
-    METAL_RT_SCENE_DEBUG;
+    METAL_RT_SCENE_DEBUG; // Retained for saved-name/ordinal compatibility; not selectable.
 
     /**
      * Stable integer consumed by pack shaders through {@code u_Param3}. Legacy values retain their
@@ -556,7 +545,7 @@ public enum GBufferDebugView {
             case SSR -> "SSR";
             case MATERIAL_ID -> "Material ID";
             case VOXEL_RAYMARCH -> "Voxel Raymarch";
-            case RT_SHADOW -> "Sun Shadow";
+            case RT_SHADOW -> "RT shadow coverage";
             case SCENE_HDR -> "Scene HDR";
             case BLOOM -> "Bloom";
             case EXPOSURE -> "Exposure";
@@ -596,8 +585,8 @@ public enum GBufferDebugView {
             case CONDUCTOR_ENV -> "Conductor: Env Result/Cut";
             case CONDUCTOR_DIRECT -> "Conductor: Direct Sun Term";
             case CONDUCTOR_LIT -> "Conductor: Final HDR";
-            case METAL_RT_SUN_MASK -> "Metal RT sun mask";
-            case METAL_RT_SCENE_DEBUG -> "Metal RT scene debug";
+            case METAL_RT_SUN_MASK -> "Legacy voxel RT sun mask";
+            case METAL_RT_SCENE_DEBUG -> "Legacy voxel RT scene";
         };
     }
 
@@ -620,7 +609,7 @@ public enum GBufferDebugView {
             // CELESTIAL_SHADOW_VOXEL has no presenter hooked anywhere; pack targets reach the
             // screen through GraphTargetDebugPass. Listing it would offer a view that presents
             // nothing.
-            case VOXEL_RAYMARCH, CELESTIAL_SHADOW_VOXEL,
+            case VOXEL_RAYMARCH, CELESTIAL_SHADOW_VOXEL, METAL_RT_SUN_MASK, METAL_RT_SCENE_DEBUG,
                     ENV_SPEC_RATIO, ENV_DECOMP_SKY, ENV_DECOMP_MIX, ENV_DECOMP_MAT,
                     ENV_DECOMP_LOCAL, ENV_DECOMP_AO, ENV_DECOMP_RESIDUAL,
                     ENV_DECOMP_ALBEDO_WRITE_VS_READ, ENV_DECOMP_ALBEDO_IDENTITY_INPUTS,

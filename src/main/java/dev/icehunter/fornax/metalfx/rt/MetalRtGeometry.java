@@ -621,7 +621,7 @@ public final class MetalRtGeometry {
         }
     }
 
-    private static void destroyOne(VulkanDevice device, ExportedBuffer buffer) {
+    static void destroyOne(VulkanDevice device, ExportedBuffer buffer) {
         if (buffer == null) {
             return;
         }
@@ -633,7 +633,7 @@ public final class MetalRtGeometry {
      * its {@code MTLBuffer}. Memory is device-local only (not host-visible): Vulkan writes it
      * through {@code vkCmdCopyBuffer} and Metal reads it as a GPU-resident buffer; nothing on
      * either side needs CPU access to it. */
-    private static ExportedBuffer createExportedBuffer(VulkanDevice device, long sizeBytes) {
+    static ExportedBuffer createExportedBuffer(VulkanDevice device, long sizeBytes) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkBufferCreateInfo bufferInfo = VkBufferCreateInfo.calloc(stack)
                     .sType$Default()

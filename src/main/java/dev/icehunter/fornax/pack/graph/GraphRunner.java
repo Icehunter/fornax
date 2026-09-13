@@ -40,7 +40,9 @@ import dev.icehunter.fornax.pass.FrameGenPresenter;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import dev.icehunter.fornax.pipeline.FrameUniformValues;
 import dev.icehunter.fornax.pass.shadow.RtShadowResult;
+import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
 import dev.icehunter.fornax.metalfx.rt.MetalRtShadowPass;
+import dev.icehunter.fornax.metalfx.rt.TerrainShadowPass;
 import dev.icehunter.fornax.metalfx.objc.Objc;
 import dev.icehunter.fornax.config.RayTracingMode;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
@@ -772,6 +774,7 @@ public final class GraphRunner {
         ShadowMapManager.setEntityMapRequested(pack.graph().passes().stream()
                 .anyMatch(p -> p.inputs().contains(ShadowMapManager.ENTITY_TARGET)
                         || p.inputs().contains(ShadowMapManager.ENTITY_RAW_TARGET)));
+        TerrainShadowResult.setRequested(pack.graph().passes().stream().flatMap(p -> p.inputs().stream()).anyMatch(TerrainShadowResult.TARGET::equals));
         RtShadowResult.setRequestedInputs(pack.graph().passes().stream().flatMap(p -> p.inputs().stream()));
         computeGraphicsConflicts = ComputeGraphicsWaits.compile(pack.graph().passes());
         // Deferred geometry variants embed the OLD pack's program identifiers, so every one of them
@@ -1930,6 +1933,34 @@ public final class GraphRunner {
     /** Shared {@code enabled_if} evaluation, factored out of {@link #enabledAtCompile} so {@link
      * #anyEnabledComputePassReadsVoxelGrid(GraphSpec, Map)} can re-check the same live compile values
      * against every pass in a graph without a second, divergent copy of this logic. */
+    /** Pack opt-in only. Unknown/nonfinite runtime values fail closed to raster. */
+    public static float rayTracedShadowDistanceBlocks() {
+        if (currentPack == null || optionsBuffer == null) return 0;
+        var spec = currentPack.graph().rayTracedShadows();
+        if (spec == null || !activeShadowSubscriber(currentPack.graph(), compileValues, runtimeValues())) return 0;
+        float radius = optionsBuffer.get(spec.distanceOption(), 0) * spec.blocksPerUnit();
+        return Float.isFinite(radius) && radius > 0 ? radius : 0;
+    }
+
+    /** A declaration without an enabled reader must never start geometry copies or native work. */
+    static boolean activeShadowSubscriber(GraphSpec graph, Map<String, Integer> values, Map<String, Integer> world) {
+        var spec = graph.rayTracedShadows();
+        return spec != null && EnabledIfExpr.parse(spec.enabledIf()).evaluate(values)
+                && graph.passes().stream().anyMatch(p -> isEnabledAtCompile(p, values)
+                    && (p.runtimeEnabledIf() == null || EnabledIfExpr.parse(p.runtimeEnabledIf()).evaluate(world))
+                    && p.inputs().contains(TerrainShadowResult.TARGET));
+    }
+
+    public static float rayTracedShadowFilterGuardUv(int resolution) {
+        var spec = currentPack == null ? null : currentPack.graph().rayTracedShadows();
+        return spec == null || resolution <= 0 ? 0 : spec.filterGuardTexels() / resolution;
+    }
+
+    public static boolean legacyRtShadowSubscriber() {
+        return currentPack != null && currentPack.graph().passes().stream().anyMatch(p ->
+                isEnabledAtCompile(p, compileValues) && enabledThisFrame(p) && p.inputs().stream().anyMatch(RtShadowResult::isLegacyRtShadowRef));
+    }
+
     private static boolean isEnabledAtCompile(PassSpec p, Map<String, Integer> compileValues) {
         if (p.enabledIf() == null) {
             return true;
@@ -3083,6 +3114,7 @@ public final class GraphRunner {
         // device-idle boundary above is exactly the teardown law its texture/view pair needs;
         // keeping it alive here leaked both the D32 map and its dummy color attachment across
         // every pack switch/unload.
+        TerrainShadowPass.close();
         ShadowMapManager.close();
 
         // Water pre-pass targets (see WaterSurfaceManager's own doc): unlike opaqueDepth above, these
@@ -3100,6 +3132,7 @@ public final class GraphRunner {
         // here on every pack teardown or a pack switch/unload leaks both R8_UNORM textures and their
         // views, same failure class ShadowMapManager.close()'s own comment describes.
         RtShadowResult.close();
+        TerrainShadowResult.close();
 
         for (MipchainRunner m : mipchainRunners.values()) {
             m.close();

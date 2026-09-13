@@ -20,6 +20,7 @@
     "sodium.GlobalUniformsWriteMixin",
     "sodium.RenderSectionManagerAccessor",
     "sodium.RenderSectionManagerFogOcclusionMixin",
+    "sodium.SectionRenderDataStorageRevisionMixin",
     "sodium.ShaderChunkRendererAccessor",
     "sodium.ShaderChunkRendererBindGroupMixin",
     "sodium.ShaderChunkRendererConstantsMixin",

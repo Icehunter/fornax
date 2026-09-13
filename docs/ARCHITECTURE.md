@@ -297,6 +297,15 @@ draws at all.
    insertion-order-preserving, since category and option declaration order becomes dense-ID order
    and uniform-block layout order downstream.
 
+   An optional graph-level `[ray_traced_shadows]` table becomes
+   `GraphSpec.rayTracedShadows()`, a nullable `RayTracedShadowSpec(enabledIf, distanceOption,
+   blocksPerUnit, filterGuardTexels)`. Absence keeps raster ownership; both shorter `GraphSpec` constructors preserve
+   that default. The table requires nonempty `enabled_if` and `distance_option` strings, accepts a
+   positive integer `blocks_per_unit` (default `1`) and finite nonnegative `filter_guard_texels`
+   (default `0`), and rejects unknown fields. `GraphValidator` checks the gate with the same compile-expression rules
+   as pass gates, and requires the named distance to be a numeric runtime option with finite values.
+   The declaration carries option names supplied by the pack; the engine owns no option spelling.
+
    `screens.toml` also carries two constructs beyond the base four (`main`/`screens`/`profiles`/
    `sliders`): `[metas.NAME]` tables (`PackTomlLoader.loadScreens` → `ScreensSpec.metas()`, a
    `Map<String, MetaSpec>`) and an optional `[yacl] pages = [...]` list (→
@@ -1341,6 +1350,7 @@ be restated here.
 | `GlobalUniformsWriteMixin` | `UniformBufferManager$GlobalUniforms` | Append the engine's `u_Globals` tail fields (previous-frame camera matrices, jitter, `u_InvProjModelView`, `u_SunViewProj`, `u_VoxelWindow`, `u_CameraAbs`, the sky tail: did-cancel flags from `SkyFrameState`, all data lanes live from `SkyProbe`; the live-computed water tail; the shadow-distortion-bias tail) to Sodium 0.9.1's per-frame terrain uniform write | WrapOperation |
 | `RenderSectionManagerAccessor` | `RenderSectionManager` | Expose the private `regions` field (the only route to the region manager instance) | Accessor |
 | `RenderSectionManagerFogOcclusionMixin` | `RenderSectionManager` | Disable Sodium's fog-distance section shrink while a pack is active, so pack-owned aerial/border fog never loses geometry before its own fade | ModifyExpressionValue |
+| `SectionRenderDataStorageRevisionMixin` | `SectionRenderDataStorage` | Stamp each vertex-storage mutation before it starts; resize/deletion stamp every region slot. `TerrainMeshRevision` exposes process-unique generations, so RT mesh caches cannot alias same-size uploads or recycled storage | Inject (HEAD) |
 | `ShaderChunkRendererAccessor` | `ShaderChunkRenderer` | Expose the private static compiled-pipeline cache so it can be cleared on a render-state flip | Accessor |
 | `ShaderChunkRendererBindGroupMixin` | `ShaderChunkRenderer` | Append the normal/material sampler slots, the PBR-settings uniform, and the reserved `u_GeomInput0..N-1` geometry-input sampler slots to the shared terrain bind-group layout | WrapOperation |
 | `ShaderChunkRendererConstantsMixin` | `ShaderChunkRenderer` | Add a deferred-output shader constant for opaque/cutout passes only, while a pack is active | ModifyReturnValue |
@@ -1506,8 +1516,8 @@ sibling pack's settings declarations). What remains is genuinely independent of 
 | `reconstructSharpen` | float | `0.5` | Contrast-adaptive sharpen strength `ReconstructPass` applies after the temporal blend; TAAU enforces a ratio-scaled floor over it (see "Temporal reconstruct") |
 | `frameGenMode` | enum (`FrameGenMode`) | `OFF` | Experimental MetalFX frame generation: interpolates one frame between real frames. Requires `aaMethod = METALFX` and vsync (FIFO present mode); adds roughly 1 frame of latency when engaged. `OFF` disarms `FrameGenPass.armed()` entirely. `AUTO` adaptively engages/disengages the actual double-present per frame (hysteresis around render fps vs. display refresh; see "Adaptive pacing" below), so arming this does not guarantee constant latency/cost, only that the machine genuinely needs the assist. `ALWAYS` bypasses that pacing and double-presents every armed frame unconditionally, holding real fps at roughly half the display refresh under FIFO for as long as it is selected: the deliberate escape hatch for a player who has already capped their own frame rate there (see "Adaptive pacing"). macOS 26+ Apple Silicon only; the settings-screen toggle is built only when `MetalFxSupport.isFrameInterpolationAvailable()`, greyed out/hidden otherwise. Live-read every frame by `FrameGenPass.armed()`/`FrameGenPass.mode()` (no pack recompile needed). Transitioning to `OFF`, or switching `aaMethod` away from `METALFX`, releases `FrameGenPass`/`UiLayerCapture`/`FrameGenPresenter`'s interop resources via the shared `FrameGenPresenter.deactivateAll()`, called from two places: `SettingsApplyRouter`'s `FRAMEGEN_DEACTIVATE` action at save time (the before/after field diff, same mechanism as `PACK_REAPPLY`/`SAVE_ONLY`; never from the option's own YACL listener, since YACL applies every option's binding before any listener fires, so a listener can't tell whether this is the transition frame), and `GraphRunner.closeCurrent()` on every pack teardown (frame generation runs independently of pack state and would otherwise keep presenting against GPU state a pack reload just tore down); `AUTO`<->`ALWAYS` does not route that action, since both keep the same resources armed and only `FrameGenPacer`'s per-frame decision differs. A pre-`frameGenMode` config's boolean `frameGeneration` field migrates `true` to `AUTO` and `false` to `OFF` (schema v3 -> v4; see "Migration") |
 | `metalHud` | boolean | `false` | Apple's Metal Performance HUD overlay (`CAMetalLayer.developerHUDProperties`, macOS 13+), replacing a manual `MTL_HUD_ENABLED` export with a settings toggle, independent of `aaMethod`. `FornaxPreLaunch` calls `MetalHudEnv.enableIfConfigured()` when true: a native `setenv("MTL_HUD_ENABLED", "1", 1)` before Minecraft's `main()`, since the HUD subsystem must exist before `Metal.framework` loads. Restart-to-apply in both directions under MoltenVK (see "Known laws"): `MetalHudControl.apply(enabled)` sets/clears the layer's `mode` key and logs a verdict from a live save, but only the `CLIENT_STARTED` call (config already true at boot) ever visibly shows the HUD. Toggle built only when `Objc.isLoaded()`. Fails closed: any resolution failure logs once at WARN and does nothing |
-| `rayTracing` | enum (`RayTracingMode`) | `AUTO` | Whether the Metal ray tracing sun-shadow pass may run: `OFF` never runs it, `AUTO` runs it when the device reports ray tracing support on GPU family Apple9 or later, `FORCE` runs it whenever the device reports ray tracing support at all. Checked by the Metal RT probe alongside the device's own reported capability; live-read, no pack recompile needed. macOS/Apple Silicon only; the settings-screen row is built only when `Objc.isLoaded()`, same gating as `metalHud` |
-| `rtDebugMode` | enum (`RtDebugMode`) | `OFF` | Which coloring mode the `rt_debug` scene-debug dispatch uses (hit/miss, distance, normal, instance id, primitive id, ray direction); `OFF` skips that dispatch entirely rather than running some default mode, so it costs nothing until a mode is picked. Live-read, no pack recompile needed; macOS/Apple Silicon only, same `Objc.isLoaded()` gating as `rayTracing` |
+| `rayTracing` | enum (`RayTracingMode`) | `AUTO` | Ray Tracing Backend, shown on every platform under Engine/World: Automatic (default), None, Metal RT. Existing JSON names `AUTO`/`OFF`/`FORCE` retain those meanings without a schema rewrite. Metal RT is the only implemented API and is offered explicitly only when `MetalRtSupport.isSupported()` passes. Automatic uses the device's `supportsRaytracing` answer; Apple9 is diagnostic only. `isAvailableFor(packSubscribed)` combines live backend selection with a pack subscription and does not probe when unsubscribed or None. Unsupported devices retain normal pack rendering; this control does not itself enable a shadow feature. |
+| `rtDebugMode` | enum (`RtDebugMode`) | `OFF` | Serialized compatibility field; always normalized to `OFF` at load. No scene-debug selector is exposed in settings. |
 | `schemaVersion` | int | `0` | Config-file migration marker only, not a rendering setting; see "Migration" below |
 
 **Storage.** A plain Gson-serialized JSON file in the Fabric config directory. Load tolerates a
@@ -2209,7 +2219,47 @@ old "Active Pack" category: the router never sees `shadersEnabled` or `activePac
 now, since `FornaxPacksTab` self-applies both through `ShadersEnabledFlip`/`PackSwitch` outside this
 save cycle before the router ever runs.
 
-### Finite-domain ray-traced sun depth
+### Uploaded-mesh celestial shadows
+
+A graph-level `[ray_traced_shadows]` declaration plus an enabled `rtTerrainShadowDepth` reader opts
+into `TerrainShadowPass`. The engine defaults to automatic backend selection; None and absent or
+disabled subscriptions short-circuit before hardware probing, mesh snapshots or native dispatch.
+Metal RT is the implemented backend. The stored `rayTracing` enum retains compatibility, while UI
+labels describe backend selection rather than a second pack feature switch.
+
+The pass snapshots accepted SOLID/CUTOUT GPU ranges throughout the loaded light frustum on the
+render thread, copies changed ranges to exported buffers, and feeds `MeshShadowTracer`. Packed
+positions, quad topology and final atlas UVs come from `FornaxChunkVertex`; no voxel harvest or live
+model emission participates. Mutation/relocation stamps prevent equal-size replacements from
+reusing stale geometry. BLAS data is cached per mesh revision; TLAS changes only with the mesh set
+or its stable grid-relative origins. Conservative packed-model overhang is included in culling.
+
+The pack's distance is converted to blocks and capped by the shadow camera extent. It describes a
+horizontal receiving cylinder, not a sphere of permitted blockers. Light-map rays outside this
+cylinder plus declared filter support skip traversal. Surviving rays traverse their full near/far
+span, so a larger distance value never lets back in a distant blocker already excluded for a near
+receiver.
+Inverse-warp rays outside the captured light-frustum domain remain invalid. The filter guard uses
+a conservative inverse-warp Jacobian bound; singular guard neighborhoods retain traversal.
+
+A shared timeline orders Vulkan copies, Metal trace, then Vulkan depth publication. Raw source
+arena copies finish before the render thread can relocate/free their source on mesh-change frames.
+`TerrainShadowResult` owns the separate RGBA32F target: R forward depth, A current trace validity.
+Disabled/unavailable/failed transitions clear validity. Only successful publication sets
+`u_ShadowMapParams.y` to the effective receiving distance squared. The complete raster map remains
+intact; there is no raster caster clipping or whole-section omission. Unsupported input preserves
+raster fallback; submission failures disable the path until pack reload. Asynchronous GPU device
+failure is not a recoverable raster handoff.
+
+The pack chooses between independent maps at each receiving world position and unions independent
+entity raster depth with RT terrain before filtering. Entity data uses the existing GPU replay;
+there is no CPU dynamic-entity extraction. Softness, samples, strength, cloud transmission and active
+sun/moon selection remain pack decisions. Legacy voxel RT targets remain separate, and diagnostics
+alone cannot activate their pass without a live pack reader. Native and contract tests verify
+geometry, subscriptions, resource routing, cache/event behavior and filtering; they do not establish
+live frame time, successful runtime mixin injection or visual acceptance.
+
+### Finite-domain ray-traced sun depth (legacy voxel representation)
 
 A graph declaring `rtSunDepth` receives an engine-owned RGBA32_FLOAT image at the exact
 `ShadowMapManager` resolution. R is nearest alpha-tested forward shadow depth (1 for a miss),
@@ -2264,28 +2314,17 @@ every fullscreen pass uses (see §6); the resolve pass alone receives the curren
 as one of its two generic per-pass scalars, decoded shader-side into an integer branch. There is no
 dedicated debug-view uniform; it is one value of a mechanism built for something else entirely.
 
-`METAL_RT_SUN_MASK` is, like `WATER_PREPASS`, an engine-owned bypass rather than a resolve/tonemap
-branch: `GameRendererMixin` calls `MetalRtDebugPass.presentIfEnabled` at the same `renderLevel`
-RETURN site as the other debug presenters. It blits `MetalRtShadowPass`'s R8 sun-visibility mask
-straight over the native frame with the red-channel-as-grey shader `GraphTargetDebugPass` also uses
-for `CELESTIAL_SHADOW_VOXEL`, and no-ops on any frame `maskView()` currently returns null: before
-the pass has ever produced a mask, and again whenever it is not currently running (off,
-unsupported, or inactive), regardless of whether it produced one earlier. `MetalRtShadowPass.runIfEnabled`
-runs when a graph declares a ray-traced input or a trace debug output is requested, gated by
-`FornaxSettings#rayTracing` and `MetalRtSupport.isAvailable()`. Selecting the sun-mask view requests
-the legacy screen-space trace; a pack using only `rtSunDepth` pays only the sun-space dispatch.
+The legacy `METAL_RT_SUN_MASK` and `METAL_RT_SCENE_DEBUG` enum entries are retained only for
+saved-name and ordinal compatibility. Neither settings nor keyboard cycling offers them, and
+configuration migration resets saved selections to `OFF` before rendering. The hit/miss, distance,
+normal, instance/primitive ID and ray-direction selector is removed. Its `rtDebugMode` compatibility
+field is normalized to `OFF` on every load, preventing invisible diagnostic work. Current-schema
+files keep these compatibility values on disk until an ordinary settings save; runtime state is
+always normalized.
 
-`METAL_RT_SCENE_DEBUG` is the same bypass shape, presented by the same `MetalRtDebugPass`, but
-blits `MetalRtShadowPass.debugSceneView()`'s colored RGBA16F output with the plain rgb passthrough
-shader `GraphTargetDebugPass` uses for its own colored graph targets, since this output (unlike the
-sun mask) carries real colour rather than a scalar. `debugSceneView()` returns null on the same
-never-stale conditions `maskView()` does, plus whenever `FornaxSettings#rtDebugMode` is `OFF`: the
-`rt_debug` dispatch itself only fires when a real mode is picked (checked inside `MetalRtShadowPass.run`
-independently of the mask's own gating), so a texture that was never written this session (or went
-stale after the mode was turned off) is never presented as current. `MetalRtDebugPass.wanted()`
-(either Metal RT view selected, `rtDebugMode` not `OFF`, or the `fornax.rt.always` system property)
-is read only by tests and reserved for this pass's own presentation policy; it plays no part in
-whether `MetalRtShadowPass.runIfEnabled` runs.
+`RT_SHADOW` remains selectable as **RT shadow coverage**. Pack rendering supplies its applied shadow
+visibility and coverage diagnostic; it does not request the legacy voxel scene trace. Native legacy
+debug classes remain internal and are not user controls.
 
 ### One-shot raw fullscreen pass captures
 

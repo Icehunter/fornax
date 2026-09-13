@@ -254,6 +254,7 @@ public class SodiumWorldRendererOrchestrationMixin {
      * and the {@code @Shadow} field is required).
      */
     private void fornax$renderShadowPass(ChunkRenderMatrices matrices, double x, double y, double z, GpuSampler terrainSampler) {
+        dev.icehunter.fornax.metalfx.rt.TerrainShadowPass.resetFrame();
         if (!GraphRunner.isActive()) {
             return;
         }
@@ -270,6 +271,7 @@ public class SodiumWorldRendererOrchestrationMixin {
             // since the shader-side #ifdef compiles that read out.
             ShadowMapManager.ensureSize(64);
             ShadowMapManager.clearEntity();
+            dev.icehunter.fornax.pass.shadow.TerrainShadowResult.invalidate();
             return;
         }
 
@@ -293,6 +295,7 @@ public class SodiumWorldRendererOrchestrationMixin {
         // down would resize a live map on every dimension change, and the next draw carries a
         // scissor from the old size and throws.
         if (!GraphRunner.shadowsEnabledThisFrame()) {
+            dev.icehunter.fornax.pass.shadow.TerrainShadowResult.invalidate();
             return;
         }
         ShadowMapManager.clear();
@@ -306,6 +309,7 @@ public class SodiumWorldRendererOrchestrationMixin {
         // Must land before the explicit update() call below -- see "Ordering guarantee" above.
         ShadowFrameState.commit(lightMatrices.view(), lightMatrices.proj(),
                 lightMatrices.viewProj(), shadowMapBias);
+        dev.icehunter.fornax.metalfx.rt.TerrainShadowPass.render(this.renderSectionManager, x, y, z, resolution, shadowDistance);
 
         // MAIN camera matrices and MAIN fog, not the light's -- see "Matrix delivery" and
         // "Fog delivery" above for why: both land in the frame's single guarded update() write.

@@ -170,10 +170,8 @@ public final class MetalRtShadowPass {
      * nothing.
      */
     public static void runIfEnabled(GBuffer gbuffer, boolean wanted) {
-        boolean consumer = RtShadowResult.sunDepthRequested() || RtShadowResult.legacyRequested()
-                || FornaxConfig.get().debugView == GBufferDebugView.METAL_RT_SUN_MASK
-                || FornaxConfig.get().rtDebugMode != RtDebugMode.OFF;
-        boolean available = wanted && consumer && !failed && MetalRtSupport.isAvailable();
+        boolean consumer = dev.icehunter.fornax.pack.graph.GraphRunner.legacyRtShadowSubscriber();
+        boolean available = wanted && !failed && MetalRtSupport.isAvailableFor(consumer);
         boolean wasActive = MetalRtGeometry.isActive();
         MetalRtGeometry.setActive(available);
         if (available && !wasActive) {

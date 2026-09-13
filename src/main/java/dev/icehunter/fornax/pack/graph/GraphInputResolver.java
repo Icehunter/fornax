@@ -7,6 +7,7 @@ import dev.icehunter.fornax.atlas.BlockAtlasView;
 import dev.icehunter.fornax.atlas.BlockAtlasOverflow;
 import dev.icehunter.fornax.atlas.LabPbrNeutralTextures;
 import dev.icehunter.fornax.pass.shadow.RtShadowResult;
+import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
 import dev.icehunter.fornax.pipeline.CelestialSprites;
@@ -198,6 +199,7 @@ final class GraphInputResolver {
             case ShadowMapManager.ENTITY_RAW_TARGET -> ShadowMapManager.getEntityView();
             case WaterSurfaceManager.NORMAL_NAME -> WaterSurfaceManager.getNormalView();
             case WaterSurfaceManager.DEPTH_NAME -> WaterSurfaceManager.getDepthView();
+            case TerrainShadowResult.TARGET -> TerrainShadowResult.view();
             case RtShadowResult.TARGET -> RtShadowResult.getVisibilityView();
             case RtShadowResult.VALID_TARGET -> RtShadowResult.getValidView();
             case RtShadowResult.DEPTH_TARGET -> RtShadowResult.getDepthView();
@@ -245,6 +247,7 @@ final class GraphInputResolver {
             case ShadowMapManager.ENTITY_RAW_TARGET -> ShadowMapManager.getEntityTexture();
             case WaterSurfaceManager.NORMAL_NAME -> WaterSurfaceManager.getNormalTexture();
             case WaterSurfaceManager.DEPTH_NAME -> WaterSurfaceManager.getDepthTexture();
+            case TerrainShadowResult.TARGET -> TerrainShadowResult.texture();
             case RtShadowResult.TARGET -> RtShadowResult.getVisibilityTexture();
             case RtShadowResult.VALID_TARGET -> RtShadowResult.getValidTexture();
             case RtShadowResult.DEPTH_TARGET -> RtShadowResult.getDepthTexture();

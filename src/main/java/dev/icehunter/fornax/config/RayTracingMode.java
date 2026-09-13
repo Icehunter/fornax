@@ -1,25 +1,38 @@
 package dev.icehunter.fornax.config;
 
+import java.util.List;
+
 /**
- * Whether the Metal ray tracing sun-shadow pass may run, read by {@code
- * dev.icehunter.fornax.metalfx.rt.MetalRtSupport#probe()} alongside the device's own reported
- * capability. macOS/Apple Silicon only; every other platform stays fully unaffected by this
- * setting regardless of its value, since the pass itself never runs outside the Metal bridge.
+ * Engine ray tracing backend selection. The enum names and order preserve existing {@code
+ * rayTracing} configuration files: OFF means None, AUTO means Automatic, and FORCE means Metal RT.
+ * This selects an API, not a shadow feature; the active pack must also subscribe to RT work.
  */
 public enum RayTracingMode {
-    /** The Metal ray tracing pass never runs, even on hardware that supports it. */
+    /** No ray tracing backend. Pack rendering keeps its normal fallback. */
     OFF,
 
     /**
-     * The pass runs when the device reports ray tracing support on GPU family apple9 or later.
-     * The safe default: apple9 is where Apple's own ray tracing guidance targets steady
-     * performance, so older families that merely report the capability are left alone.
+     * Pick an implemented backend supported by the current device. Currently that is Metal RT;
+     * other platforms have no RT backend and keep the pack's normal rendering.
      */
     AUTO,
 
     /**
-     * The pass runs whenever the device reports ray tracing support at all, regardless of GPU
-     * family. An escape hatch for testing or for hardware the {@link #AUTO} family check excludes.
+     * Select Metal RT explicitly. It still requires device support and a pack subscription;
+     * this legacy name never overrides a missing capability.
      */
-    FORCE
+    FORCE;
+
+    public String backendLabel() {
+        return switch (this) {
+            case OFF -> "None";
+            case AUTO -> "Automatic";
+            case FORCE -> "Metal RT";
+        };
+    }
+
+    /** Only implemented APIs are offered, and explicit Metal selection requires support. */
+    public static List<RayTracingMode> availableBackends(boolean metalSupported) {
+        return metalSupported ? List.of(AUTO, OFF, FORCE) : List.of(AUTO, OFF);
+    }
 }

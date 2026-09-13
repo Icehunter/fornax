@@ -26,6 +26,11 @@ import org.joml.Matrix4f;
 public final class ShadowFrameState {
     private static volatile Matrix4f current = new Matrix4f();
     private static volatile float currentBias = 0.0f;
+    private static float rtDistanceSquared;
+
+    /** Positive only after this frame's mesh RT depth was published into its separate depth result. */
+    public static void setRtDistance(float radius) { rtDistanceSquared = radius * radius; }
+    public static float rtDistanceSquared() { return rtDistanceSquared; }
 
     // The view and projection halves, kept alongside the combined matrix. Geometry submitted for the
     // shadow pass has to be BUILT under the light's camera rather than reprojected afterwards, and

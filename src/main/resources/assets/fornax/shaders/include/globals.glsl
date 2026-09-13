@@ -149,7 +149,8 @@ layout(std140) uniform u_Globals {
     // constant (UniformBufferManagerMixin's ring-buffer size, this doc comment) moves in lockstep.
     vec4 u_ShadowMapParams; // x = shadow-map radial-distortion bias (1 - R/shadowDistance with
                              //     R = the full-detail radius derived from the map resolution and
-                             //     the centre-texel target, floored at 0); yzw reserved
+                             //     the centre-texel target, floored at 0);
+                             // y = active RT receiving distance squared (0 = full raster); zw reserved
 
     // --- Camera-sky-light tail (bytes 592..608; x = the vanilla SKY light level (LightLayer.SKY,
     // 0..15) AT THE CAMERA'S OWN BLOCK POSITION this frame, normalized to 0..1, computed LIVE by

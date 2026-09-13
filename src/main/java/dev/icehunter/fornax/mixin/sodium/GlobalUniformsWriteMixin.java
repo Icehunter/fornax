@@ -313,7 +313,7 @@ public class GlobalUniformsWriteMixin {
         // this class's javadoc already documents for that matrix -- both ride the same commit call,
         // so both are always this frame's fresh values, never stale). shadow.vsh's write-side warp
         // and gbuffer_resolve.fsh's read-side warp both read this one field.
-        builder.putVec4(ShadowFrameState.currentBias(), 0.0f, 0.0f, 0.0f);
+        builder.putVec4(ShadowFrameState.currentBias(), ShadowFrameState.rtDistanceSquared(), 0.0f, 0.0f);
 
         // Camera-sky-light tail (bytes 592..608, cave/border-fog enclosure round): x = vanilla's
         // SKY light level (LightLayer.SKY, 0..15) AT THE CAMERA'S OWN BLOCK POSITION this frame,
