@@ -11,9 +11,10 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 
 /**
- * Adds an explicit partial dispatch to the Vulkan encoder for the MetalFX event handoffs.
- * Closing its existing submission preserves every pending command and semaphore on the same
- * graphics queue. This adds no automatic injection: with interop inactive it is never called.
+ * Adds a way to submit part of the Vulkan encoder's work early, for handoffs across queues:
+ * MetalFX events and compute passes that read graphics output. Closing that partial submit keeps
+ * every pending command and semaphore on the same graphics queue. Nothing calls this on its own;
+ * only code that needs proof a submit went out calls it.
  *
  * <p>The normal full submit's ALL_COMMANDS completion covers preceding partial batches on that
  * queue. Leave its completion epoch and resource retirement untouched, conservatively extending

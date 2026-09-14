@@ -10,6 +10,7 @@ import java.util.Deque;
 import java.util.List;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -19,19 +20,88 @@ class MeshShadowTracerTest {
     private static final String TYPE = "dev.icehunter.fornax.metalfx.rt.MeshShadowTracer";
     // Identity light projection: the clip near/far planes are z=0 and z=1, so plane z is depth.
     private static final float[] IDENTITY = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    // Rotate the light 180 degrees around Y: world z=1 is near and z=0 is far. This
+    // self-inverse rigid projection also flips X, so asymmetric atlas controls swap screen sides.
+    private static final float[] REVERSE_LIGHT = {-1,0,0,0, 0,1,0,0, 0,0,-1,0, 0,0,1,1};
+
 
     @Test
-    void uploadedWindingCullsBackFacesAndPreservesNearestDepth() throws Exception {
+    void uploadedWindingKeepsBothFacesAndPreservesNearestDepth() throws Exception {
         try (Fixture f = new Fixture()) {
             long front = f.quad(0.25f, false);
             long back = f.quad(0.125f, true);
             Object first = f.mesh(0, 1, front, 0, 0, 0);
             Object reverse = f.mesh(1, 1, back, 0, 0, 0);
             f.trace(List.of(first, reverse));
-            f.assertPixel(1, 1, 0.25f);
+            f.assertPixel(1, 1, 0.125f); // Nearest opaque face wins regardless of its winding.
             f.assertPixel(0, 0, 1f); // Quad spans [-.75,.75], corner ray at -.875 misses.
             f.trace(List.of(reverse));
-            f.assertPixel(3, 3, 1f);
+            f.assertPixel(3, 3, 0.125f);
+        }
+    }
+
+    @Test
+    void twoSidedRasterContractOpaqueQuadOccludesFromEitherLightDirection() throws Exception {
+        try (Fixture f = new Fixture()) {
+            Object quad=f.mesh(0,1,f.quad(.25f,false),0,0,0,false);
+            f.trace(List.of(quad));
+            float forward=f.pixels[(3*8+3)*4], forwardValid=f.pixels[(3*8+3)*4+3];
+            f.traceWithRadius(List.of(quad),REVERSE_LIGHT,REVERSE_LIGHT,2f);
+            float reverse=f.pixels[(3*8+3)*4], reverseValid=f.pixels[(3*8+3)*4+3];
+            // Raster's registered shadow pipeline uses cull(false): the opaque plane is a
+            // blocker from either side. Forward depth is z; reverse depth is 1-z.
+            System.out.println("two-sided opaque: forward="+forward+" reverse="+reverse
+                    +" validity="+forwardValid+","+reverseValid);
+            assertAll(
+                    ()->assertEquals(.25f,forward,1e-5f,"front-facing opaque depth"),
+                    ()->assertEquals(.75f,reverse,1e-5f,"reverse-facing opaque depth"),
+                    ()->assertEquals(1f,forwardValid,0f),
+                    ()->assertEquals(1f,reverseValid,0f));
+        }
+    }
+
+    @Test
+    void twoSidedRasterContractCutoutRetainsItsAlphaMaskFromEitherLightDirection() throws Exception {
+        try (Fixture f = new Fixture()) {
+            // Raster discards alpha below .1: the left texel rejects and the right accepts.
+            f.alpha(.05f,.2f);
+            Object quad=f.mesh(0,1,f.quad(.25f,false),0,0,0,true);
+            f.trace(List.of(quad));
+            float forwardRejected=f.pixels[(3*8+1)*4], forwardAccepted=f.pixels[(3*8+6)*4];
+            f.traceWithRadius(List.of(quad),REVERSE_LIGHT,REVERSE_LIGHT,2f);
+            float reverseAccepted=f.pixels[(3*8+1)*4], reverseRejected=f.pixels[(3*8+6)*4];
+            System.out.println("two-sided cutout: forward rejected="+forwardRejected+" accepted="+forwardAccepted
+                    +" reverse accepted="+reverseAccepted+" rejected="+reverseRejected);
+            assertAll(
+                    ()->assertEquals(1f,forwardRejected,0f,"front transparent texel"),
+                    ()->assertEquals(.25f,forwardAccepted,1e-5f,"front opaque texel"),
+                    ()->assertEquals(.75f,reverseAccepted,1e-5f,"reverse opaque texel"),
+                    ()->assertEquals(1f,reverseRejected,0f,"reverse transparent texel"));
+        }
+    }
+
+    @Test
+    void twoSidedRasterContractTransparentQuadNeverOccludesEitherLightDirection() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.alpha(0f,0f);
+            Object quad=f.mesh(0,1,f.quad(.25f,false),0,0,0,true);
+            f.trace(List.of(quad));
+            f.assertPixel(3,3,1f);
+            f.traceWithRadius(List.of(quad),REVERSE_LIGHT,REVERSE_LIGHT,2f);
+            f.assertPixel(3,3,1f);
+            System.out.println("two-sided transparent: forward=1 reverse=1 validity=1,1");
+        }
+    }
+
+    @Test
+    void twoSidedRasterContractClosedCuboidKeepsItsEntrySurfaceFromEitherLightDirection() throws Exception {
+        try (Fixture f = new Fixture()) {
+            List<Object> cuboid=f.closedCuboid();
+            f.trace(cuboid);
+            f.assertPixel(3,3,.25f);
+            f.traceWithRadius(cuboid,REVERSE_LIGHT,REVERSE_LIGHT,2f);
+            f.assertPixel(3,3,.25f); // The opposite entry face is world z=.75, depth 1-.75.
+            System.out.println("two-sided closed cuboid: forward=.25 reverse=.25 validity=1,1");
         }
     }
 
@@ -318,6 +388,28 @@ class MeshShadowTracerTest {
             Objc.msgSendVoid(cb,Objc.selector("waitUntilCompleted"));
         }
         long quad(float z,boolean reversed) { long buffer=own(MetalRtAcceleration.createBuffer(device,96));writeQuad(buffer,z,reversed);return buffer; }
+        List<Object> closedCuboid() throws Exception {
+            // Six outward-facing quads close x/y in [-.75,.75] and z in [.25,.75].
+            // The two opposing light directions each enter a front-facing outer surface.
+            float[][][] faces={
+                {{-.75f,-.75f,.25f},{-.75f,.75f,.25f},{.75f,.75f,.25f},{.75f,-.75f,.25f}},
+                {{.75f,-.75f,.75f},{.75f,.75f,.75f},{-.75f,.75f,.75f},{-.75f,-.75f,.75f}},
+                {{.75f,-.75f,.25f},{.75f,.75f,.25f},{.75f,.75f,.75f},{.75f,-.75f,.75f}},
+                {{-.75f,-.75f,.75f},{-.75f,.75f,.75f},{-.75f,.75f,.25f},{-.75f,-.75f,.25f}},
+                {{-.75f,.75f,.25f},{-.75f,.75f,.75f},{.75f,.75f,.75f},{.75f,.75f,.25f}},
+                {{.75f,-.75f,.25f},{.75f,-.75f,.75f},{-.75f,-.75f,.75f},{-.75f,-.75f,.25f}}
+            };
+            var meshes=new java.util.ArrayList<Object>();
+            for(int face=0;face<faces.length;face++) {
+                long packed=quad(0f,false);
+                MemorySegment data=MemorySegment.ofAddress(Objc.msgSendId(packed,Objc.selector("contents"))).reinterpret(96);
+                for(int corner=0;corner<4;corner++) for(int axis=0;axis<3;axis++)
+                    data.set(ValueLayout.JAVA_SHORT,corner*24L+axis*2L,
+                            (short)Math.round((faces[face][corner][axis]+8)*2048));
+                meshes.add(mesh(face,1,packed,0,0,0,false));
+            }
+            return meshes;
+        }
         long horizontalQuad() {
             long packed=quad(0,false);
             MemorySegment data=MemorySegment.ofAddress(Objc.msgSendId(packed,Objc.selector("contents"))).reinterpret(96);

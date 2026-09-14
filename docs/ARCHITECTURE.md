@@ -113,6 +113,15 @@ queue-family sharing where needed, but that only removes ownership transfers; it
 the execution dependency that prevents next-frame compute writes from racing prior graphics reads.
 The existing binary semaphore remains the opposite, same-frame compute-write to graphics-read edge.
 
+Uniform buffers shared by graphics and raw compute also need legal queue-family access.
+`VulkanGpuBufferSharingMixin` applies `VulkanBufferSharing` to the final `VkBufferCreateInfo`
+argument of `VulkanGpuBuffer.Direct`'s VMA allocation: uniform usage selects concurrent sharing
+between distinct graphics and compute families. Same-family allocations and non-uniform buffers
+retain their original policy. This allocation capability is independent of pack activation because
+long-lived uniform buffers can be allocated before a pack is loaded. It changes neither buffer
+contents nor synchronization; upload visibility, semaphore ordering and ring retirement remain
+separate obligations.
+
 **`GraphRunner.finish(matrices, x, y, z)`** iterates the pack's declared passes in file order. A
 `geometry`-typed pass is a pure placeholder, since Sodium's own draw already ran into the shared
 G-buffer by the time this runs, and the independent lighting producers are placeholders here too,
@@ -788,7 +797,12 @@ hand-recorded `vkCmdCopyBufferToImage` whose region addresses the real depth dir
 Compute descriptors bind pack-declared textures with linear filtering and repeat addressing on
 every axis, including a volume's Z axis; mip sampling remains enabled for 2D assets, while volumes
 have only their uploaded base level. Graph targets and engine builtins retain nearest filtering and
-clamp-to-edge. World-space volume coordinates intentionally leave the normalized unit cube, so
+clamp-to-edge except the comparison aliases `sunShadowMap` and `sunEntityShadowMap`: compute binds
+these through `ShadowComparisonSampler`, with hardware depth comparison and linear filtering built
+in. Their `Raw` aliases keep plain nearest depth reads. Engine-owned names win over a pack texture
+declared with the same name. If no comparison sampler is ready when the descriptor is bound, the
+compute pass throws and names its pass and input; it will not swap in a plain sampler for a
+`sampler2DShadow` input. World-space volume coordinates leave the normalized unit cube on purpose, so
 clamping a volume would stretch its boundary texels across the cloud field instead of tiling the
 density data.
 
@@ -1403,13 +1417,14 @@ be restated here.
 | `VulkanRenderPipelineMixin` | `VulkanRenderPipeline` | Declare the widened 60-byte push-constant range on every terrain-family Vulkan pipeline layout | WrapOperation |
 | `WindowMixin` | `Window` | Report the supersampled dimensions while a scaled frame is in flight, so downstream size queries stay consistent | ModifyReturnValue x2 |
 
-**Raw-Vulkan-targeting** (5):
+**Raw-Vulkan-targeting** (6):
 
 | Mixin | Target | Purpose | Shape |
 |---|---|---|---|
 | `GpuDeviceBackendAccessor` | `GpuDevice` | Expose Blaze3D's private backend so raw compute/interop code can require the Vulkan backend explicitly | Accessor |
 | `VulkanCommandEncoderPartialFlushMixin` | `VulkanCommandEncoder` | Add the explicit `VulkanPartialFlush` operation for event-ordered dispatch without advancing full-submit completion or resource retirement | Unique, Shadow |
 | `VulkanCaptureBufferUsageMixin` | `VulkanDevice` | Enable COPY_SRC on uniform allocations only with startup capture configuration | ModifyVariable |
+| `VulkanGpuBufferSharingMixin` | `VulkanGpuBuffer.Direct` | Give uniform allocations concurrent access to distinct graphics and compute families, including buffers allocated before pack activation | ModifyArg |
 | `VulkanCaptureSamplerStateMixin` | `VulkanGpuSampler` | Retain the exact native sampler creation arguments only with startup capture configuration | ModifyArg, Unique |
 | `VulkanDeviceExtensionMixin` | `VulkanDevice` | Add `VK_EXT_metal_objects` to the requested device-extension set on supported macOS systems | ModifyExpressionValue |
 
@@ -2281,6 +2296,12 @@ positions, quad topology and final atlas UVs come from `FornaxChunkVertex`; no v
 model emission participates. Mutation/relocation stamps prevent equal-size replacements from
 reusing stale geometry. BLAS data is cached per mesh revision; TLAS changes only with the mesh set
 or its stable grid-relative origins. Conservative packed-model overhang is included in culling.
+The trace accepts both triangle faces, matching the raster shadow pipeline, which also turns face
+culling off. SOLID and CUTOUT triangles share the raster alpha cutoff; see-through texels let the
+ray keep going, and the nearest hit triangle sets the depth. A ray must not count as clear just
+because it hit the back of a face, when the raster pass would still block light there. Native
+tests with a reversed light, a quad, and a closed cuboid pin this match; they do not explain what
+causes a problem seen in a screenshot.
 
 The pack's distance is converted to blocks and capped by the shadow camera extent. It describes a
 horizontal receiving cylinder, not a sphere of permitted blockers. Light-map rays outside this
@@ -2398,7 +2419,11 @@ Uniform buffers use the actual descriptor offset/range, including the live globa
 registry SSBOs include uploads recorded earlier in this command buffer. Two-dimensional input images
 are copied before the kernel and outputs afterward, with every bound mip described by its raw-file
 offset and extent. Native sampler metadata includes all three address modes and the LOD/filter
-state; a missing snapshot or unsupported extension chain makes the capture incomplete.
+state; a missing snapshot or unsupported extension chain makes the capture incomplete. The shadow
+comparison sampler builds its own `CapturedSamplerState` from the real comparison
+`VkSamplerCreateInfo`, under the same startup capture gate. If it used its parent class's snapshot
+instead, that would describe the plain handle it threw away, and replay would run with depth
+comparison off.
 
 Immutable 3D pack textures retain an owned copy of the exact payload staged during upload. That
 snapshot is published only after the upload fence succeeds. Capture archives these bytes and their
@@ -2419,6 +2444,18 @@ readback content and driver behavior. The capture frame's timing includes readba
 
 ## 12. Known laws
 
+- **A semaphore does not transfer exclusive buffer ownership between queue families.** Shared
+  uniform buffers use concurrent allocation when graphics and compute families differ, following
+  Vulkan's `VkSharingMode` contract. The same native buffer can then serve graphics and raw compute
+  without ownership barriers. The constructor hook is static because `Direct` allocates before
+  superclass initialization; touching `this` there is invalid. Native create-info tests and the
+  actual allocator bytecode contract pin the policy and hook, not client execution or visual causes.
+
+- **A shadow comparison input needs a comparison-enabled sampler in every runner.** The same depth
+  image can have a comparison alias and a raw alias. Sending a comparison alias through the plain
+  sampler cache breaks `sampler2DShadow`'s contract with no warning, even though the shader still
+  compiles and the image is correct. Compute uses the shared shadow comparison sampler and refuses
+  to run without one; the tests here pin the routing, not GPU execution or timing.
 - **A timed-out capture fence does not permit freeing its staging buffers.** Keep them on the
   submitted ring slot until its completion is confirmed. Readback also requires allocation-time
   TRANSFER_SRC usage and non-coherent invalidation; a raw Vulkan handle alone proves neither.
@@ -3304,3 +3341,34 @@ empty must not turn open sky into no sky light.
 The `voxel_water_reflection` fullscreen pass and its underscore-suffixed variants get the same sun
 and debug PassParams as `resolve`: real sun/moon direction, true sun height, and `u_Param2` holding
 terrain render distance in blocks. This anchors their lighting and fog to the same world state.
+
+
+### Graphics-owned shadow inputs in raw compute submissions
+
+`GraphicsInputDependency` looks at a compute pass's declared inputs and picks out the raster
+shadow, raw raster, entity, and RT shadow builtin names. It does not care about pass names, which
+pack is active, or whether RT is on. Right before a compute submit that reads one of these,
+`ComputePassRunner` signals an `ALL_COMMANDS` timeline value after the current graphics work and
+sends that work through `VulkanPartialFlush`. This covers raster depth writes, target clears, and
+RT copy-back (after its own Metal wait). Compute passes with none of these inputs skip the flush.
+
+The compute submit waits on the new value at `COMPUTE_SHADER` (or `ALL_COMMANDS` while capturing),
+on top of any previous-frame reuse wait already in place. Wait handles and values stay lined up by
+position; the outgoing compute-to-graphics binary signal still needs its required zero value entry.
+The order is fixed: signal graphics work, flush it, submit compute, then queue the outgoing
+graphics wait. Flipping that order would make the graphics side wait on the thing it just fed.
+None of this blocks the host each frame, and it does not move graphics resources any closer to
+being freed.
+
+On shutdown, the runner drains submitted compute work and also waits on the last graphics signal
+it flushed: a compute submit that fails can leave that signal outside every compute fence. If a
+signal or flush call throws, whether it reached the GPU is unknown. In that case the dependency
+will not reuse it, will not wait on a value that might not exist, and keeps the semaphore alive
+(logging an error) until the device itself is torn down. A failed producer signal or a failed wait
+on compute completion also blocks destroying the semaphore.
+
+Tests here pin which aliases trigger this, the wait list, the signal/flush order, cleanup of an
+orphaned signal, and holding on to an uncertain one; other tests check the native wiring by
+reading the source. None of them run the Vulkan driver, check real image contents, or reproduce a
+visual bug seen in game. This only covers the shadow inputs the engine already knows about; it is
+not a general scheduler for any graphics-written pack target.

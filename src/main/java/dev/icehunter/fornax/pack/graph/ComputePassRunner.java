@@ -16,12 +16,15 @@ import dev.icehunter.fornax.pass.compute.ComputeShaderCompiler;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
+import dev.icehunter.fornax.pass.shadow.ShadowComparisonSampler;
 import dev.icehunter.fornax.pipeline.FramePacing;
+import dev.icehunter.fornax.pipeline.VulkanPartialFlush;
 import dev.icehunter.fornax.profile.ComputePassTimer;
 import dev.icehunter.fornax.profile.FrameProfiler;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.FilterMode;
+import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanCommandPool;
 import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
@@ -44,6 +47,7 @@ import org.lwjgl.vulkan.VkMemoryBarrier;
 import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 import org.lwjgl.vulkan.VkQueueFamilyProperties;
 import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
+import org.lwjgl.vulkan.VkSemaphoreWaitInfo;
 import org.lwjgl.vulkan.VkSubmitInfo;
 import org.lwjgl.vulkan.VkSemaphoreTypeCreateInfo;
 import org.lwjgl.vulkan.VkTimelineSemaphoreSubmitInfo;
@@ -86,6 +90,7 @@ public final class ComputePassRunner implements AutoCloseable {
     private static final long FENCE_WAIT_TIMEOUT = 0xFFFF_FFFF_FFFF_FFFFL; // UINT64_MAX
 
     enum InputSamplerKind {
+        SHADOW_COMPARISON(FilterMode.LINEAR, false, false),
         PACK_TEXTURE_REPEAT(FilterMode.LINEAR, true, false),
         PACK_TEXTURE_REPEAT_MIPPED(FilterMode.LINEAR, true, true),
         NEAREST_CLAMP(FilterMode.NEAREST, false, false);
@@ -117,6 +122,11 @@ public final class ComputePassRunner implements AutoCloseable {
      * have real image edges. Keep this split pure so the descriptor path's otherwise silent sampler
      * contract can be pinned without constructing a Vulkan device. */
     static InputSamplerKind samplerKindFor(String ref, boolean packTexture, boolean volumeTexture) {
+        // Comparison aliases need a compare-enabled sampler. Their raw aliases must keep plain
+        // depth reads even when a pack declares a texture with the same name as the builtin.
+        if (ref.equals(ShadowMapManager.TARGET) || ref.equals(ShadowMapManager.ENTITY_TARGET)) {
+            return InputSamplerKind.SHADOW_COMPARISON;
+        }
         // GraphInputResolver resolves engine-owned names before consulting PackTextureRegistry. A
         // malformed pack can currently declare a texture with the same name, so the sampler choice
         // must preserve that precedence instead of applying the pack-texture sampler to the builtin
@@ -165,6 +175,9 @@ public final class ComputePassRunner implements AutoCloseable {
     @Nullable
     private final CrossQueueImageReuseSequence imageReuseSequence;
     private long imageReuseTimelineSemaphore;
+    @Nullable
+    private final GraphicsInputDependency graphicsInputDependency;
+    private long graphicsInputTimelineSemaphore;
     private CrossQueueImageReuseSequence.@Nullable Ticket pendingGraphicsRelease;
     @Nullable
     private final RawTimestampQueries timestampQueries;
@@ -221,14 +234,18 @@ public final class ComputePassRunner implements AutoCloseable {
         this.extraPushConstantBytes = extraPushConstantBytes;
         this.imageReuseSequence = graphicsCompletionBeforeStorageWrite
                 ? new CrossQueueImageReuseSequence() : null;
-        this.imageReuseTimelineSemaphore = graphicsCompletionBeforeStorageWrite
-                ? createTimelineSemaphore(backend) : 0;
+        this.graphicsInputDependency = GraphicsInputDependency.requiredBy(spec.inputs())
+                ? new GraphicsInputDependency() : null;
         this.timestampQueries = RawTimestampQueries.tryCreate(backend, spec.name());
         float timestampPeriodNs = backend.device().getDeviceInfo().timestampPeriod();
         int timestampValidBits = timestampQueries != null ? timestampQueries.validBits() : 0;
         this.computeTimer = new ComputePassTimer(profiler, spec.name(), timestampQueries,
                 timestampPeriodNs, timestampValidBits);
         try {
+            this.imageReuseTimelineSemaphore = graphicsCompletionBeforeStorageWrite
+                    ? createTimelineSemaphore(backend) : 0;
+            this.graphicsInputTimelineSemaphore = graphicsInputDependency != null
+                    ? createTimelineSemaphore(backend) : 0;
             for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
                 ring[i] = new RingSlot();
                 ring[i].commandPool = new VulkanCommandPool(backend.device(), backend.computeQueue());
@@ -238,6 +255,7 @@ public final class ComputePassRunner implements AutoCloseable {
         } catch (RuntimeException e) {
             destroyRingResources();
             destroyImageReuseTimeline();
+            destroyGraphicsInputTimeline(true);
             computeTimer.close();
             throw e;
         }
@@ -516,7 +534,9 @@ public final class ComputePassRunner implements AutoCloseable {
      * edge independently: its raw submit waits on a per-runner timeline value at
      * {@code COMPUTE_SHADER}, and renderLevel RETURN records the next value only after every graphics
      * reader. Concurrent image sharing removes ownership transfers but cannot provide this execution
-     * dependency, so it is not a substitute for the timeline.
+     * dependency, so it is not a substitute for the timeline. Known external shadow inputs add a
+     * separate wait for this frame's graphics work, after flushing it out; that wait never replaces
+     * the previous-frame storage-reuse wait.
      *
      * <p>The wait stage is a caller decision rather than a constant because the consuming stage
      * differs by consumer: a fullscreen pass reading a lighting buffer needs {@code FRAGMENT_SHADER},
@@ -695,26 +715,36 @@ public final class ComputePassRunner implements AutoCloseable {
                 // be attached.
                 VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack).sType$Default()
                         .pCommandBuffers(stack.pointers(cmd));
+                // Flush graphics work first, before the compute wait and before this dispatch's
+                // outgoing graphics wait. Doing it in a different order locks up the GPU.
+                long graphicsInputValue = publishGraphicsInputs();
                 CrossQueueImageReuseSequence.Ticket reuseTicket = imageReuseSequence != null
                         ? imageReuseSequence.beginWrite() : null;
-                if (reuseTicket != null && reuseTicket.waitValue() != 0) {
-                    // CONCURRENT sharing removes queue-family ownership transfers, not the
-                    // graphics-read -> next compute-write execution dependency. The timeline value
-                    // is signalled at renderLevel RETURN after every possible graphics reader and
-                    // waited here before this dispatch can enter COMPUTE_SHADER.
+                List<GraphicsInputDependency.Wait> waits = GraphicsInputDependency.waits(
+                        graphicsInputTimelineSemaphore, graphicsInputValue,
+                        imageReuseTimelineSemaphore, reuseTicket != null ? reuseTicket.waitValue() : 0);
+                if (!waits.isEmpty()) {
+                    // These two waits are separate: this frame's graphics-write to compute-read,
+                    // and last frame's graphics-read to this compute-write. CONCURRENT image sharing
+                    // does not order either one.
+                    LongBuffer waitSemaphores = stack.mallocLong(waits.size());
+                    LongBuffer waitValues = stack.mallocLong(waits.size());
+                    IntBuffer waitStages = stack.mallocInt(waits.size());
+                    for (int i = 0; i < waits.size(); i++) {
+                        waitSemaphores.put(i, waits.get(i).semaphore());
+                        waitValues.put(i, waits.get(i).value());
+                        waitStages.put(i, capture != null ? VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+                                : VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+                    }
                     VkTimelineSemaphoreSubmitInfo timelineInfo = VkTimelineSemaphoreSubmitInfo.calloc(stack)
-                            .sType$Default()
-                            .pWaitSemaphoreValues(stack.longs(reuseTicket.waitValue()));
+                            .sType$Default().pWaitSemaphoreValues(waitValues);
                     if (graphicsWaitStageMask != 0) {
-                        // VkTimelineSemaphoreSubmitInfo's value counts must match VkSubmitInfo's
-                        // semaphore counts even when this entry is the existing BINARY
-                        // compute-to-graphics signal; binary semaphores carry the required value 0.
+                        // The value list must still cover the existing binary signal semaphore.
+                        // Vulkan ignores its value but still needs a zero entry in that spot.
                         timelineInfo.pSignalSemaphoreValues(stack.longs(0L));
                     }
                     submitInfo.pNext(timelineInfo.address())
-                            .pWaitSemaphores(stack.longs(imageReuseTimelineSemaphore))
-                            .pWaitDstStageMask(stack.ints(capture != null
-                                    ? VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+                            .pWaitSemaphores(waitSemaphores).pWaitDstStageMask(waitStages);
                 }
                 if (graphicsWaitStageMask != 0) {
                     submitInfo.pSignalSemaphores(stack.longs(slot.graphicsSemaphore));
@@ -784,6 +814,20 @@ public final class ComputePassRunner implements AutoCloseable {
             }
         }
         return -1L;
+    }
+
+    /** Submit all current graphics work, including shadow raster writes and RT copy-back, and
+     * signal a timeline value for it. A partial flush sends the work out without moving encoder
+     * retirement forward or waiting on the host. The graph only calls compute between render
+     * passes, so no short-lived encoder handle leaks out of this method. */
+    private long publishGraphicsInputs() {
+        if (graphicsInputDependency == null) return 0;
+        VulkanCommandEncoder graphics = backend.device().createCommandEncoder();
+        VulkanPartialFlush partialFlush = (VulkanPartialFlush) graphics;
+        return graphicsInputDependency.publish(
+                value -> graphics.signalSemaphore(graphicsInputTimelineSemaphore, value,
+                        VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT),
+                partialFlush::fornax$flushPending);
     }
 
     private boolean captureReuseInputs(TargetRegistry registry, @Nullable PackOptionsBuffer options,
@@ -905,10 +949,23 @@ public final class ComputePassRunner implements AutoCloseable {
                         if (capture != null) capture.image(i, name, type, view, null, null);
                     } else {
                         InputSamplerKind samplerKind = samplerKinds.get(i);
-                        VulkanGpuSampler sampler = (VulkanGpuSampler) (samplerKind.repeat()
-                                ? RenderSystem.getSamplerCache().getRepeat(
-                                        samplerKind.filter(), samplerKind.mipmapped())
-                                : RenderSystem.getSamplerCache().getClampToEdge(samplerKind.filter()));
+                        VulkanGpuSampler sampler;
+                        if (samplerKind == InputSamplerKind.SHADOW_COMPARISON) {
+                            // A plain sampler makes sampler2DShadow reads invalid, and the shader
+                            // still compiles, so there is no other way to catch this. There is no
+                            // fallback if a comparison sampler is missing.
+                            GpuSampler comparisonSampler = ShadowComparisonSampler.get();
+                            if (!(comparisonSampler instanceof VulkanGpuSampler vulkanComparison)) {
+                                throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
+                                        + "' comparison input '" + name + "' requires a Vulkan shadow comparison sampler");
+                            }
+                            sampler = vulkanComparison;
+                        } else {
+                            sampler = (VulkanGpuSampler) (samplerKind.repeat()
+                                    ? RenderSystem.getSamplerCache().getRepeat(
+                                            samplerKind.filter(), samplerKind.mipmapped())
+                                    : RenderSystem.getSamplerCache().getClampToEdge(samplerKind.filter()));
+                        }
                         VkDescriptorImageInfo.Buffer imageInfo = VkDescriptorImageInfo.calloc(1, stack)
                                 .sampler(sampler.vkSampler()).imageView(imageView)
                                 // Mojang keeps sampled and attachment textures in GENERAL on its
@@ -968,11 +1025,14 @@ public final class ComputePassRunner implements AutoCloseable {
      * (draining any still-in-flight dispatch first, so a pack (re)build never destroys a buffer the
      * GPU is still reading -- same invariant {@code VoxelDebugRaymarchPass.disable()} already
      * established for its own ring). A hazardous runner's image-reuse timeline is destroyed after
-     * that drain. Called from {@code GraphRunner.closeCurrent()}. */
+     * that drain. The current-input timeline also waits on graphics signals a failed submit left
+     * outside every compute fence, or is kept alive if that submit's outcome is unknown.
+     * Called from {@code GraphRunner.closeCurrent()}. */
     @Override
     public void close() {
         var device = backend.device().vkDevice();
-        destroyRingResources();
+        boolean computeCompleted = destroyRingResources();
+        destroyGraphicsInputTimeline(computeCompleted);
         if (imageReuseTimelineSemaphore != 0) {
             VK13.vkDestroySemaphore(device, imageReuseTimelineSemaphore, null);
             imageReuseTimelineSemaphore = 0;
@@ -985,6 +1045,35 @@ public final class ComputePassRunner implements AutoCloseable {
         destroyPipeline(backend, pipeline);
     }
 
+    private void destroyGraphicsInputTimeline(boolean computeCompleted) {
+        if (graphicsInputTimelineSemaphore == 0 || graphicsInputDependency == null) return;
+        // A failed compute submit leaves a live graphics signal outside every ring fence. Do not
+        // destroy it until it is proven done. If a partial flush's outcome is unknown, keep the
+        // handle until the device itself is destroyed: waiting on a value that was never sent
+        // could hang forever.
+        boolean completed = graphicsInputDependency.awaitBeforeDestroy(computeCompleted, value -> {
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                VkSemaphoreWaitInfo waitInfo = VkSemaphoreWaitInfo.calloc(stack).sType$Default()
+                        .pSemaphores(stack.longs(graphicsInputTimelineSemaphore))
+                        .pValues(stack.longs(value));
+                int result = VK13.vkWaitSemaphores(backend.device().vkDevice(), waitInfo, FENCE_WAIT_TIMEOUT);
+                if (result != VK13.VK_SUCCESS) {
+                    FornaxMod.LOGGER.error("[Fornax] Graphics input timeline wait failed for '{}' at {}: {}",
+                            spec.name(), value, result);
+                }
+                return result == VK13.VK_SUCCESS;
+            }
+        });
+        if (!completed) {
+            FornaxMod.LOGGER.error("[Fornax] Retaining graphics input semaphore {} for '{}' until device destruction: "
+                            + "producer submission or producer/consumer completion is uncertain",
+                    graphicsInputTimelineSemaphore, spec.name());
+            return;
+        }
+        VK13.vkDestroySemaphore(backend.device().vkDevice(), graphicsInputTimelineSemaphore, null);
+        graphicsInputTimelineSemaphore = 0;
+    }
+
     private void destroyImageReuseTimeline() {
         if (imageReuseTimelineSemaphore != 0) {
             VK13.vkDestroySemaphore(backend.device().vkDevice(), imageReuseTimelineSemaphore, null);
@@ -992,7 +1081,8 @@ public final class ComputePassRunner implements AutoCloseable {
         }
     }
 
-    private void destroyRingResources() {
+    private boolean destroyRingResources() {
+        boolean completed = true;
         var device = backend.device().vkDevice();
         for (int slotIndex = 0; slotIndex < ring.length; slotIndex++) {
             RingSlot slot = ring[slotIndex];
@@ -1008,6 +1098,8 @@ public final class ComputePassRunner implements AutoCloseable {
                         slot.capture = null;
                     }
                     computeTimer.drainCompleted(slotIndex);
+                } else {
+                    completed = false;
                 }
             }
             if (slot.fence != 0) {
@@ -1021,6 +1113,7 @@ public final class ComputePassRunner implements AutoCloseable {
                 slot.commandPool = null;
             }
         }
+        return completed;
     }
 
     private static void destroyPipeline(VulkanComputeBackend backend,

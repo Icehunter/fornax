@@ -9,7 +9,10 @@ import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
 import com.mojang.blaze3d.vulkan.VulkanGpuSampler;
 import com.mojang.blaze3d.vulkan.VulkanUtils;
+import dev.icehunter.fornax.debug.CaptureBufferUsage;
+import dev.icehunter.fornax.debug.CaptureSamplerState;
 import dev.icehunter.fornax.mixin.vulkan.GpuDeviceBackendAccessor;
+import dev.icehunter.fornax.pipeline.CapturedSamplerState;
 import org.jspecify.annotations.Nullable;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK10;
@@ -17,6 +20,7 @@ import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkSamplerCreateInfo;
 
 import java.nio.LongBuffer;
+import java.util.Map;
 import java.util.OptionalDouble;
 
 /**
@@ -106,8 +110,9 @@ public final class ShadowComparisonSampler {
         return sampler;
     }
 
-    private static final class ComparisonSampler extends VulkanGpuSampler {
+    private static final class ComparisonSampler extends VulkanGpuSampler implements CapturedSamplerState {
         private final long comparisonVkSampler;
+        private Map<String, Object> comparisonSamplerState = Map.of();
 
         ComparisonSampler(VulkanDevice device) {
             // Matches the plain shadow-input sampler's own filter/address contract (LINEAR +
@@ -129,7 +134,14 @@ public final class ShadowComparisonSampler {
             return comparisonVkSampler;
         }
 
-        private static long createComparisonSampler(VulkanDevice device) {
+        /** The parent class's capture describes the plain sampler it threw away. Report the
+         * create info for the actual handle this object uses, so replay keeps comparison on. */
+        @Override
+        public Map<String, Object> fornax$samplerState() {
+            return comparisonSamplerState;
+        }
+
+        private long createComparisonSampler(VulkanDevice device) {
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 VkSamplerCreateInfo info = VkSamplerCreateInfo.calloc(stack)
                         .sType$Default()
@@ -151,6 +163,9 @@ public final class ShadowComparisonSampler {
                         .minLod(0f)
                         .maxLod(0f);
 
+                if (CaptureBufferUsage.enabled()) {
+                    comparisonSamplerState = CaptureSamplerState.snapshot(info);
+                }
                 LongBuffer out = stack.callocLong(1);
                 VkDevice vkDevice = device.vkDevice();
                 int result = VK10.vkCreateSampler(vkDevice, info, null, out);

@@ -64,8 +64,9 @@ class ComputePassRunnerContractTest {
         String run = methodBody(source, "public long run(TargetRegistry registry");
 
         assertTrue(hasConnectedTimelineSubmitContract(run),
-                "run() must connect one reuse ticket to the actual VkSubmitInfo wait, align its "
-                        + "simultaneous binary signal, cancel both failed-submit paths, and retain success");
+                "run() must merge current graphics and previous reuse timeline values into aligned arrays "
+                        + "on the actual VkSubmitInfo, align its binary signal, cancel both failed-submit paths, "
+                        + "and retain the successful reuse ticket");
     }
 
     @Test
@@ -74,17 +75,62 @@ class ComputePassRunnerContractTest {
 
         String[] mutants = {
                 replaceOnce(run,
-                        ".pWaitSemaphores(stack.longs(imageReuseTimelineSemaphore))",
-                        ".pWaitSemaphores(stack.longs(slot.graphicsSemaphore))"),
+                        "graphicsInputTimelineSemaphore, graphicsInputValue,",
+                        "slot.graphicsSemaphore, graphicsInputValue,"),
                 replaceOnce(run,
-                        "? VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT",
-                        "? VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT"),
+                        "graphicsInputTimelineSemaphore, graphicsInputValue,",
+                        "graphicsInputTimelineSemaphore, 0L,"),
                 replaceOnce(run,
-                        "? VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT",
-                        "? VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT"),
+                        "imageReuseTimelineSemaphore, reuseTicket != null ? reuseTicket.waitValue() : 0",
+                        "slot.graphicsSemaphore, reuseTicket != null ? reuseTicket.waitValue() : 0"),
+                replaceOnce(run,
+                        "imageReuseTimelineSemaphore, reuseTicket != null ? reuseTicket.waitValue() : 0",
+                        "imageReuseTimelineSemaphore, 0L"),
+                replaceOnce(run,
+                        "if (!waits.isEmpty()) {",
+                        "if (reuseTicket != null && reuseTicket.waitValue() != 0) {"),
+                replaceOnce(run,
+                        "LongBuffer waitSemaphores = stack.mallocLong(waits.size());",
+                        "LongBuffer waitSemaphores = stack.mallocLong(1);"),
+                replaceOnce(run,
+                        "LongBuffer waitValues = stack.mallocLong(waits.size());",
+                        "LongBuffer waitValues = stack.mallocLong(1);"),
+                replaceOnce(run,
+                        "IntBuffer waitStages = stack.mallocInt(waits.size());",
+                        "IntBuffer waitStages = stack.mallocInt(1);"),
+                replaceOnce(run,
+                        "waitSemaphores.put(i, waits.get(i).semaphore());",
+                        "waitSemaphores.put(i, waits.get(0).semaphore());"),
+                replaceOnce(run,
+                        "waitValues.put(i, waits.get(i).value());",
+                        "waitValues.put(i, waits.get(0).value());"),
+                replaceOnce(run,
+                        "waitStages.put(i, capture != null ? VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT",
+                        "waitStages.put(i, capture != null ? VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT"),
+                replaceOnce(run,
+                        ": VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);",
+                        ": VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);"),
+                replaceOnce(run,
+                        ".pWaitSemaphoreValues(waitValues)",
+                        ".pWaitSemaphoreValues(stack.longs(reuseTicket.waitValue()))"),
+                replaceOnce(run,
+                        ".pWaitSemaphores(waitSemaphores)",
+                        ".pWaitSemaphores(stack.longs(imageReuseTimelineSemaphore))"),
+                replaceOnce(run,
+                        ".pWaitDstStageMask(waitStages)",
+                        ".pWaitDstStageMask(stack.ints(VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT))"),
+                replaceOnce(run,
+                        "submitInfo.pNext(timelineInfo.address())",
+                        "submitInfo.pNext(0L)"),
                 replaceOnce(run,
                         "timelineInfo.pSignalSemaphoreValues(stack.longs(0L));",
                         "timelineInfo.pSignalSemaphoreValues(stack.longs(1L));"),
+                replaceOnce(run,
+                        "submitInfo.pSignalSemaphores(stack.longs(slot.graphicsSemaphore));",
+                        "submitInfo.pSignalSemaphores(stack.longs(imageReuseTimelineSemaphore));"),
+                replaceOnce(run,
+                        "VK13.vkQueueSubmit(backend.computeQueue().vkQueue(), submitInfo, slot.fence)",
+                        "VK13.vkQueueSubmit(backend.computeQueue().vkQueue(), VkSubmitInfo.calloc(stack), slot.fence)"),
                 replaceFirst(run,
                         "imageReuseSequence.cancel(reuseTicket);",
                         "// cancellation removed"),
@@ -137,13 +183,23 @@ class ComputePassRunnerContractTest {
                 .replaceAll("\\s+", "");
         String begin = "CrossQueueImageReuseSequence.TicketreuseTicket=imageReuseSequence!=null"
                 + "?imageReuseSequence.beginWrite():null;";
+        String mergedWaits = "List<GraphicsInputDependency.Wait>waits=GraphicsInputDependency.waits("
+                + "graphicsInputTimelineSemaphore,graphicsInputValue,"
+                + "imageReuseTimelineSemaphore,reuseTicket!=null?reuseTicket.waitValue():0);";
+        String alignedWaitArrays = "if(!waits.isEmpty()){"
+                + "LongBufferwaitSemaphores=stack.mallocLong(waits.size());"
+                + "LongBufferwaitValues=stack.mallocLong(waits.size());"
+                + "IntBufferwaitStages=stack.mallocInt(waits.size());"
+                + "for(inti=0;i<waits.size();i++){"
+                + "waitSemaphores.put(i,waits.get(i).semaphore());"
+                + "waitValues.put(i,waits.get(i).value());"
+                + "waitStages.put(i,capture!=null?VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT"
+                + ":VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);}";
         String waitValue = "VkTimelineSemaphoreSubmitInfotimelineInfo="
                 + "VkTimelineSemaphoreSubmitInfo.calloc(stack).sType$Default()"
-                + ".pWaitSemaphoreValues(stack.longs(reuseTicket.waitValue()));";
+                + ".pWaitSemaphoreValues(waitValues);";
         String attachedWait = "submitInfo.pNext(timelineInfo.address())"
-                + ".pWaitSemaphores(stack.longs(imageReuseTimelineSemaphore))"
-                + ".pWaitDstStageMask(stack.ints(capture!=null?VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT"
-                + ":VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));";
+                + ".pWaitSemaphores(waitSemaphores).pWaitDstStageMask(waitStages);";
         String alignedBinaryValue = "if(graphicsWaitStageMask!=0){"
                 + "timelineInfo.pSignalSemaphoreValues(stack.longs(0L));}";
         String binarySignal = "if(graphicsWaitStageMask!=0){"
@@ -155,23 +211,24 @@ class ComputePassRunnerContractTest {
         String retainSuccess = "pendingGraphicsRelease=reuseTicket;";
 
         int beginIndex = compact.indexOf(begin);
-        int waitValueIndex = compact.indexOf(waitValue);
-        int attachedWaitIndex = compact.indexOf(attachedWait);
-        int alignedValueIndex = compact.indexOf(alignedBinaryValue);
-        int binarySignalIndex = compact.indexOf(binarySignal);
+        // Contiguity pins the actual arrays and timeline structure inside the same nonempty-wait
+        // branch. Matching isolated identifiers elsewhere would accept a disconnected submission.
+        String connectedWait = mergedWaits + alignedWaitArrays + waitValue + alignedBinaryValue
+                + attachedWait + "}" + binarySignal;
+        int connectedWaitIndex = compact.indexOf(connectedWait);
         int submitIndex = compact.indexOf("VK13.vkQueueSubmit(backend.computeQueue().vkQueue(),submitInfo,slot.fence)");
+        int thrownCancelIndex = compact.indexOf(thrownSubmitCancel);
+        int failedCancelIndex = compact.indexOf(failedResultCancel);
         int retainIndex = compact.indexOf(retainSuccess);
         return !compact.contains("graphicsQueue().waitIdle()")
                 && beginIndex >= 0
-                && waitValueIndex > beginIndex
-                && alignedValueIndex > waitValueIndex
-                && attachedWaitIndex > alignedValueIndex
-                && binarySignalIndex > attachedWaitIndex
-                && submitIndex > binarySignalIndex
-                && compact.contains(thrownSubmitCancel)
-                && compact.contains(failedResultCancel)
+                && connectedWaitIndex == beginIndex + begin.length()
+                && submitIndex > connectedWaitIndex + connectedWait.length()
+                && thrownCancelIndex > submitIndex
+                && failedCancelIndex > thrownCancelIndex
                 && countOccurrences(compact, "imageReuseSequence.cancel(reuseTicket);") == 2
-                && retainIndex > submitIndex;
+                && retainIndex > failedCancelIndex;
+
     }
 
     private static String methodBody(String source, String signature) {

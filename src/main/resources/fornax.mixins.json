@@ -79,6 +79,7 @@
     "vulkan.RenderPassBackendAccessor",
     "vulkan.VulkanCommandEncoderPartialFlushMixin",
     "vulkan.VulkanCaptureBufferUsageMixin",
+    "vulkan.VulkanGpuBufferSharingMixin",
     "vulkan.VulkanCaptureSamplerStateMixin",
     "vulkan.VulkanDeviceExtensionMixin",
     "vulkan.VulkanConstStorageTextureMixin",

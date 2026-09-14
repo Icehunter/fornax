@@ -102,16 +102,15 @@ kernel void mesh_shadow_trace(constant MeshShadowConstants& c [[buffer(0)]],
     {
         intersection_params params;
         params.force_opacity(forced_opacity::non_opaque);
+        // Raster shadow pipelines disable face culling. Both sides of an uploaded triangle
+        // can block light; only the shared alpha test below rejects its covered texels.
         params.set_triangle_cull_mode(triangle_cull_mode::none);
-        // Same outward-normal convention pinned by rt_trace.metal's native facing fixture.
-        params.set_triangle_front_facing_winding(winding::clockwise);
         intersection_query<triangle_data,instancing> query;
         // Cylinder membership only selects rays. Clipping this interval would discard distant
         // blockers that cast shadows on nearby receivers, especially when the sun is low.
         query.reset(ray(origin,extent/rayLength,0.0,rayLength),scene,params);
         while(query.next()) {
-            if (query.get_candidate_intersection_type()!=intersection_type::triangle
-                    || !query.is_candidate_triangle_front_facing()) continue;
+            if (query.get_candidate_intersection_type()!=intersection_type::triangle) continue;
             device const MeshShadowPrimitive* data=
                 (device const MeshShadowPrimitive*)query.get_candidate_primitive_data();
             float2 bary=query.get_candidate_triangle_barycentric_coord();

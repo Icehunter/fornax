@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
@@ -22,8 +23,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * <p>Scope: instruments where a pack repo authors the channel order a Fornax formatter names, not
  * which repo owns the underlying render target. {@code SHADOW_QUERY_1..3} read the shadow map
  * through a Fornax-owned target name ({@code sunShadowMap}/{@code sunShadowMapRaw}), but the
- * {@code vec4(...)} that fills R/G/B/A is written in Plague's {@code gbuffer_resolve.fsh} -- the same
- * exposure UW_GLINT_5 had. Ordinals where Fornax's own {@code gbuffer_resolve.fsh} (the
+ * {@code vec4(...)} that fills R/G/B/A is written by the pack's resolve or shadow prepass. Query 3
+ * travels through the shadow target unchanged before the resolve exposes it to readback. Ordinals where Fornax's own {@code gbuffer_resolve.fsh} (the
  * LabPBR-decode-audit ordinals shipped in this repo) authors the order are out of scope: that
  * coupling already fails at compile time within one repo.
  *
@@ -71,8 +72,8 @@ class CrossRepoChannelContractTest {
             // substring; no special handling needed.
             new Row("SHADOW_QUERY_2", "shaders/post/gbuffer_resolve.fsh",
                     "fragColor = vec4(dbgShadowUv, dbgInRange ? 1.0 : 0.0, visibility);"),
-            new Row("SHADOW_QUERY_3", "shaders/post/gbuffer_resolve.fsh",
-                    "fragColor = vec4(dbgRawDepth, 0.0, dbgStoredDepth, 0.0);"));
+            new Row("SHADOW_QUERY_3", "shaders/post/rt_shadow_composite.fsh",
+                    "fragColor = vec4(coordinates.z, 0.0, storedDepth, 0.0);"));
 
     @Test
     void formatterChannelOrderMatchesTheRealPackWrite() throws IOException {
@@ -110,6 +111,31 @@ class CrossRepoChannelContractTest {
                     + " plausible, WRONG numbers with no error anywhere else:\n\n"
                     + String.join("\n\n", violations));
         }
+    }
+
+    @Test
+    void shadowQuery3ForwardsThePrepassChannelsWithoutReorderingThem() throws IOException {
+        if (!Files.isRegularFile(PLAGUE.resolve("pack.toml"))) return;
+        String resolve = normalize(Files.readString(PLAGUE.resolve("shaders/post/gbuffer_resolve.fsh")));
+        String prepass = normalize(Files.readString(PLAGUE.resolve("shaders/post/rt_shadow_composite.fsh")));
+        assertTrue(resolve.contains("#defineRT_SHADOW_COMPOSITEu_Input18"));
+        int query = resolve.indexOf("if(debugView==DBG_SHADOW_QUERY_2||debugView==DBG_SHADOW_QUERY_3)");
+        int lighting = resolve.indexOf("floatshadowDist=", query);
+        assertTrue(query >= 0 && lighting > query, "query branch must precede ordinary lighting");
+        assertTrue(resolve.substring(query, lighting).contains(normalize("""
+                #ifdef PLAGUE_DEBUG_VIEWS
+                        fragColor = texelFetch(RT_SHADOW_COMPOSITE, ivec2(gl_FragCoord.xy), 0);
+                #else
+                        fragColor = vec4(dbgRawDepth, 0.0, 0.0, 0.0);
+                #endif
+                        return;
+                """)), "query 3 must expose the exact prepass texel under the debug compile arm");
+        assertTrue(prepass.contains("if(debugView==DBG_SHADOW_QUERY_3)"));
+        assertTrue(prepass.contains(normalize("""
+                float storedDepth = texelFetch(SHADOW_RAW_MAP, mapTexel, 0).r;
+                fragColor = vec4(coordinates.z, 0.0, storedDepth, 0.0);
+                return;
+                """)), "query 3 must return receiver depth in red and raw raster depth in blue");
     }
 
     /** Whitespace-insensitive containment check -- collapses every whitespace run to nothing so a

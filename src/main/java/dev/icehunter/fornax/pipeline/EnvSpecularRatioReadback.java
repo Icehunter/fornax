@@ -328,9 +328,9 @@ public final class EnvSpecularRatioReadback {
                     "[Fornax] shadowUv.x=%s\nshadowUv.y=%s\ninRange=%s\nvisibility=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, a, x, y, w, h);
-            // Pack write: fragColor = vec4(dbgRawDepth, 0.0, dbgStoredDepth, 0.0); -- the compared
-            // value is the raw light-clip depth with no scale constant between the two sides, so
-            // green is intentionally empty and matching red/blue means the comparison would pass.
+            // Pack prepass write: fragColor = vec4(coordinates.z, 0.0, storedDepth, 0.0);
+            // The resolve forwards this exact shadow-target texel. Red is raw receiver light-clip
+            // depth and blue is raw raster depth; green and alpha are intentionally empty.
             case SHADOW_QUERY_3 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] rawDepth(compared)=%s\nstoredDepth=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
