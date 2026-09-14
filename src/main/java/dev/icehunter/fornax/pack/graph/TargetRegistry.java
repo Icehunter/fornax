@@ -707,6 +707,7 @@ public final class TargetRegistry implements AutoCloseable {
             case RGBA8 -> GpuFormat.RGBA8_UNORM;
             case RGBA16_SNORM -> GpuFormat.RGBA16_SNORM;
             case RGBA16F -> GpuFormat.RGBA16_FLOAT;
+            case RGBA32F -> GpuFormat.RGBA32_FLOAT;
             case RG16F -> GpuFormat.RG16_FLOAT;
             case R8 -> GpuFormat.R8_UNORM;
             case R32F -> GpuFormat.R32_FLOAT;

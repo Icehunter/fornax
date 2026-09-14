@@ -34,6 +34,9 @@ import org.lwjgl.vulkan.VkImageViewCreateInfo;
 
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.function.Consumer;
 
 /**
@@ -125,6 +128,56 @@ public final class Volume3DTexture extends VulkanGpuTexture {
     private final long volumeAllocation;
     /** Latched by {@link #upload}; a second call is rejected rather than re-barriered. */
     private boolean uploaded;
+    /** Published only after upload completion; never reconstructed from a mutable source asset. */
+    @Nullable private UploadSnapshot uploadSnapshot;
+
+    /** Original upload bytes, not a readback of later GPU writes. Pack volumes are read-only. */
+    @Nullable
+    public UploadSnapshot uploadSnapshot() {
+        return uploadSnapshot;
+    }
+
+    /** Immutable owned payload used both for staging and one-shot capture. One base mip, x-fastest. */
+    public static final class UploadSnapshot {
+        private final int width;
+        private final int height;
+        private final int depth;
+        private final int vkFormat;
+        private final RawVolumeAsset.Format format;
+        private final byte[] payload;
+        private final String sha256;
+
+        private UploadSnapshot(RawVolumeAsset asset, int vkFormat) {
+            this.width = asset.width();
+            this.height = asset.height();
+            this.depth = asset.depth();
+            this.vkFormat = vkFormat;
+            this.format = asset.format();
+            ByteBuffer source = asset.texels().duplicate();
+            this.payload = new byte[source.remaining()];
+            source.get(payload);
+            try {
+                this.sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(payload));
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException("Required SHA-256 digest is unavailable", e);
+            }
+        }
+
+        public int width() { return width; }
+        public int height() { return height; }
+        public int depth() { return depth; }
+        public int vkFormat() { return vkFormat; }
+        public RawVolumeAsset.Format format() { return format; }
+        public int mipLevels() { return 1; } // The volume image and upload both declare only mip zero.
+        public String sha256() { return sha256; }
+        /** Each caller gets its own cursor; read-only also prevents exposing the backing array. */
+        public ByteBuffer texels() { return ByteBuffer.wrap(payload).asReadOnlyBuffer(); }
+    }
+
+    /** Device-independent ownership boundary immediately before the validated upload is staged. */
+    static UploadSnapshot snapshotUpload(RawVolumeAsset asset, int vkFormat) {
+        return new UploadSnapshot(asset, vkFormat);
+    }
 
     private Volume3DTexture(VulkanDevice device, String label, int usage, int vkFormat,
                            int width, int height, int depth) {
@@ -342,9 +395,9 @@ public final class Volume3DTexture extends VulkanGpuTexture {
     public void upload(RawVolumeAsset asset) {
         long sizeBytes = validateUpload(getLabel(), uploaded, usage(),
                 volumeWidth, volumeHeight, volumeDepth, volumeVkFormat, asset);
-        // duplicate() so the asset's own buffer position is left alone; RawVolumeAsset hands out
-        // the same ByteBuffer instance to every caller.
-        ByteBuffer texels = asset.texels().duplicate();
+        // Stage from the owned copy itself, so later source mutations cannot change capture identity.
+        UploadSnapshot snapshot = snapshotUpload(asset, volumeVkFormat);
+        ByteBuffer texels = snapshot.texels();
         // Latched BEFORE any GPU work: past this point a throw may leave the image mid-transition,
         // and a retry would barrier it from UNDEFINED a second time.
         uploaded = true;
@@ -429,6 +482,7 @@ public final class Volume3DTexture extends VulkanGpuTexture {
                                 VK13.VK_ACCESS_MEMORY_READ_BIT | VK13.VK_ACCESS_MEMORY_WRITE_BIT);
                     }
                 });
+                uploadSnapshot = snapshot;
             } finally {
                 // Reached only after recordAndFlush's fence wait returned, which is a correctness
                 // requirement and not tidy-up: destroying a buffer a submitted copy still reads is

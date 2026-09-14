@@ -76,6 +76,18 @@ public final class FullscreenCapture {
         return active != null && active.passes.containsKey(name) && !active.passes.get(name).started;
     }
 
+    /** Shares the existing one-frame F10 request; compute readbacks own a bounded fence. */
+    public static Capture beginCompute(String name, String shader) {
+        if (!isSelected(name)) return null;
+        Capture capture = active.passes.get(name);
+        capture.started = true;
+        capture.data.put("kind", "compute");
+        capture.data.put("shader", shader);
+        capture.data.put("replayComplete", false);
+        capture.session.pending++;
+        return capture;
+    }
+
     public static Capture before(PassSpec spec, boolean[] bufferInputs, List<GpuTextureView> inputs,
                                  List<String> samplers, GpuTextureView output) {
         Session session = active;
@@ -239,9 +251,24 @@ public final class FullscreenCapture {
         }
 
         private boolean texturesComplete() {
+            if ("compute".equals(data.get("kind"))) return Boolean.TRUE.equals(data.get("replayComplete"));
             return drawn && inputs.size() == expectedInputs && outputs.size() == 1
                     && inputs.stream().allMatch(entry -> "captured".equals(entry.get("status")))
                     && outputs.stream().allMatch(entry -> "captured".equals(entry.get("status")));
+        }
+
+        Map<String, Object> computeData() { return data; }
+        Path directory() { return session.directory; }
+        void reserveBytes(long bytes) {
+            long total = Math.addExact(session.reserved, bytes);
+            if (bytes < 0 || total > MAX_BYTES) throw new IllegalArgumentException("Capture exceeds 1 GiB byte budget");
+            session.reserved = total;
+        }
+        void computeDispatched() { drawn = true; }
+        void computeRetired(boolean complete) {
+            data.put("replayComplete", complete);
+            session.pending--;
+            session.write();
         }
 
         private void unavailableUniform(String uniformName) {
@@ -331,7 +358,7 @@ public final class FullscreenCapture {
             }
         }
 
-        private void fail(String error) {
+        void fail(String error) {
             data.put("error", error);
             data.put("status", "failed");
             session.write();
@@ -349,7 +376,7 @@ public final class FullscreenCapture {
         Session(Path directory, List<String> names, Map<String, Integer> compileValues) {
             this.directory = directory;
             names.forEach(name -> passes.put(name, new Capture(this, name)));
-            manifest.put("version", 1);
+            manifest.put("version", 2);
             manifest.put("frame", frame);
             manifest.put("byteOrder", ByteOrder.nativeOrder().toString());
             manifest.put("rowOrder", "GPU image order; no vertical flip");
@@ -370,8 +397,10 @@ public final class FullscreenCapture {
             }
             manifest.put("textureCaptureComplete", ended && pending == 0 && !failed
                     && passes.values().stream().allMatch(Capture::texturesComplete));
-            manifest.put("replayComplete", false); // Base mip only; no globals, options or resolved shader.
-            manifest.put("status", failed ? "failed" : !ended || pending != 0 ? "pending" : unavailable ? "incomplete" : "complete");
+            manifest.put("replayComplete", ended && pending == 0 && !failed
+                    && passes.values().stream().allMatch(capture -> Boolean.TRUE.equals(capture.data.get("replayComplete"))));
+            boolean incomplete = unavailable || passes.values().stream().anyMatch(capture -> !capture.texturesComplete());
+            manifest.put("status", failed ? "failed" : !ended || pending != 0 ? "pending" : incomplete ? "incomplete" : "complete");
             manifest.put("reservedBytes", reserved);
             manifest.put("pendingCallbacks", pending);
             try {

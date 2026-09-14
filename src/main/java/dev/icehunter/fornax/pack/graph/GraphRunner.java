@@ -593,13 +593,16 @@ public final class GraphRunner {
     }
 
     /**
-     * The engine-guaranteed {@link SceneHistory#TARGET} this pack's registry currently has
-     * allocated, or {@code null} if no pack is active (or its runners aren't built yet). {@code
-     * GameRendererMixin}'s post-frame copy hook reads this every frame, under every method,
-     * regardless of which passes the active pack's own graph declares.
+     * The engine-guaranteed {@link SceneHistory#TARGET} allocated for the actively rendering
+     * graph, or {@code null} while inactive or unallocated. The master toggle retains the registry,
+     * so allocation alone must not keep the post-frame copy alive after rendering becomes inactive.
+     * Activity follows the renderer latch, matching the graph's prepare/finish boundaries.
      */
     @Nullable
     public static TargetInstance sceneHistoryTarget() {
+        if (!isActive()) {
+            return null;
+        }
         TargetRegistry r = registry;
         return r == null ? null : r.get(SceneHistory.TARGET);
     }
@@ -841,93 +844,8 @@ public final class GraphRunner {
             compileValuesAsStrings.put(e.getKey(), String.valueOf(e.getValue()));
         }
 
-        // u_PackOptions is bound into every FULLSCREEN pass's bind group unconditionally (see
-        // FullscreenPassRunner.build()), but never into a geometry pass's own (Sodium-owned) bind
-        // group or a mipchain pass's minimal u_Input0/u_PassParams-only one -- so the block
-        // declaration is prepended only to shader files a fullscreen pass actually uses, right after
-        // each file's own leading #version line (GLSL requires #version to stay the very first
-        // token). Pack shaders therefore never hand-write this block themselves; they just reference
-        // its members (e.g. u_SsaoRadius) as bare globals.
-        Set<String> fullscreenShaderPaths = new HashSet<>();
-        // Maps a shader source path -> the exact u_PackOptions GLSL block text to prepend to it (absent
-        // = that shader gets none). Every FULLSCREEN pass's shader shares ONE no-binding block (Blaze3D
-        // resolves u_PackOptions in its bind group by name, not position). A COMPUTE pass binds
-        // u_PackOptions as a reserved UNIFORM_BUFFER descriptor at a POSITIONAL binding (see
-        // ComputePassRunner.PACK_OPTIONS_INPUT / combinedBindingOrder), so its block must instead carry
-        // that exact binding number -- computed per-pass here, since a future graph could in principle
-        // give two compute shaders different binding indices for the same reserved input name. A
-        // compute pass whose inputs don't list "packOptions" at all gets no block, regardless of
-        // whether the pack declares runtime options. The engine FX_* #define preamble stays
-        // FULLSCREEN-only (compute passes don't consume it).
-        Map<String, String> packOptionsBlockByShader = new LinkedHashMap<>();
-        // A pack with zero runtime options must not get the block at all -- an empty uniform block is
-        // illegal GLSL. FullscreenPassRunner still binds the (min-16-byte) buffer; a shader that never
-        // declares the block simply ignores the binding.
-        boolean hasRuntimeOptions = !pendingOptionsLayout.offsets().isEmpty();
-        String fullscreenPackOptionsBlock = hasRuntimeOptions ? pendingOptionsLayout.glslBlock() : null;
-        for (PassSpec p : pack.graph().passes()) {
-            if (p.type() == PassType.GEOMETRY) {
-                // The FOURTH branch: forward geometry passes. See forwardGeometryShaderPaths, which
-                // holds the rule so it can be exercised without standing up a renderer.
-                //
-                // The NO-BINDING block text -- the same form FULLSCREEN uses, not COMPUTE's positional
-                // one. The forward variant's bind group is a Blaze3D BindGroupLayout, which resolves
-                // u_PackOptions by NAME; a hardcoded `binding = N` would assert a descriptor index
-                // nothing here assigns.
-                if (hasRuntimeOptions && fullscreenPackOptionsBlock != null) {
-                    for (String path : forwardGeometryShaderPaths(p)) {
-                        packOptionsBlockByShader.put(path, fullscreenPackOptionsBlock);
-                    }
-                }
-                continue;
-            }
-            if (p.shader() == null) {
-                continue;
-            }
-            if (p.type() == PassType.FULLSCREEN) {
-                fullscreenShaderPaths.add(p.shader());
-                if (fullscreenPackOptionsBlock != null) {
-                    packOptionsBlockByShader.put(p.shader(), fullscreenPackOptionsBlock);
-                }
-            } else if (p.type() == PassType.COMPUTE && hasRuntimeOptions) {
-                int binding = ComputePassRunner.combinedBindingOrder(p).indexOf(ComputePassRunner.PACK_OPTIONS_INPUT);
-                if (binding >= 0) {
-                    packOptionsBlockByShader.put(p.shader(), pendingOptionsLayout.glslBlock(binding));
-                }
-            } else if (p.type() == PassType.PARTICLES && hasRuntimeOptions) {
-                // Same positional-binding rule as COMPUTE above, applied to BOTH stages: a particles
-                // pass's descriptor set is shared by its vertex and fragment shaders (one set layout,
-                // every binding visible to both -- see ParticlePipelineBuilder), so the block text is
-                // identical for the two files and either may declare it. Whichever one doesn't simply
-                // carries an unused block, which is free.
-                int binding = ParticlePassRunner.bindingOrder(p).indexOf(ComputePassRunner.PACK_OPTIONS_INPUT);
-                ParticleSpec particles = p.particles();
-                if (binding >= 0 && particles != null) {
-                    String block = pendingOptionsLayout.glslBlock(binding);
-                    packOptionsBlockByShader.put(p.shader(), block);
-                    packOptionsBlockByShader.put(particles.vertexShader(), block);
-                }
-            }
-        }
-        // Engine AA/upscale facts as literal #defines, so a fullscreen pass's GLSL can #ifdef
-        // FX_UPSCALE etc directly -- unconditionally prepended to every fullscreen shader (harmless
-        // when a pass never references any FX_* name).
-        String enginePreamble = EngineDefines.glslPreamble(FornaxConfig.get().aaMethod, computeAvailable);
-
-        Map<String, String> rewritten = new LinkedHashMap<>();
-        for (Map.Entry<String, String> e : shaderSources.entrySet()) {
-            String rewrittenSource = DefineRewriter.rewrite(e.getValue(), pack.options(), compileValuesAsStrings);
-            // Source keys are pack-root-relative ("shaders/post/ssao.fsh" -- see
-            // PackDiscovery.readShaderSources), matching PassSpec.shader() verbatim.
-            String packOptionsBlock = packOptionsBlockByShader.get(e.getKey());
-            if (packOptionsBlock != null) {
-                rewrittenSource = insertAfterFirstLine(rewrittenSource, packOptionsBlock);
-            }
-            if (fullscreenShaderPaths.contains(e.getKey())) {
-                rewrittenSource = insertAfterFirstLine(rewrittenSource, enginePreamble);
-            }
-            rewritten.put(e.getKey(), rewrittenSource);
-        }
+        Map<String, String> rewritten = prepareShaderSources(pack, shaderSources,
+                compileValuesAsStrings, pendingOptionsLayout, FornaxConfig.get().aaMethod, computeAvailable);
         // Vanilla core-shader overrides (see VanillaShaderOverrides' own doc comment): extracted from
         // the SAME `rewritten` map and `compileValues` this rebuild just used for every other shader,
         // so an override's #define-driven gate (e.g. LIGHTMAP_CURVES) and its own splice content
@@ -3209,6 +3127,105 @@ public final class GraphRunner {
         // draw landing in the gap between this teardown and the next active frame can bind a closed
         // GPU resource.
         clearGeometryInputViews();
+    }
+
+    /**
+     * Pure shader-source preparation shared by rebuild and its delivery regression tests. Runtime
+     * descriptor declarations and engine compile facts retain independent eligibility rules.
+     */
+    static Map<String, String> prepareShaderSources(PackModel pack, Map<String, String> shaderSources,
+            Map<String, String> compileValuesAsStrings, PackOptionsLayout optionsLayout,
+            dev.icehunter.fornax.config.AaMethod aaMethod, boolean computeAvailable) {
+        // u_PackOptions is bound into every FULLSCREEN pass's bind group unconditionally (see
+        // FullscreenPassRunner.build()), but never into a geometry pass's own (Sodium-owned) bind
+        // group or a mipchain pass's minimal u_Input0/u_PassParams-only one -- so the block
+        // declaration is prepended only to shader files a fullscreen pass actually uses, right after
+        // each file's own leading #version line (GLSL requires #version to stay the very first
+        // token). Pack shaders therefore never hand-write this block themselves; they just reference
+        // its members (e.g. u_SsaoRadius) as bare globals.
+        Set<String> engineDefineShaderPaths = new HashSet<>();
+        // Maps a shader source path -> the exact u_PackOptions GLSL block text to prepend to it (absent
+        // = that shader gets none). Every FULLSCREEN pass's shader shares ONE no-binding block (Blaze3D
+        // resolves u_PackOptions in its bind group by name, not position). A COMPUTE pass binds
+        // u_PackOptions as a reserved UNIFORM_BUFFER descriptor at a POSITIONAL binding (see
+        // ComputePassRunner.PACK_OPTIONS_INPUT / combinedBindingOrder), so its block must instead carry
+        // that exact binding number -- computed per-pass here, since a future graph could in principle
+        // give two compute shaders different binding indices for the same reserved input name. A
+        // compute pass whose inputs don't list "packOptions" at all gets no block, regardless of
+        // whether the pack declares runtime options. Engine FX_* compile facts need no descriptor
+        // binding and reach both FULLSCREEN and COMPUTE shaders independently of this block.
+        Map<String, String> packOptionsBlockByShader = new LinkedHashMap<>();
+        // A pack with zero runtime options must not get the block at all -- an empty uniform block is
+        // illegal GLSL. FullscreenPassRunner still binds the (min-16-byte) buffer; a shader that never
+        // declares the block simply ignores the binding.
+        boolean hasRuntimeOptions = !optionsLayout.offsets().isEmpty();
+        String fullscreenPackOptionsBlock = hasRuntimeOptions ? optionsLayout.glslBlock() : null;
+        for (PassSpec p : pack.graph().passes()) {
+            if (p.type() == PassType.GEOMETRY) {
+                // The FOURTH branch: forward geometry passes. See forwardGeometryShaderPaths, which
+                // holds the rule so it can be exercised without standing up a renderer.
+                //
+                // The NO-BINDING block text -- the same form FULLSCREEN uses, not COMPUTE's positional
+                // one. The forward variant's bind group is a Blaze3D BindGroupLayout, which resolves
+                // u_PackOptions by NAME; a hardcoded `binding = N` would assert a descriptor index
+                // nothing here assigns.
+                if (hasRuntimeOptions && fullscreenPackOptionsBlock != null) {
+                    for (String path : forwardGeometryShaderPaths(p)) {
+                        packOptionsBlockByShader.put(path, fullscreenPackOptionsBlock);
+                    }
+                }
+                continue;
+            }
+            if (p.shader() == null) {
+                continue;
+            }
+            if (p.type() == PassType.FULLSCREEN || p.type() == PassType.COMPUTE) {
+                engineDefineShaderPaths.add(p.shader());
+            }
+            if (p.type() == PassType.FULLSCREEN) {
+                if (fullscreenPackOptionsBlock != null) {
+                    packOptionsBlockByShader.put(p.shader(), fullscreenPackOptionsBlock);
+                }
+            } else if (p.type() == PassType.COMPUTE && hasRuntimeOptions) {
+                int binding = ComputePassRunner.combinedBindingOrder(p).indexOf(ComputePassRunner.PACK_OPTIONS_INPUT);
+                if (binding >= 0) {
+                    packOptionsBlockByShader.put(p.shader(), optionsLayout.glslBlock(binding));
+                }
+            } else if (p.type() == PassType.PARTICLES && hasRuntimeOptions) {
+                // Same positional-binding rule as COMPUTE above, applied to BOTH stages: a particles
+                // pass's descriptor set is shared by its vertex and fragment shaders (one set layout,
+                // every binding visible to both -- see ParticlePipelineBuilder), so the block text is
+                // identical for the two files and either may declare it. Whichever one doesn't simply
+                // carries an unused block, which is free.
+                int binding = ParticlePassRunner.bindingOrder(p).indexOf(ComputePassRunner.PACK_OPTIONS_INPUT);
+                ParticleSpec particles = p.particles();
+                if (binding >= 0 && particles != null) {
+                    String block = optionsLayout.glslBlock(binding);
+                    packOptionsBlockByShader.put(p.shader(), block);
+                    packOptionsBlockByShader.put(particles.vertexShader(), block);
+                }
+            }
+        }
+        // Engine AA/upscale facts as literal #defines for fullscreen and compute entrypoints.
+        // Delivery cannot depend on runtime-option declarations: an absent fact silently becomes
+        // zero in a GLSL #if, even when the engine selected a temporal AA method.
+        String enginePreamble = EngineDefines.glslPreamble(aaMethod, computeAvailable);
+
+        Map<String, String> rewritten = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : shaderSources.entrySet()) {
+            String rewrittenSource = DefineRewriter.rewrite(e.getValue(), pack.options(), compileValuesAsStrings);
+            // Source keys are pack-root-relative ("shaders/post/ssao.fsh" -- see
+            // PackDiscovery.readShaderSources), matching PassSpec.shader() verbatim.
+            String packOptionsBlock = packOptionsBlockByShader.get(e.getKey());
+            if (packOptionsBlock != null) {
+                rewrittenSource = insertAfterFirstLine(rewrittenSource, packOptionsBlock);
+            }
+            if (engineDefineShaderPaths.contains(e.getKey())) {
+                rewrittenSource = insertAfterFirstLine(rewrittenSource, enginePreamble);
+            }
+            rewritten.put(e.getKey(), rewrittenSource);
+        }
+        return rewritten;
     }
 
     private static String insertAfterFirstLine(String source, String textToInsert) {

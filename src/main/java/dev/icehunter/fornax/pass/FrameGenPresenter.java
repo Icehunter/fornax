@@ -287,10 +287,9 @@ public final class FrameGenPresenter {
             return;
         }
         try {
-            Optional<GpuSurface.Configuration> config =
-                    Minecraft.getInstance().windowSurface().currentConfiguration();
-            if (config.isEmpty() || !isVsyncFifo(config.get().presentMode())) {
-                logOnceNotFifo(config.isEmpty());
+            String blocked = presentationBlockReason();
+            if (blocked != null) {
+                logOnceNotFifo("surface unavailable".equals(blocked));
                 recordSkip(SkipReason.NOT_FIFO);
                 return;
             }
@@ -341,20 +340,21 @@ public final class FrameGenPresenter {
             stagingPrepared = false;
             return;
         }
-        if (!FrameGenPass.generatedFrameReady() || !stagingPrepared) {
-            recordSkip(SkipReason.NOT_READY);
+        if (!FrameGenPass.armed()) {
             stagingPrepared = false;
             return;
         }
-
-        // Cheap second guard: prepareGeneratedFrame already checked FIFO before doing any staging
-        // work, but the surface configuration could theoretically change between that earlier
-        // (HUD-capture-time) check and this present-time one, so this stays rather than trusting the
-        // earlier result blindly.
-        Optional<GpuSurface.Configuration> config = surface.currentConfiguration();
-        if (config.isEmpty() || !isVsyncFifo(config.get().presentMode())) {
-            logOnceNotFifo(config.isEmpty());
+        // Recheck the same policy before readiness, so an upstream eligibility skip is reported
+        // as its actual surface blocker rather than as missing interpolation history.
+        String blocked = presentationBlockReason(surface);
+        if (blocked != null) {
+            logOnceNotFifo("surface unavailable".equals(blocked));
             recordSkip(SkipReason.NOT_FIFO);
+            stagingPrepared = false;
+            return;
+        }
+        if (!FrameGenPass.generatedFrameReady() || !stagingPrepared) {
+            recordSkip(SkipReason.NOT_READY);
             stagingPrepared = false;
             return;
         }
@@ -469,6 +469,24 @@ public final class FrameGenPresenter {
         FrameGenPass.deactivate();
         UiLayerCapture.deactivate();
         deactivate();
+    }
+
+    /** Shared surface policy for interpolation, staging, presentation, and the status overlay. */
+    @Nullable
+    public static String presentationBlockReason() {
+        return presentationBlockReason(Minecraft.getInstance().windowSurface());
+    }
+
+    @Nullable
+    private static String presentationBlockReason(GpuSurface surface) {
+        Optional<GpuSurface.Configuration> config = surface.currentConfiguration();
+        return blockReasonFor(config.isPresent() ? config.get().presentMode() : null);
+    }
+
+    @Nullable
+    static String blockReasonFor(GpuSurface.@Nullable PresentMode mode) {
+        if (mode == null) return "surface unavailable";
+        return isVsyncFifo(mode) ? null : "VSync required";
     }
 
     private static boolean isVsyncFifo(GpuSurface.PresentMode mode) {
@@ -588,11 +606,12 @@ public final class FrameGenPresenter {
         if (!FrameGenPass.armed()) {
             return null;
         }
+        String blocked = presentationBlockReason();
         double rendered = lastRenderedFps;
         double generated = lastGeneratedFps;
         return String.format(Locale.ROOT, "FrameGen: %.1f pres/s (%.1f real + %.1f gen), %s",
                 rendered + generated, rendered, generated,
-                FrameGenPacer.engaged() ? "engaged" : "paced-out");
+                blocked != null ? blocked : FrameGenPacer.engaged() ? "engaged" : "paced-out");
     }
 
     /**

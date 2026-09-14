@@ -193,9 +193,16 @@ readback mode belongs in a timing baseline.
 `PassTimer` cannot wrap raw `ComputePassRunner` submissions, because those are recorded into their
 own command buffers and sent straight to the compute queue. So each compute runner owns its own
 raw Vulkan timestamp pool, with two queries for each `FramePacing.FRAMES_IN_FLIGHT` slot. The
-slot's command buffer resets its own pair of queries, writes a start timestamp right before
-`vkCmdDispatch`, and writes the end timestamp right after it, before the release barrier. A pair is
-only reported to `ComputePassTimer` once `vkQueueSubmit` succeeds; once that slot's fence later
+slot's command buffer resets its own pair of queries and writes both timestamps at
+`COMPUTE_SHADER`: the start right before `vkCmdDispatch`, the end right after it and before the
+release barrier. The start shares the graphics-to-compute image-reuse semaphore's wait stage;
+`TOP_OF_PIPE` can timestamp before that wait completes and include it in the pass interval.
+These are approximate compute-stage intervals, not exclusive kernel execution time: timestamp
+writes depend on earlier commands but do not prevent later dispatches overlapping a delayed start,
+and implementations may latch at a later stage. See the Vulkan specification for
+[`vkCmdWriteTimestamp`](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdWriteTimestamp.html)
+and [submission wait scopes](https://docs.vulkan.org/spec/latest/chapters/cmdbuffers.html#devsandqueues-submission).
+No profiling barrier or additional submission serializes the workload. A pair is only reported to `ComputePassTimer` once `vkQueueSubmit` succeeds; once that slot's fence later
 succeeds, its pair is read before the command pool resets. Before making the pool, the runner asks
 the physical device for the chosen compute queue family's `timestampValidBits`: zero bits turns off
 timing, and a counter with only some bits masks the readings and works out elapsed ticks modulo
@@ -207,8 +214,10 @@ is reported on its own as a latest-value number under `compute wait <pass>`, so 
 up with the rolling GPU AVG/P95 numbers.
 
 The graphics span and the raw compute intervals are separate measurements and stay that way.
-Compute rows are useful for ranking how costly each dispatch is; adding them to the graphics span
-does not tell you the true critical path.
+Compute rows can help compare settled runs with matching workloads, but collapsed or strongly split
+intervals require checking the timestamp behavior before attributing cost to a kernel. A smaller
+interval after a boundary change is not a speedup. Adding compute rows to the graphics span does
+not tell you the true critical path.
 
 Then, in order, at the very end of `finish`:
 
@@ -417,6 +426,10 @@ draws at all.
    is resized in place every frame as part of `prepare()`.
 
 ## 5. Target model
+
+A target may use `rgba32f` for four 32-bit floating-point channels. `TargetFormat` accounts for
+16 bytes per pixel, and `TargetRegistry` allocates `GpuFormat.RGBA32_FLOAT` through the same
+texture, storage, history, and resize paths as the other color formats.
 
 Every target a graph declares gets a `scale` and a sizing `basis` (`TargetBasis`, `render` default
 or `output`, parsed from an optional `basis = "output"` key in `graph.toml`; an unrecognized value
@@ -1390,11 +1403,14 @@ be restated here.
 | `VulkanRenderPipelineMixin` | `VulkanRenderPipeline` | Declare the widened 60-byte push-constant range on every terrain-family Vulkan pipeline layout | WrapOperation |
 | `WindowMixin` | `Window` | Report the supersampled dimensions while a scaled frame is in flight, so downstream size queries stay consistent | ModifyReturnValue x2 |
 
-**Raw-Vulkan-targeting** (2):
+**Raw-Vulkan-targeting** (5):
 
 | Mixin | Target | Purpose | Shape |
 |---|---|---|---|
 | `GpuDeviceBackendAccessor` | `GpuDevice` | Expose Blaze3D's private backend so raw compute/interop code can require the Vulkan backend explicitly | Accessor |
+| `VulkanCommandEncoderPartialFlushMixin` | `VulkanCommandEncoder` | Add the explicit `VulkanPartialFlush` operation for event-ordered dispatch without advancing full-submit completion or resource retirement | Unique, Shadow |
+| `VulkanCaptureBufferUsageMixin` | `VulkanDevice` | Enable COPY_SRC on uniform allocations only with startup capture configuration | ModifyVariable |
+| `VulkanCaptureSamplerStateMixin` | `VulkanGpuSampler` | Retain the exact native sampler creation arguments only with startup capture configuration | ModifyArg, Unique |
 | `VulkanDeviceExtensionMixin` | `VulkanDevice` | Add `VK_EXT_metal_objects` to the requested device-extension set on supported macOS systems | ModifyExpressionValue |
 
 **YACL-targeting** (3):
@@ -1559,9 +1575,13 @@ gets a temporal resolve; `EngineDefines.forMethod`/`glslPreamble` (`pack.graph`)
 `FX_TAA`/`FX_UPSCALE`/`FX_METHOD_OFF`/`FX_METHOD_TAA`/`FX_METHOD_SSAA`/`FX_METHOD_TAAU`/
 `FX_METHOD_METALFX`, overlaid onto `GraphRunner.rebuild`'s `compileValues` (engine facts win over
 anything a pack itself declares under those names, so a pack's own `enabled_if` can gate on them)
-and, as literal `#define` lines, prepended to every fullscreen pass's shader source unconditionally
-(via the same `insertAfterFirstLine` mechanism the generated `u_PackOptions` block uses), so GLSL
-can `#ifdef FX_UPSCALE` directly. `CameraJitter` (`pass.taa`) re-keys off the same field: `OFF`/
+and, as literal `#define` lines, prepended to every fullscreen and compute entrypoint by
+`GraphRunner.prepareShaderSources`, the source-composition path used by `rebuild`. Facts follow
+`#version` and precede imported helpers, independently of runtime-option declarations or a compute
+pass's `packOptions` input. The generated `u_PackOptions` block keeps its separate descriptor-binding
+rules; geometry, particle and mipchain shaders do not receive this engine preamble. GLSL can use
+`#if FX_UPSCALE` directly. A missing fact silently reads as zero in `#if`, so testing a shader with
+hand-injected definitions cannot verify delivery. `CameraJitter` (`pass.taa`) re-keys off the same field: `OFF`/
 `SSAA` jitter to `(0,0)`; `TAA` keeps the original 4-tap rotated grid; `TAAU` and `METALFX` use a
 Halton(2,3) low-discrepancy sequence (`CameraJitter.haltonNdc`), its cycle length driven by
 `taauRatio`. `GameRendererMixin`'s projection jitter and `UniformBufferManagerMixin`'s
@@ -1569,8 +1589,8 @@ jitter-uniform-upload gate both read `aaMethod.wantsJitter()` rather than a pack
 Changing `aaMethod` from the Engine settings screen calls `PackReload.reapplyActivePack()`, a full
 pack graph rebuild (the same class of action as a pack compile-option edit, since the `FX_*` defines
 change which shader text compiles), but on purpose not `RendererReload.request()`: only the pack
-graph's own fullscreen-pass shaders change, never the terrain pipeline shape `RendererReload` exists
-to resync.
+graph's fullscreen and compute shaders change, never the terrain pipeline shape `RendererReload`
+exists to resync.
 
 **Reload sequencing rule.** `RuntimeShaderPack.reload` republishes sources but the resource reload
 it triggers is asynchronous: until its future completes, the shader manager resolves against the
@@ -1630,8 +1650,12 @@ correctly reports the reduced TAAU size to viewport/scissor consumers) exactly a
 `scale > 1`.
 
 **Scene-colour history.** `SceneHistory` (`pipeline`) is an engine-guaranteed, ping-ponged target
-(`sceneHistory`, `rgba8`, `history = true`) written unconditionally under every `aaMethod`,
-including `OFF`. A pack's own SSR/resolve passes read `sceneHistory.history` as an ordinary input,
+(`sceneHistory`, `rgba8`, `history = true`) written under every `aaMethod`, including `OFF`,
+while the pack graph is active. The master shaders toggle retains its allocation, but
+`GraphRunner.sceneHistoryTarget()` returns null while the graph is inactive, so the post-frame copy
+records no GPU work. This uses the renderer's latched activity, matching `prepare()`/`finish()`;
+an AA method of `OFF` alone still permits history for an active pack. A pack's own SSR/resolve
+passes read `sceneHistory.history` as an ordinary input,
 never `taa.history` from a pack-owned temporal-blend pass, so reflections no longer depend on any
 particular AA method being active. Packs never declare this target: `GraphRunner.rebuild` injects
 `SceneHistory.spec()` into the loaded pack's target set (`SceneHistory.injectInto`, idempotent
@@ -1779,7 +1803,14 @@ Gradle test task and README carry the same requirement) so JEP 472 restricted ca
 today or hard-fail on a future JDK.
 
 Four render-resolution inputs are copied into `VK_EXT_metal_objects` exportable images: LDR colour
-(`rgba8`), terrain motion (`rg16f`), reversed-Z depth (`d32f`), and an R8 reactive mask. The mask is
+(`rgba8`), prepared motion (`rg16f`), reversed-Z depth (`d32f`), and an R8 reactive mask.
+`MetalFxSkyMotionPass` prepares motion before copy-in: geometry vectors are fetched unchanged,
+while far-clear sky pixels use the same current jitter-free `SkyReprojection` homography as the
+engine temporal resolve. The input raster coordinate first loses its current projection jitter;
+both motion endpoints then share the geometry vectors' jitter-free basis. Behind-eye, off-screen and non-finite sky projections produce a finite
+out-of-bounds history coordinate. Its separate render-resolution target is cleared at allocation;
+resize retires the old texture only after pending GPU readers complete. The G-buffer is untouched.
+This supplies rotational sky motion, not finite cloud parallax or wind. The mask is
 generated immediately before copy-in by `MetalFxReactiveMaskPass` from the same
 scene-depth-minus-G-buffer-depth predicate as the engine reconstruct: near first-person pixels are
 1.0 (ignore temporal history), while other translucent overlays are 0.5 (favour current animated
@@ -1788,9 +1819,16 @@ checked at runtime before use; MetalFX versions predating macOS 14.4 fail closed
 
 Cross-API ordering uses one exported Vulkan timeline semaphore / `MTLSharedEvent`: Vulkan copy-in
 signals `v`, Metal waits `v`, encodes and signals `v+1`, Vulkan waits `v+1`, copies the unsharpened
-native result directly into `SceneHistory.writeSlot`, then signals `v+2`. The steady-state path has
-no host wait. Resize waits once for the last `v+2` value before destroying the whole interop image
-set; it does not call `vkDeviceWaitIdle` per image. Interop images use transfer-optimal layouts for
+native result directly into `SceneHistory.writeSlot`, then signals `v+2`. Both event handoffs use
+`VulkanPartialFlush.fornax$flushPending`: finish ordinary recording and transient uploads, dispatch
+the existing pending submission on the same graphics queue, replace its builder, and begin fresh
+transient recording. This avoids the encoder's full-submit retirement wait; queue submission and
+native encoding can still block. The normal full submit's `ALL_COMMANDS` completion covers all
+preceding partial batches, retaining their command pools and destruction/checkpoint resources until
+that normal epoch retires. Transient handles are invalid across a partial flush. Ordinary encoder
+fences keep the normal epoch and cannot be completed by partial flushes, so initialization and
+explicit fence waits retain full submission, as does the presenter. Resize waits once for the last
+`v+2` value before destroying the whole interop image set; it does not call `vkDeviceWaitIdle` per image. Interop images use transfer-optimal layouts for
 the Vulkan copies and return to `GENERAL` for Metal, with transfer/graphics access masks instead of
 the original all-commands/all-memory barriers. A `fornax.metalfx.hardSync` escape hatch retains the
 host-serialized diagnostic path.
@@ -1816,11 +1854,21 @@ interop images via two package-private accessors, `MetalFxUpscalePass.depthInter
 already wrote the frame's unsharpened result into the write slot before this pass runs, so the
 sceneHistory write-phase rule above doesn't apply here; there is nothing to get backwards.
 
-Per frame: a Vulkan copy lands the upscale pass's native colour into `curColor`, signaling `v` on
+Before copying or interpolating, `FrameGenPass` checks the presenter's shared surface policy:
+only `FIFO`/`FIFO_RELAXED` can consume generated presents. An unavailable surface or VSync-off
+mode clears generated readiness and history, so resuming seeds one fresh frame before interpolation.
+The generated-image `debugView` override can still run without a presentable surface. The overlay
+reports `VSync required` or `surface unavailable` ahead of the adaptive pacer's status; `ALWAYS`
+bypasses the FPS threshold, not the surface requirement. `frame generation CPU` and
+`MetalFX upscale CPU` measure the respective armed calls, including encoding and any blocking
+inside native calls; they are CPU elapsed time, not Metal GPU durations.
+
+Per eligible frame: a Vulkan copy lands the upscale pass's native colour into `curColor`, signaling `v` on
 the pass's own timeline. Once two frames of history exist and `FrameClock.ready()` (EMA-smoothed
 wall-clock delta, hitch-clamped), Metal GPU-waits `v`, encodes the interpolator against
-`prevColor`/`curColor` plus the reused depth/motion textures, writes `generated`, and signals `v+1`,
-zero host stalls in the steady state, the same discipline `MetalFxUpscalePass` uses.
+`prevColor`/`curColor` plus the reused depth/motion textures, writes `generated`, and signals `v+1`.
+The copy-in and generated-image copy-out use the same partial-flush operation as the upscale pass,
+avoiding full-submit retirement waits while preserving the shared-event ordering and teardown waits.
 `prevColor`/`curColor` then pointer-swap (no copy) for the next frame's ring position. Arming
 requires all of: `-Dfornax.framegen=true`, no prior failure this session, `AaMethod.METALFX` active,
 and `MetalFxSupport.isFrameInterpolationAvailable()`; any encode failure fails the pass closed for
@@ -2244,6 +2292,11 @@ a conservative inverse-warp Jacobian bound; singular guard neighborhoods retain 
 
 A shared timeline orders Vulkan copies, Metal trace, then Vulkan depth publication. Raw source
 arena copies finish before the render thread can relocate/free their source on mesh-change frames.
+`RT shadows CPU` measures the whole call, including mesh snapshots, native encoding and waits.
+`RT mesh wait CPU` measures each existing mesh-change timeline wait, while
+`rt_shadow_dirty_meshes` counts copied mesh revisions for that frame (zero when inactive or stable).
+These scopes add no GPU queries or waits; total CPU time and its nested wait samples must not be
+added together, and a zero dirty count does not prove that native encoding is inexpensive.
 `TerrainShadowResult` owns the separate RGBA32F target: R forward depth, A current trace validity.
 Disabled/unavailable/failed transitions clear validity. Only successful publication sets
 `u_ShadowMapParams.y` to the effective receiving distance squared. The complete raster map remains
@@ -2326,36 +2379,61 @@ always normalized.
 visibility and coverage diagnostic; it does not request the legacy voxel scene trace. Native legacy
 debug classes remain internal and are not user controls.
 
-### One-shot raw fullscreen pass captures
+### One-shot raw pass captures
 
-The Readback Dump key also arms a capture when `config/fornax-capture.json` exists in the game
-directory, holding `{"passes":["first_pass","second_pass"]}` or `{"pass":"first_pass"}`. One request
-takes up to four fullscreen passes from a single `GraphRunner.finish` call and never repeats. A pass
-that is missing, switched off or throws is recorded as a failure. With no such file, rendering is
-untouched.
+The Readback Dump key (F10) arms the pass names in `config/fornax-capture.json`, using
+`{"passes":["first_pass","second_pass"]}` or `{"pass":"first_pass"}`. One request selects up to four
+passes in one graph frame and never repeats. A missing, disabled or failed pass is recorded as a
+failure. Configuration must exist before client startup for exact compute capture: uniform buffers
+need COPY_SRC allocation usage and samplers need their native creation-state snapshot. Without that
+startup configuration these allocation hooks retain normal usage and no sampler snapshot.
 
-`debug.FullscreenCapture` writes `fornax-captures/<timestamp>-<uuid>/manifest.json` and raw `.bin`
-files. Each chosen pass copies the textures it reads before the draw and what it wrote after, in
-graph order into their own readback buffers, so a target reused later cannot change bytes already
-taken. A copy counts only once its callback comes back. Each input records its slot, name, sampler,
-size, GPU format, base mip and byte count. Files hold raw native-order values, base mip only, with
-no conversion and no vertical flip; D32_FLOAT depth stays reversed-Z. The opaque-depth copy declares
-COPY_SRC so this can read it.
+`FullscreenCapture` owns selection and writes `fornax-captures/<timestamp>-<uuid>/manifest.json`.
+Fullscreen draws retain the texture-only callback capture: base mip, one colour output, no buffer
+inputs or exact uniform/shader replay. `ComputeCapture` attaches to the actual compute descriptor
+binding operation and brackets only the selected dispatch. It records the resolved GLSL and the
+exact SPIR-V module passed to pipeline creation, workgroup counts, main-entry workgroup size decoded
+from SPIR-V, push-constant bytes, compile values, and every descriptor's binding index and direction.
+Uniform buffers use the actual descriptor offset/range, including the live globals ring slice;
+registry SSBOs include uploads recorded earlier in this command buffer. Two-dimensional input images
+are copied before the kernel and outputs afterward, with every bound mip described by its raw-file
+offset and extent. Native sampler metadata includes all three address modes and the LOD/filter
+state; a missing snapshot or unsupported extension chain makes the capture incomplete.
 
-A request may copy 1 GiB of texture, checked before each pass, and one texture at most 512 MiB. Each
-texture must be single-layer and stencil-free; a pass with a buffer input is turned down.
-An input that is otherwise fine but missing COPY_SRC is marked `unavailable` in its slot, with its
-format, size and reason, but no file or bytes. The other inputs and the output still copy. That
-pass ends `incomplete` and `textureCaptureComplete` stays false; a bad output, a bad texture, or
-running past the byte budget still fails the pass before any copy runs.
-A failed capture is recorded and the pass still renders. The manifest also holds the compile values
-and the bytes written to the per-pass parameter buffer. The globals and pack-options buffers have no
-safe way to read back, so they are marked unavailable and `replayComplete` is false;
-`textureCaptureComplete` can be true while the status is `incomplete`. This is evidence of what went
-in and came out, not a replay. Whether allocation and callbacks behave needs a live game session.
+Immutable 3D pack textures retain an owned copy of the exact payload staged during upload. That
+snapshot is published only after the upload fence succeeds. Capture archives these bytes and their
+load-time file provenance, format, extents and SHA-256; it never reopens a possibly changed source
+file or substitutes a regenerated volume. Every artifact records its byte count and SHA-256. Raw
+images retain GPU row order with no conversion or vertical flip.
+
+Unselected dispatches perform no readback allocation, copy or wait. Selected readbacks use raw VMA
+TRANSFER_DST staging first-used solely on the compute queue, including distinct queue families.
+The image-reuse wait includes TRANSFER for capture, and memory barriers order uploads/input copies,
+kernel execution, output copies and host reads. A five-second fence wait bounds capture blocking.
+Non-coherent mappings are invalidated only after confirmed completion; timeout marks failure and
+retains staging on the runner's ring slot until a later confirmed fence permits destruction.
+Requests share a 1 GiB byte budget, with at most 512 MiB per resource. Unsupported resources are
+reported explicitly, and neither a pending nor an unavailable binding can advertise replayComplete.
+Source and pure-data tests pin these contracts; only a client run verifies mixin application, GPU
+readback content and driver behavior. The capture frame's timing includes readback overhead.
 
 ## 12. Known laws
 
+- **A timed-out capture fence does not permit freeing its staging buffers.** Keep them on the
+  submitted ring slot until its completion is confirmed. Readback also requires allocation-time
+  TRANSFER_SRC usage and non-coherent invalidation; a raw Vulkan handle alone proves neither.
+- **Dispatching an interop event does not require retiring a full encoder epoch.** A partial flush
+  must dispatch the existing pending commands and semaphores on the same graphics queue, then
+  restart transient recording. It cannot advance completion or recycle pools/destruction resources:
+  the next normal full submit's completion owns that proof. Ordinary encoder fences remain tied to
+  that full epoch and require full submission before a CPU wait; partial flushes invalidate transient
+  handles even though GPU resource retirement is deferred. Source contracts pin these boundaries,
+  but do not establish driver scheduling, GPU lifetimes, frame time or visual quality.
+- **A timestamp before a semaphore's destination stage can include the wait in its interval.**
+  Raw compute dispatch timing starts at `COMPUTE_SHADER`, matching the image-reuse wait stage.
+  Moving a boundary changes what is measured, not the kernel's performance. Timestamp latching and
+  overlap still limit attribution; neither a near-zero interval nor a long one proves isolated
+  shader cost.
 - **A section's local position code must still line up after its section origin is added.**
   Matching faces in neighbouring sections must land on the same position once each section's
   origin is added in. XYZ therefore carries whole-number codes on a fixed grid, and the shader

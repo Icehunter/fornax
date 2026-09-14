@@ -13,6 +13,7 @@ public enum TargetFormat {
     RGBA8("rgba8", "RGBA8_UNORM", 4),
     RGBA16_SNORM("rgba16_snorm", "RGBA16_SNORM", 8),
     RGBA16F("rgba16f", "RGBA16_FLOAT", 8),
+    RGBA32F("rgba32f", "RGBA32_FLOAT", 16),
     RG16F("rg16f", "RG16_FLOAT", 4),
     R8("r8", "R8_UNORM", 1),
     R32F("r32f", "R32_FLOAT", 4);

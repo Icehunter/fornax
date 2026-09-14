@@ -52,10 +52,21 @@ public final class TerrainShadowPass {
         ShadowFrameState.setRtDistance(0);
         GraphRunner.frameProfiler().recordValue("rt_shadow_distance_blocks", 0);
         GraphRunner.frameProfiler().recordValue("rt_shadow_meshes", 0);
+        GraphRunner.frameProfiler().recordValue("rt_shadow_dirty_meshes", 0);
     }
 
     /** Called after clear + light-camera commit, before globals upload or any terrain shadow draw. */
     public static void render(RenderSectionManager manager, double x, double y, double z, int resolution, float shadowDistance) {
+        long started = System.nanoTime();
+        try {
+            renderFrame(manager, x, y, z, resolution, shadowDistance);
+        } finally {
+            // System.nanoTime reports nanoseconds; convert elapsed CPU time to milliseconds.
+            GraphRunner.frameProfiler().record("RT shadows CPU", (System.nanoTime() - started) * 1e-6);
+        }
+    }
+
+    private static void renderFrame(RenderSectionManager manager, double x, double y, double z, int resolution, float shadowDistance) {
         resetFrame();
         float radius = Math.min(GraphRunner.rayTracedShadowDistanceBlocks(), shadowDistance);
         if (failed || !MetalRtSupport.isAvailableFor(radius > 0)) {
@@ -88,7 +99,7 @@ public final class TerrainShadowPass {
                 retained.add(source.key);
                 Copy old = copies.get(source.key);
                 if (old == null || !sameSource(old.source, source)) {
-                    if (!retired) { await(device); retired = true; }
+                    if (!retired) { awaitMeshChange(device); retired = true; }
                     // Native BLAS only reads decoded data after its construction; input buffers can
                     // retire once the previous Metal dispatch and Vulkan copy-back have completed.
                     Copy copy = new Copy(source, MetalRtGeometry.createExportedBuffer(device, source.range.byteLength()));
@@ -98,7 +109,7 @@ public final class TerrainShadowPass {
                 }
             }
             if (!retained.containsAll(copies.keySet())) {
-                if (!retired) await(device);
+                if (!retired) awaitMeshChange(device);
                 var it = copies.entrySet().iterator();
                 while (it.hasNext()) {
                     var entry = it.next();
@@ -109,6 +120,7 @@ public final class TerrainShadowPass {
                 }
             }
 
+            GraphRunner.frameProfiler().recordValue("rt_shadow_dirty_meshes", dirty.size());
             var encoder = device.createCommandEncoder();
             long value = nextValue;
             nextValue += 3; // Vulkan input / Metal output / Vulkan copy-back on one timeline.
@@ -141,7 +153,7 @@ public final class TerrainShadowPass {
             lastValue = value;
             // Arena relocation/free does not know about the raw vkCmdCopyBuffer. Complete copies
             // before returning to the owning renderer, only on mesh-change frames, not every frame.
-            if (!dirty.isEmpty()) await(device);
+            if (!dirty.isEmpty()) awaitMeshChange(device);
 
             // Stable nearby grid origin preserves float precision without rebasing TLAS each step.
             // Sixteen-section grid cells keep near coordinates small; an arithmetic precision
@@ -268,6 +280,17 @@ public final class TerrainShadowPass {
                     VK13.VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK13.VK_IMAGE_USAGE_STORAGE_BIT | VK13.VK_IMAGE_USAGE_SAMPLED_BIT,
                     VK13.VK_IMAGE_ASPECT_COLOR_BIT);
 
+        }
+    }
+
+    /** Measures only mesh-change waits; teardown and resize waits keep their existing path. */
+    private static void awaitMeshChange(VulkanDevice device) {
+        long started = System.nanoTime();
+        try {
+            await(device);
+        } finally {
+            // System.nanoTime reports nanoseconds; convert elapsed CPU time to milliseconds.
+            GraphRunner.frameProfiler().record("RT mesh wait CPU", (System.nanoTime() - started) * 1e-6);
         }
     }
 

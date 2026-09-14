@@ -20,16 +20,18 @@ class ComputePassRunnerTimingContractTest {
     }
 
     @Test
-    void queryResetAndStartPrecedeDispatchAndEndFollowsIt() throws IOException {
+    void dispatchTimestampsUseTheComputeWaitStageAndBracketTheDispatch() throws IOException {
         String source = source();
         int reset = source.indexOf("vkCmdResetQueryPool(cmd, timestampQueries.pool(), firstQuery, 2)");
-        int start = source.indexOf("vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT");
+        int start = source.indexOf("vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT", reset);
         int dispatch = source.indexOf("vkCmdDispatch(cmd, groupsX, groupsY, groupsZ)");
-        int end = source.indexOf("vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT");
+        int end = source.indexOf("vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT", dispatch);
 
         assertTrue(reset >= 0, "the slot's two queries must be reset in its command buffer");
         assertTrue(reset < start, "reset must precede the start timestamp");
-        assertTrue(start < dispatch, "start timestamp must precede dispatch");
+        assertTrue(start < dispatch,
+                "the start timestamp must use the compute wait stage before dispatch; TOP_OF_PIPE"
+                        + " can charge the preceding graphics-completion wait to this pass");
         assertTrue(dispatch < end, "end timestamp must follow dispatch");
     }
 

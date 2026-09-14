@@ -10,6 +10,9 @@ import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.config.FrameGenMode;
 import dev.icehunter.fornax.metalfx.VulkanMetalInterop.InteropImage;
 import dev.icehunter.fornax.metalfx.objc.Objc;
+import dev.icehunter.fornax.pack.graph.GraphRunner;
+import dev.icehunter.fornax.pass.FrameGenPresenter;
+import dev.icehunter.fornax.pipeline.VulkanPartialFlush;
 import dev.icehunter.fornax.pipeline.FrameClock;
 import dev.icehunter.fornax.pipeline.FrameGenPacer;
 import dev.icehunter.fornax.util.GpuFatalErrors;
@@ -32,8 +35,9 @@ import org.lwjgl.vulkan.VK13;
  * {@link FrameClock#ready()}, Metal GPU-waits {@code v}, runs {@code MTLFXFrameInterpolator} against
  * {@code prevColor}/{@code curColor} plus the upscale pass's already-populated render-resolution
  * depth/motion interop images ({@link MetalFxUpscalePass#depthInterop()}/{@link
- * MetalFxUpscalePass#motionInterop()}), writes {@code generated}, and signals {@code v+1} -- no host
- * wait anywhere in the steady state. {@code prevColor}/{@code curColor} then pointer-swap (no copy)
+ * MetalFxUpscalePass#motionInterop()}), writes {@code generated}, and signals {@code v+1}. Event
+ * handoffs use partial flushes to avoid full-submit retirement waits; queue/native calls can still
+ * block. {@code prevColor}/{@code curColor} then pointer-swap (no copy)
  * for the next frame's ring position. {@code MTLFXFrameInterpolator}'s configured input dims are the
  * RENDER-resolution depth/motion textures' own size (from {@code depthInterop().width/height}), not
  * the native output size the color ring uses -- mirroring {@code MTLFXTemporalScaler}'s own
@@ -165,18 +169,18 @@ public final class FrameGenPass {
             generatedReady = false;
             return;
         }
+        long started = System.nanoTime();
         try {
             CLOCK.markFrame(System.nanoTime());
+            // Surface eligibility precedes every copy/encode. Resuming needs fresh adjacent frames;
+            // the explicit generated-image debug view can inspect interpolation without presenting it.
+            if (!DEBUG_VIEW && FrameGenPresenter.presentationBlockReason() != null) {
+                skipGeneratedFrame();
+                return;
+            }
             FrameGenPacer.update(CLOCK.emaIntervalNanos(), mode());
             if (!FrameGenPacer.engaged()) {
-                if (hasHistory) {
-                    // True->false transition only (see this method's own header): force a one-frame
-                    // warm-up on re-engage instead of interpolating against a color ring that went
-                    // stale for the whole disengaged window.
-                    hasHistory = false;
-                    pendingReset = true;
-                }
-                generatedReady = false;
+                skipGeneratedFrame();
                 return;
             }
             run(nativeDest, nearPlane, farPlane, fovDegrees, jitterNdc);
@@ -191,6 +195,18 @@ public final class FrameGenPass {
             // submit() that same dead device.
             GpuFatalErrors.rethrowIfFatal(t);
             markFailed("runIfEnabled", t);
+        } finally {
+            // System.nanoTime reports nanoseconds; convert elapsed CPU time to milliseconds.
+            GraphRunner.frameProfiler().record("frame generation CPU", (System.nanoTime() - started) * 1e-6);
+        }
+    }
+
+    /** Drops unavailable output and primes a fresh two-frame pair on the next eligible frame. */
+    private static void skipGeneratedFrame() {
+        generatedReady = false;
+        if (hasHistory) {
+            hasHistory = false;
+            pendingReset = true;
         }
     }
 
@@ -265,7 +281,7 @@ public final class FrameGenPass {
             encoder.waitSemaphore(timeline.vkSemaphore, waitV, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
             VulkanMetalInterop.recordIntoStream(encoder, copyOut);
             encoder.signalSemaphore(timeline.vkSemaphore, signalV, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-            encoder.submit();
+            ((VulkanPartialFlush) encoder).fornax$flushPending();
             lastVulkanSignal = signalV;
             return true;
         } catch (Throwable t) {
@@ -394,7 +410,7 @@ public final class FrameGenPass {
         };
         VulkanMetalInterop.recordIntoStream(encoder, copyIn);
         encoder.signalSemaphore(timeline.vkSemaphore, v, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-        encoder.submit();
+        ((VulkanPartialFlush) encoder).fornax$flushPending();
         lastVulkanSignal = v;
         timelineValue = v + 1;
 

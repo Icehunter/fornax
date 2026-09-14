@@ -52,6 +52,16 @@ public final class PackTextureRegistry implements AutoCloseable {
     private final Map<String, PackTextureSpec> specs;
     private final Map<String, GpuTexture> textures = new LinkedHashMap<>();
     private final Map<String, GpuTextureView> views = new LinkedHashMap<>();
+    private final Map<String, VolumeAsset> volumeAssets = new LinkedHashMap<>();
+
+    /** Load-time source identity plus the completed upload's immutable bytes; no capture-time I/O. */
+    public record VolumeAsset(String file, Volume3DTexture.UploadSnapshot upload) {}
+
+    /** Null for absent, not-yet-loaded or non-volume assets. */
+    @Nullable
+    public VolumeAsset volumeAsset(String name) {
+        return volumeAssets.get(name);
+    }
 
     private PackTextureRegistry(Path packRoot, Map<String, PackTextureSpec> specs) {
         this.packRoot = packRoot;
@@ -153,6 +163,7 @@ public final class PackTextureRegistry implements AutoCloseable {
                 return;
             }
             volume.upload(asset);
+            volumeAssets.put(spec.name(), new VolumeAsset(spec.file(), volume.uploadSnapshot()));
             textures.put(spec.name(), volume);
             views.put(spec.name(), volume.view());
             FornaxMod.LOGGER.info("[Fornax] Pack volume texture '{}' loaded from {} ({}x{}x{}, {})",
@@ -279,5 +290,6 @@ public final class PackTextureRegistry implements AutoCloseable {
         }
         views.clear();
         textures.clear();
+        volumeAssets.clear();
     }
 }

@@ -77,8 +77,11 @@ class ComputePassRunnerContractTest {
                         ".pWaitSemaphores(stack.longs(imageReuseTimelineSemaphore))",
                         ".pWaitSemaphores(stack.longs(slot.graphicsSemaphore))"),
                 replaceOnce(run,
-                        ".pWaitDstStageMask(stack.ints(VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT))",
-                        ".pWaitDstStageMask(stack.ints(VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT))"),
+                        "? VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT",
+                        "? VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT"),
+                replaceOnce(run,
+                        "? VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT",
+                        "? VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT"),
                 replaceOnce(run,
                         "timelineInfo.pSignalSemaphoreValues(stack.longs(0L));",
                         "timelineInfo.pSignalSemaphoreValues(stack.longs(1L));"),
@@ -139,7 +142,8 @@ class ComputePassRunnerContractTest {
                 + ".pWaitSemaphoreValues(stack.longs(reuseTicket.waitValue()));";
         String attachedWait = "submitInfo.pNext(timelineInfo.address())"
                 + ".pWaitSemaphores(stack.longs(imageReuseTimelineSemaphore))"
-                + ".pWaitDstStageMask(stack.ints(VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));";
+                + ".pWaitDstStageMask(stack.ints(capture!=null?VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT"
+                + ":VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));";
         String alignedBinaryValue = "if(graphicsWaitStageMask!=0){"
                 + "timelineInfo.pSignalSemaphoreValues(stack.longs(0L));}";
         String binarySignal = "if(graphicsWaitStageMask!=0){"

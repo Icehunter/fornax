@@ -6,11 +6,13 @@ import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
 import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import dev.icehunter.fornax.FornaxMod;
+import dev.icehunter.fornax.pack.graph.GraphRunner;
 import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.metalfx.VulkanMetalInterop.InteropImage;
 import dev.icehunter.fornax.metalfx.objc.Objc;
 import dev.icehunter.fornax.pack.graph.TargetInstance;
 import dev.icehunter.fornax.pass.reconstruct.ReconstructPass;
+import dev.icehunter.fornax.pipeline.VulkanPartialFlush;
 import dev.icehunter.fornax.pipeline.SceneHistory;
 import dev.icehunter.fornax.util.GpuFatalException;
 import org.joml.Vector2f;
@@ -54,9 +56,9 @@ public final class MetalFxUpscalePass {
     static final boolean JITTER_FLIP_X = Boolean.getBoolean("fornax.metalfx.jitterFlipX");
     static final boolean JITTER_FLIP_Y = Boolean.getBoolean("fornax.metalfx.jitterFlipY");
     private static final boolean MV_FLIP = Boolean.getBoolean("fornax.metalfx.mvFlip");
-    // Debug escape back to the M2 host-serialized sync (three CPU<->GPU stalls/frame). Default is
-    // the M3 zero-stall path: one exported MTLSharedEvent orders Vulkan copy-in -> Metal scaler ->
-    // Vulkan copy-back entirely GPU-side (see VulkanMetalInterop.createSharedTimeline).
+    // Diagnostic host-serialized path. By default an exported MTLSharedEvent orders Vulkan
+    // copy-in -> Metal scaler -> Vulkan copy-back; partial flushes avoid full-submit retirement
+    // waits at these seams (queue submission and native encoding can still block).
     private static final boolean HARD_SYNC = Boolean.getBoolean("fornax.metalfx.hardSync");
 
     private static boolean failed;
@@ -104,6 +106,7 @@ public final class MetalFxUpscalePass {
             FornaxMod.LOGGER.warn("[Fornax] MetalFX scaler requested but probe says unavailable");
             return false;
         }
+        long started = System.nanoTime();
         try {
             run(lowRes, nativeDest, motionView, depthView, sceneHistory, jitterNdc);
             return true;
@@ -126,6 +129,9 @@ public final class MetalFxUpscalePass {
             failed = true;
             FornaxMod.LOGGER.error("[Fornax] MetalFX scaler FAILED -- falling back to TAAU for this session", t);
             return false;
+        } finally {
+            // System.nanoTime reports nanoseconds; convert elapsed CPU time to milliseconds.
+            GraphRunner.frameProfiler().record("MetalFX upscale CPU", (System.nanoTime() - started) * 1e-6);
         }
     }
 
@@ -138,7 +144,7 @@ public final class MetalFxUpscalePass {
         }
         VulkanGpuTexture colorTex = (VulkanGpuTexture) lowRes.getColorTextureView().texture();
         VulkanGpuTexture nativeTex = (VulkanGpuTexture) nativeDest.getColorTextureView().texture();
-        VulkanGpuTexture motionTex = (VulkanGpuTexture) motionView.texture();
+        VulkanGpuTexture gbufferMotionTex = (VulkanGpuTexture) motionView.texture();
         VulkanGpuTexture depthTex = (VulkanGpuTexture) depthView.texture();
         int inW = colorTex.getWidth(0);
         int inH = colorTex.getHeight(0);
@@ -146,13 +152,15 @@ public final class MetalFxUpscalePass {
         int outH = nativeTex.getHeight(0);
         // The render-res G-buffer must match the low-res color's extent for vkCmdCopyImage and for
         // MetalFX's own validation; a mismatch (mid-resize frame) falls back cleanly this frame.
-        if (motionTex.getWidth(0) != inW || motionTex.getHeight(0) != inH
+        if (gbufferMotionTex.getWidth(0) != inW || gbufferMotionTex.getHeight(0) != inH
                 || depthTex.getWidth(0) != inW || depthTex.getHeight(0) != inH) {
             throw new IllegalStateException("G-buffer extent mismatch: color " + inW + "x" + inH
-                    + " motion " + motionTex.getWidth(0) + "x" + motionTex.getHeight(0)
+                    + " motion " + gbufferMotionTex.getWidth(0) + "x" + gbufferMotionTex.getHeight(0)
                     + " depth " + depthTex.getWidth(0) + "x" + depthTex.getHeight(0));
         }
         ensureResources(device, inW, inH, outW, outH);
+        GpuTextureView preparedMotionView = MetalFxSkyMotionPass.render(motionView, depthView, jitterNdc, inW, inH);
+        VulkanGpuTexture motionTex = (VulkanGpuTexture) preparedMotionView.texture();
         GpuTextureView sceneDepthView = lowRes.getDepthTextureView();
         lastSceneDepthView = sceneDepthView;
         GpuTextureView reactiveMaskView = MetalFxReactiveMaskPass.render(sceneDepthView, depthView, inW, inH);
@@ -204,11 +212,11 @@ public final class MetalFxUpscalePass {
         if (HARD_SYNC) {
             VulkanMetalInterop.recordAndFlush(encoder, copyIn);
         } else {
-            // Zero-stall: append the copy-in to the encoder's stream, GPU-signal the shared
-            // timeline at v, and flush the submission WITHOUT any host wait.
+            // Dispatch the pending stream and shared-event signal without advancing the
+            // encoder's completion epoch or waiting for full-submit resource retirement.
             VulkanMetalInterop.recordIntoStream(encoder, copyIn);
             encoder.signalSemaphore(timeline.vkSemaphore, v, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-            encoder.submit();
+            ((VulkanPartialFlush) encoder).fornax$flushPending();
         }
 
         // ---- Metal: run the temporal scaler (event-ordered against the Vulkan queue) ----
@@ -266,12 +274,12 @@ public final class MetalFxUpscalePass {
         } else {
             // GPU-wait the scaler's completion signal in the NEXT submission, then append the
             // copy-back to the stream -- everything after it this frame (sceneHistory copy, HUD,
-            // present) is already ordered behind it by submission order. No host stall.
+            // present) is ordered behind it by submission order. Retirement stays at full submit.
             encoder.waitSemaphore(timeline.vkSemaphore, v + 1, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
             VulkanMetalInterop.recordIntoStream(encoder, copyBack);
             encoder.signalSemaphore(timeline.vkSemaphore, v + 2,
                     VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-            encoder.submit();
+            ((VulkanPartialFlush) encoder).fornax$flushPending();
             lastVulkanSignal = v + 2;
             timelineValue = v + 3;
         }

@@ -1,6 +1,9 @@
 package dev.icehunter.fornax.pack.graph;
 
 import dev.icehunter.fornax.FornaxMod;
+import dev.icehunter.fornax.debug.ComputeCapture;
+import dev.icehunter.fornax.debug.FullscreenCapture;
+import com.mojang.blaze3d.buffers.GpuBuffer;
 import dev.icehunter.fornax.voxel.VoxelSourceWindow;
 import dev.icehunter.fornax.voxel.VoxelWindow;
 import dev.icehunter.fornax.pack.PassSpec;
@@ -130,6 +133,8 @@ public final class ComputePassRunner implements AutoCloseable {
     }
 
     private final PassSpec spec;
+    private final String resolvedSource;
+    private final byte[] compiledSpirv;
     @Nullable private final ComputeReuseState reuseState;
     private final List<String> reuseInputTargets;
     private final List<String> reuseTargets;
@@ -179,6 +184,7 @@ public final class ComputePassRunner implements AutoCloseable {
         long fence;
         long graphicsSemaphore;
         boolean submitted;
+        @Nullable ComputeCapture capture;
     }
 
     private ComputePassRunner(PassSpec spec, VulkanComputeBackend backend,
@@ -186,8 +192,10 @@ public final class ComputePassRunner implements AutoCloseable {
                                List<String> bindingOrder, List<Integer> descriptorTypes,
                                List<InputSamplerKind> samplerKinds,
                                int extraPushConstantBytes, boolean graphicsCompletionBeforeStorageWrite,
-                               FrameProfiler profiler) {
+                               FrameProfiler profiler, String resolvedSource, byte[] compiledSpirv) {
         this.spec = spec;
+        this.resolvedSource = resolvedSource;
+        this.compiledSpirv = compiledSpirv;
         this.reuseState = spec.reuseWhenUnchanged() == null ? null : new ComputeReuseState();
         this.reuseInputTargets = reuseState == null ? List.of() : spec.inputs().stream()
                 .filter(name -> !name.equals(PACK_OPTIONS_INPUT) && !name.equals(ParticlePassRunner.GLOBALS_INPUT))
@@ -310,13 +318,15 @@ public final class ComputePassRunner implements AutoCloseable {
         }
 
         ByteBuffer spirv = ComputeShaderCompiler.compileToSpirv(source, spec.shader());
+        byte[] compiledSpirv = new byte[spirv.remaining()];
+        spirv.duplicate().get(compiledSpirv); // Exact module bytes passed to pipeline creation below.
         try {
             var compiled = ComputePipelineBuilder.buildWithDescriptorLayout(backend.device(), spirv, descriptorTypes,
                     PassParams.PUSH_CONSTANT_BASE_SIZE + extraPushConstantBytes);
             ComputePassRunner runner = null;
             try {
                 runner = new ComputePassRunner(spec, backend, compiled, bindingOrder, descriptorTypes,
-                        samplerKinds, extraPushConstantBytes, graphicsCompletionBeforeStorageWrite, profiler);
+                        samplerKinds, extraPushConstantBytes, graphicsCompletionBeforeStorageWrite, profiler, source, compiledSpirv);
                 runner.allocateDescriptorSets();
             } catch (RuntimeException e) {
                 if (runner != null) {
@@ -561,6 +571,10 @@ public final class ComputePassRunner implements AutoCloseable {
                 // this frame's dispatch entirely rather than recycle an undrained slot.
                 return -1L;
             }
+            if (slot.capture != null) {
+                slot.capture.retireAfterFence();
+                slot.capture = null;
+            }
             computeTimer.drainCompleted(slotIndex);
             VK13.vkResetFences(backend.device().vkDevice(), slot.fence);
             slot.submitted = false;
@@ -577,6 +591,9 @@ public final class ComputePassRunner implements AutoCloseable {
             if (cmd == null) {
                 return -1L;
             }
+            ComputeCapture capture = FullscreenCapture.isSelected(spec.name())
+                    ? ComputeCapture.begin(spec, backend, resolvedSource, compiledSpirv) : null;
+            boolean captureSubmitted = false;
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack).sType$Default();
                 VK13.vkBeginCommandBuffer(cmd, beginInfo);
@@ -584,7 +601,7 @@ public final class ComputePassRunner implements AutoCloseable {
                 EngineBufferUploadQueue.recordForBindings(cmd, stack, registry, bindingOrder,
                         VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
                 VK13.vkCmdBindPipeline(cmd, VK13.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline());
-                updateAndBindDescriptorSet(registry, cmd, descriptorSets[slotIndex], options, globals);
+                updateAndBindDescriptorSet(registry, cmd, descriptorSets[slotIndex], options, globals, capture);
 
                 // PassParams delivered as a push constant (a compute pass has no reserved uniform-buffer
                 // slot for it), matching PassParams' own 32-byte std140 layout: vec2 texel size at 0, two
@@ -650,13 +667,17 @@ public final class ComputePassRunner implements AutoCloseable {
                     }
                     dispatchKernel = reuseState.needsDispatch(reuseValues, reuseResources, reuseInputRevisions);
                 }
+                if (capture != null) capture.beforeDispatch(cmd, push, groupsX, groupsY, groupsZ, dispatchKernel);
                 // Reuse omits only the kernel and its timestamps. Descriptor retirement and the
                 // binary/timeline handoffs still require the ordinary submission on every frame.
                 if (dispatchKernel) {
                     if (timestampQueries != null) {
                         int firstQuery = slotIndex * 2;
                         VK13.vkCmdResetQueryPool(cmd, timestampQueries.pool(), firstQuery, 2);
-                        VK13.vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        // Match the image-reuse semaphore's wait stage. TOP_OF_PIPE can
+                        // timestamp before graphics readers finish and charge that wait here.
+                        // Stage timestamps are approximate intervals, not exclusive kernel time.
+                        VK13.vkCmdWriteTimestamp(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                 timestampQueries.pool(), firstQuery);
                     }
                     VK13.vkCmdDispatch(cmd, groupsX, groupsY, groupsZ);
@@ -665,6 +686,7 @@ public final class ComputePassRunner implements AutoCloseable {
                                 timestampQueries.pool(), slotIndex * 2 + 1);
                     }
                 }
+                if (capture != null) capture.afterDispatch(cmd);
                 recordComputeWriteReleaseBarrier(cmd, stack);
                 VK13.vkEndCommandBuffer(cmd);
 
@@ -691,7 +713,8 @@ public final class ComputePassRunner implements AutoCloseable {
                     }
                     submitInfo.pNext(timelineInfo.address())
                             .pWaitSemaphores(stack.longs(imageReuseTimelineSemaphore))
-                            .pWaitDstStageMask(stack.ints(VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+                            .pWaitDstStageMask(stack.ints(capture != null
+                                    ? VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
                 }
                 if (graphicsWaitStageMask != 0) {
                     submitInfo.pSignalSemaphores(stack.longs(slot.graphicsSemaphore));
@@ -721,6 +744,11 @@ public final class ComputePassRunner implements AutoCloseable {
                     profiler.incrementCounter(dispatchKernel ? dispatchCounterLabel : reuseCounterLabel);
                 }
                 slot.submitted = true;
+                captureSubmitted = true;
+                if (capture != null) {
+                    slot.capture = capture;
+                    if (capture.awaitFence(slot.fence)) slot.capture = null;
+                }
                 if (graphicsWaitStageMask != 0) {
                     // VulkanDevice returns its persistent encoder. Lighting producers request this
                     // handoff from GraphRunner.prepare(), before opaque terrain begins, so closing
@@ -751,6 +779,8 @@ public final class ComputePassRunner implements AutoCloseable {
                     // already landed does not hold. Next frame's ring-slot recycle wait retries it.
                     return dependencyWaitNanos;
                 }
+            } finally {
+                if (capture != null && !captureSubmitted) capture.abortBeforeSubmit();
             }
         }
         return -1L;
@@ -828,7 +858,7 @@ public final class ComputePassRunner implements AutoCloseable {
      * cache them at build time) and binds it before dispatch. Caller holds {@code SHARED_QUEUE_LOCK}. */
     private void updateAndBindDescriptorSet(TargetRegistry registry, VkCommandBuffer cmd, long descriptorSet,
                                             @Nullable PackOptionsBuffer options,
-                                            @Nullable GpuBufferSlice globals) {
+                                            @Nullable GpuBufferSlice globals, @Nullable ComputeCapture capture) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(bindingOrder.size(), stack);
             for (int i = 0; i < bindingOrder.size(); i++) {
@@ -840,8 +870,15 @@ public final class ComputePassRunner implements AutoCloseable {
                     // One of the two reserved engine inputs -> a live engine uniform buffer, not a
                     // registry target. descriptorTypeFor only assigns UNIFORM_BUFFER to those two
                     // names, so the name test below is exhaustive.
-                    write.descriptorType(VK13.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
-                            .pBufferInfo(uniformBufferInfo(stack, name, options, globals));
+                    VkDescriptorBufferInfo.Buffer bufferInfo = uniformBufferInfo(stack, name, options, globals);
+                    write.descriptorType(VK13.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).pBufferInfo(bufferInfo);
+                    if (capture != null) {
+                        GpuBuffer bound = name.equals(ParticlePassRunner.GLOBALS_INPUT)
+                                ? globals.buffer() : options.currentBuffer();
+                        capture.buffer(i, name, type, bufferInfo.get(0).buffer(),
+                                bufferInfo.get(0).offset(), bufferInfo.get(0).range(), bound.size(),
+                                (bound.usage() & GpuBuffer.USAGE_COPY_SRC) != 0);
+                    }
                 } else if (type == VK13.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
                     BufferInstance buf = registry.getBuffer(name);
                     if (buf == null) {
@@ -855,6 +892,8 @@ public final class ComputePassRunner implements AutoCloseable {
                     VkDescriptorBufferInfo.Buffer bufferInfo = VkDescriptorBufferInfo.calloc(1, stack)
                             .buffer(buf.vkBuffer()).offset(0).range(VK13.VK_WHOLE_SIZE);
                     write.descriptorType(VK13.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo(bufferInfo);
+                    if (capture != null) capture.buffer(i, name, type, bufferInfo.get(0).buffer(),
+                            bufferInfo.get(0).offset(), bufferInfo.get(0).range(), buf.sizeBytes(), true);
                 } else {
                     GpuTextureView view = GraphInputResolver.resolveView(name, registry, Map.of());
                     long imageView = ((VulkanGpuTextureView) view).vkImageView();
@@ -863,6 +902,7 @@ public final class ComputePassRunner implements AutoCloseable {
                                 .sampler(0L).imageView(imageView)
                                 .imageLayout(VK13.VK_IMAGE_LAYOUT_GENERAL);
                         write.descriptorType(VK13.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(imageInfo);
+                        if (capture != null) capture.image(i, name, type, view, null, null);
                     } else {
                         InputSamplerKind samplerKind = samplerKinds.get(i);
                         VulkanGpuSampler sampler = (VulkanGpuSampler) (samplerKind.repeat()
@@ -876,6 +916,11 @@ public final class ComputePassRunner implements AutoCloseable {
                                 // SHADER_READ_ONLY for a resource whose layout was never transitioned.
                                 .imageLayout(VK13.VK_IMAGE_LAYOUT_GENERAL);
                         write.descriptorType(VK13.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(imageInfo);
+                        if (capture != null) {
+                            PackTextureRegistry textures = GraphRunner.packTextureRegistry();
+                            capture.image(i, name, type, view, sampler,
+                                    textures != null && textures.getView(name) == view ? textures.volumeAsset(name) : null);
+                        }
                     }
                 }
             }
@@ -958,6 +1003,10 @@ public final class ComputePassRunner implements AutoCloseable {
                 // the GPU has already finished with.
                 if (fenceWaitSucceeded(VK13.vkWaitForFences(device, slot.fence, true, FENCE_WAIT_TIMEOUT),
                         "ring teardown in '" + spec.name() + "'")) {
+                    if (slot.capture != null) {
+                        slot.capture.retireAfterFence();
+                        slot.capture = null;
+                    }
                     computeTimer.drainCompleted(slotIndex);
                 }
             }

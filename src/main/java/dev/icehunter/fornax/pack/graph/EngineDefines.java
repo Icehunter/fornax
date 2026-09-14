@@ -15,7 +15,7 @@ import java.util.Set;
  *       a pack's {@code enabled_if} expressions (evaluated against that same map) can gate whole
  *       passes/targets on {@code FX_TAA}/{@code FX_UPSCALE}/{@code FX_METHOD_*}.</li>
  *   <li>{@link #glslPreamble} -- the same facts as literal {@code #define} lines, prepended to every
- *       fullscreen pass's shader source so its GLSL can {@code #ifdef FX_UPSCALE} directly.</li>
+ *       fullscreen and compute entrypoint so its GLSL can {@code #if FX_UPSCALE} directly.</li>
  * </ul>
  * Engine facts always win over anything a pack itself might declare under these names -- {@code
  * GraphRunner.rebuild} overlays this map onto (not merges under) the pack's own compile values.
