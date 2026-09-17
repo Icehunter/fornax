@@ -29,6 +29,10 @@ public final class FornaxKeybind {
                 "key.fornax.open_settings", InputConstants.Type.KEYSYM, InputConstants.UNKNOWN.getValue(), CATEGORY));
         KeyMapping toggleProfiler = KeyMappingHelper.registerKeyMapping(new KeyMapping(
                 "key.fornax.toggle_profiler", InputConstants.Type.KEYSYM, InputConstants.UNKNOWN.getValue(), CATEGORY));
+        // Unbound by default. F7 is vanilla's cinematic camera and F8-F10 are this mod's own
+        // reload/debug-view/readback keys, so there is no free function key to claim. The frame
+        // profile is dumped by the readback key instead (see FornaxDebugKeys), which keeps the
+        // diagnostic reachable without a bind; this mapping stays for anyone who wants its own.
         KeyMapping dumpProfiler = KeyMappingHelper.registerKeyMapping(new KeyMapping(
                 "key.fornax.dump_profiler", InputConstants.Type.KEYSYM, InputConstants.UNKNOWN.getValue(), CATEGORY));
 

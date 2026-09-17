@@ -145,7 +145,12 @@ public final class FornaxDebugKeys {
             while (readbackDump.consumeClick()) {
                 dev.icehunter.fornax.FornaxMod.LOGGER.info("[Fornax][key] readback_dump pressed");
                 GBufferReadbackDiagnostic.requestDump();
-                actionbar("[Fornax] G-buffer readback dump requested (see log)");
+                // The frame profile rides the same key. Its own mapping is unbound, because there
+                // is no free function key left, and a diagnostic nobody can reach is one that
+                // silently produces nothing: three attempts to read a profile came back empty
+                // before anyone noticed the bind was never assigned.
+                dev.icehunter.fornax.profile.ProfilerOverlay.dumpToLog();
+                actionbar("[Fornax] G-buffer readback and frame profile dumped (see log)");
             }
             while (paletteHistogramDump.consumeClick()) {
                 dev.icehunter.fornax.FornaxMod.LOGGER.info("[Fornax][key] palette_histogram_dump pressed");
