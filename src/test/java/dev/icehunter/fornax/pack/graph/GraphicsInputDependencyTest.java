@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class GraphicsInputDependencyTest {
     @ParameterizedTest
     @ValueSource(strings = {"sunShadowMap", "sunShadowMapRaw", "sunEntityShadowMap",
-            "sunEntityShadowMapRaw", "rtTerrainShadowDepth", "rtSunVisibility", "rtSunValid", "rtSunDepth"})
+            "sunEntityShadowMapRaw", "rtTerrainShadowDepth"})
     void everyGraphicsOwnedShadowAliasRequiresTheProducerBoundary(String ref) {
         assertTrue(GraphicsInputDependency.requiredBy(List.of("globals", ref, "packOptions")));
     }

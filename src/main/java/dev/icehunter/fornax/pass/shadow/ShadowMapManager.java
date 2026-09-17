@@ -148,7 +148,6 @@ public final class ShadowMapManager {
     public static void ensureSize(int resolution) {
         // A declared consumer still needs its descriptor with RT off or unsupported hardware.
         // Packs without that input must not reserve a full float32 RT map.
-        if (RtShadowResult.sunDepthRequested()) RtShadowResult.ensureSunSize(resolution);
         TerrainShadowResult.ensureSize(resolution);
         if (texture != null && ShadowMapManager.resolution == resolution
                 && (entityTexture != null) == entityMapRequested) {

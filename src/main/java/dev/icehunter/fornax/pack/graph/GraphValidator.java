@@ -4,13 +4,15 @@ import dev.icehunter.fornax.pack.FornaxPackError;
 import dev.icehunter.fornax.pack.GeometrySlot;
 import dev.icehunter.fornax.pack.GraphSpec;
 import dev.icehunter.fornax.pack.PassSpec;
+import dev.icehunter.fornax.metalfx.rt.RayQueryAbi;
+import dev.icehunter.fornax.pack.RayQuerySpec;
 import dev.icehunter.fornax.pack.PassType;
 import dev.icehunter.fornax.pack.RayTracedShadowSpec;
 import dev.icehunter.fornax.pack.TargetSpec;
 import dev.icehunter.fornax.pack.option.OptionType;
 import dev.icehunter.fornax.pack.option.PackOption;
-import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
+import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
 import dev.icehunter.fornax.pipeline.GeometryInputs;
 import dev.icehunter.fornax.pipeline.OpaqueDepth;
@@ -244,6 +246,9 @@ public final class GraphValidator {
             if (p.type() == PassType.CONSOLIDATE) {
                 checkConsolidatePass(p, graph);
             }
+            if (p.type() == PassType.RAY_QUERY) {
+                checkRayQueryPass(p, graph);
+            }
         }
 
         ComputeReuseValidation.validate(graph, options);
@@ -383,16 +388,19 @@ public final class GraphValidator {
                     "'" + ref + "' is the entity occluder set, uploaded on the graphics queue for"
                             + " fullscreen and particles readers; a compute pass may not bind it");
         }
-        boolean legal = writePosition
+        // A ray_query pass is both: it reads a buffer of requests and writes a buffer of hits, and
+        // it is the only pass type that writes one without being a compute pass, because the
+        // traversal that fills it is engine-owned and may not be a compute shader at all.
+        boolean legal = p.type() == PassType.RAY_QUERY || (writePosition
                 ? p.type() == PassType.COMPUTE
                 : p.type() == PassType.COMPUTE || p.type() == PassType.PARTICLES
-                        || p.type() == PassType.FULLSCREEN;
+                        || p.type() == PassType.FULLSCREEN);
         if (!legal) {
             throw new FornaxPackError(FILE, "pass." + p.name() + (writePosition ? ".outputs" : ".inputs"),
                     "'" + ref + "' is a buffer-kind target, which a " + p.type() + " pass cannot bind"
                             + (writePosition ? " as an output" : " as an input")
-                            + ". A buffer is readable by compute, particles and fullscreen passes, and"
-                            + " writable only by a compute pass.");
+                            + ". A buffer is readable by compute, particles, fullscreen and ray_query"
+                            + " passes, and writable by a compute or ray_query pass.");
         }
     }
 
@@ -613,11 +621,10 @@ public final class GraphValidator {
             }
             return;
         }
-        if (RtShadowResult.isRtShadowRef(base)) {
-            // Engine-owned, never pack-declared (see RtShadowResult): resolved read-only exactly
-            // like ShadowMapManager's own pair of names, with the same no-history rule: a single
-            // current-frame target the engine (over)writes every frame it runs, never a previous-
-            // frame slot.
+        if (TerrainShadowResult.isRef(base)) {
+            // Engine-owned, never pack-declared: resolved read-only exactly like ShadowMapManager's
+            // own names, with the same no-history rule. One current-frame target that the answering
+            // tiers overwrite every frame they run, never a previous-frame slot.
             if (ref.endsWith(".history")) {
                 throw new FornaxPackError(FILE, "pass." + pass.name() + ".inputs",
                         "'" + ref + "': " + base + " has no history slot; reference '" + base
@@ -758,6 +765,73 @@ public final class GraphValidator {
      *       [textures.*]} entry.</li>
      * </ul>
      */
+    /**
+     * A ray-query pass has no shader, so every mistake it can make is a silent one: a buffer too
+     * small traces past its end, a request buffer nothing writes traces uninitialised directions,
+     * and either produces hits rather than an error. All three are refused at load.
+     */
+    private static void checkRayQueryPass(PassSpec p, GraphSpec graph) {
+        RayQuerySpec spec = p.rayQuery();
+        if (spec == null) {
+            throw new FornaxPackError(FILE, "pass." + p.name(),
+                    "a ray_query pass must declare a [pass.ray_query] table");
+        }
+        if (p.inputs().size() != 1 || p.outputs().size() != 1) {
+            throw new FornaxPackError(FILE, "pass." + p.name(),
+                    "a ray_query pass takes exactly one input (the request buffer) and one output "
+                            + "(the hit buffer), got " + p.inputs().size() + " and " + p.outputs().size());
+        }
+        String requests = p.inputs().get(0);
+        String hits = p.outputs().get(0);
+        requireRayBuffer(p, graph, requests, "inputs", RayQueryAbi.requestByteSize(spec.rayCount()),
+                "requests");
+        requireRayBuffer(p, graph, hits, "outputs", RayQueryAbi.hitByteSize(spec.rayCount()), "hits");
+        if (requests.equals(hits)) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + ".outputs",
+                    "'" + hits + "' is both the request and the hit buffer; a traversal reads the "
+                            + "whole request set while it writes, so one buffer cannot be both");
+        }
+
+        // A request buffer nothing wrote holds whatever the allocation left there. Those are finite
+        // floats often enough to trace, so the failure is a frame of plausible wrong answers.
+        boolean written = false;
+        for (PassSpec earlier : graph.passes()) {
+            if (earlier == p) {
+                break;
+            }
+            if (earlier.outputs().contains(requests)) {
+                written = true;
+                break;
+            }
+        }
+        if (!written) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + ".inputs",
+                    "'" + requests + "' is not written by any earlier pass; a ray_query pass traces "
+                            + "the requests some pass before it produced");
+        }
+    }
+
+    private static void requireRayBuffer(PassSpec p, GraphSpec graph, String name, String key,
+            long neededBytes, String role) {
+        TargetSpec target = graph.targets().get(name);
+        if (target == null) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + "." + key,
+                    "'" + name + "' is not a declared target; a ray_query pass's " + role
+                            + " buffer must be a [targets.*] entry with kind = \"buffer\"");
+        }
+        if (target.kind() != TargetKind.BUFFER || target.bufferSize() == null) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + "." + key,
+                    "'" + name + "' must be kind = \"buffer\" to carry ray " + role);
+        }
+        long have = target.bufferSize().sizeBytes();
+        if (have < neededBytes) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + "." + key,
+                    "'" + name + "' holds " + have + " bytes but " + p.rayQuery().rayCount()
+                            + " rays need " + neededBytes + " for " + role
+                            + "; a short buffer is written past its end with no error");
+        }
+    }
+
     private static void checkConsolidatePass(PassSpec p, GraphSpec graph) {
         String key = "pass." + p.name();
         if (p.shader() != null) {
@@ -906,7 +980,7 @@ public final class GraphValidator {
         // (see PackTextureSpec) is likewise always final -- it is loaded once at pack activation and
         // never written by any pass, so there is no same-frame freshness question to ask of it.
         if (BUILTINS.contains(ref) || ref.equals(SceneHistory.TARGET + ".history")
-                || ShadowMapManager.isShadowMapRef(ref) || RtShadowResult.isRtShadowRef(ref)
+                || ShadowMapManager.isShadowMapRef(ref) || TerrainShadowResult.isRef(ref)
                 || graph.textures().containsKey(ref)) {
             return;
         }

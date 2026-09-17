@@ -1,7 +1,7 @@
 package dev.icehunter.fornax.pack.graph;
 
-import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
+import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,7 +18,7 @@ final class GraphicsInputDependency {
 
     static boolean requiredBy(List<String> inputs) {
         return inputs.stream().anyMatch(ref -> ShadowMapManager.isShadowMapRef(ref)
-                || RtShadowResult.isRtShadowRef(ref));
+                || TerrainShadowResult.isRef(ref));
     }
 
     /** Signal and dispatch the producer before publishing a value for the compute wait. A failed

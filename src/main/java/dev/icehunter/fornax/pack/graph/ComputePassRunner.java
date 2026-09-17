@@ -14,8 +14,8 @@ import dev.icehunter.fornax.pack.layout.RuntimeShaderPack;
 import dev.icehunter.fornax.pass.compute.ComputePipelineBuilder;
 import dev.icehunter.fornax.pass.compute.ComputeShaderCompiler;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
-import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
+import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowComparisonSampler;
 import dev.icehunter.fornax.pipeline.FramePacing;
 import dev.icehunter.fornax.pipeline.VulkanPartialFlush;
@@ -411,7 +411,7 @@ public final class ComputePassRunner implements AutoCloseable {
             // determines descriptor TYPE, no GPU access needed yet).
             return VK13.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         }
-        if (ShadowMapManager.isShadowMapRef(name) || RtShadowResult.isRtShadowRef(name)) {
+        if (ShadowMapManager.isShadowMapRef(name) || TerrainShadowResult.isRef(name)) {
             // Engine-owned sun shadow depth target (see ShadowMapManager), covering both its
             // pack-visible names (TARGET and RAW_TARGET -- same resource, different sampler chosen
             // downstream) -- deliberately NOT builtin.-prefixed (GraphValidator.checkInputRef treats
