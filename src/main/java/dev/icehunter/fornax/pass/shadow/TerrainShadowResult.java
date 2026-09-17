@@ -8,10 +8,23 @@ import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import org.joml.Vector4f;
 
 /** Current accepted-terrain RT depth, separate from the complete raster map and voxel RT outputs.
- * R is forward light depth (miss=1); A certifies a traced texel this frame. Zero A always falls back
- * to raster. Descriptors exist on unsupported devices too; declaring a sampler does not dispatch RT. */
+ * R is forward light depth (miss=1); G is the {@code RayTier} ordinal of the traversal that wrote the
+ * texel; B is reserved; A certifies a traced texel this frame. A provider writes value, tier and
+ * validity in one store, so G is never nonzero with A zero. Zero A always falls back to raster, and
+ * nothing else in the texel means anything then: the alloc-time clear leaves it all zeros.
+ * Descriptors exist on unsupported devices too; declaring a sampler does not dispatch RT. */
 public final class TerrainShadowResult {
     public static final String TARGET = "rtTerrainShadowDepth";
+
+    /**
+     * Whether a pass input names this engine-owned target. Kept as a predicate rather than a bare
+     * equals, so every classifier that has to know it names one thing: the validator, the
+     * raw-compute and particle runners, and the geometry-finality check. A rename cannot leave
+     * one of them turning away a good pack.
+     */
+    public static boolean isRef(String ref) {
+        return TARGET.equals(ref);
+    }
     private static GpuTexture texture;
     private static GpuTextureView view;
     private static boolean requested, valid;
@@ -57,6 +70,15 @@ public final class TerrainShadowResult {
     }
 
     public static void published() { valid = true; }
+
+    /**
+     * Clears this frame's trusted radius, which each answering tier then widens to its own reach.
+     * Separate from {@link #invalidate()}: the image's contents and the radius a pack compares
+     * against have different lifetimes, and clearing the radius costs no GPU work.
+     */
+    public static void invalidateTrustedRadius() {
+        ShadowFrameState.setRtDistance(0);
+    }
 
     public static void close() {
         if (view != null) view.close();

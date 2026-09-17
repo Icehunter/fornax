@@ -6,7 +6,6 @@ import dev.icehunter.fornax.pack.layout.PackOptionsBuffer;
 import dev.icehunter.fornax.pass.shadow.ShadowCamera;
 import dev.icehunter.fornax.pass.shadow.ShadowCasterLists;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
-import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
 import dev.icehunter.fornax.pipeline.CameraMotionState;
@@ -118,43 +117,11 @@ public class SodiumWorldRendererOrchestrationMixin {
             CameraMotionState.commit(x, y, z);
             LocalActorFrameState.commitFromClient();
             GraphRunner.prepare(matrices, x, y, z);
-            fornax$ensureRtShadowResultTargets();
             fornax$renderShadowPass(matrices, x, y, z, terrainSampler);
             fornax$renderWaterPrepass(matrices, x, y, z, terrainSampler);
         }
     }
 
-    /**
-     * Builds {@link RtShadowResult}'s pair of render-resolution targets every frame the graph is
-     * active, no matter the ray tracing setting or platform support. {@code rtSunVisibility} and
-     * {@code rtSunValid} are pack-visible builtin input names a resolve shader can declare at any
-     * time (the same descriptor-stays-valid, content-changes shape as {@code sunShadowMap}; see
-     * {@link #fornax$renderShadowPass}'s own SHADOWS-off doc). {@code GraphInputResolver.resolveView}
-     * reads them every frame no matter what wrote them last, so an unallocated {@link
-     * RtShadowResult} on any frame throws "Fornax graph: input 'rtSunVisibility' resolved to no
-     * allocated target" and disables the referencing pass for the rest of the session.
-     *
-     * <p>Not gated on {@code FornaxConfig.get().rayTracing} or {@code Objc.PLATFORM_SUPPORTED},
-     * unlike {@code MetalRtShadowPass.runIfEnabled}'s own call site in {@code GameRendererMixin}.
-     * That pass only writes a real trace result into these targets when ray tracing is available;
-     * the targets themselves must resolve on every platform, so a pack can read {@code rtSunValid}
-     * and fall back to its own non-RT shadow with no pack-side branching. {@link
-     * RtShadowResult#ensureSize} clears both to zero at allocation and does nothing once the
-     * requested size already matches, so calling it every frame costs nothing once the size settles.
-     *
-     * <p>Sized to the live render resolution, the same width and height basis as {@link
-     * #fornax$renderWaterPrepass}'s {@code WaterSurfaceManager} call: a screen-space trace result is
-     * one sample per rendered pixel, not a pack-configured square resolution like {@link
-     * ShadowMapManager}.
-     */
-    private void fornax$ensureRtShadowResultTargets() {
-        if (!GraphRunner.isActive()) {
-            return;
-        }
-        int width = Minecraft.getInstance().gameRenderer.mainRenderTarget().width;
-        int height = Minecraft.getInstance().gameRenderer.mainRenderTarget().height;
-        RtShadowResult.ensureSize(width, height);
-    }
 
     /**
      * Sun/moon shadow-map orchestration: (re)builds/clears {@link ShadowMapManager}'s depth target,
@@ -254,7 +221,9 @@ public class SodiumWorldRendererOrchestrationMixin {
      * and the {@code @Shadow} field is required).
      */
     private void fornax$renderShadowPass(ChunkRenderMatrices matrices, double x, double y, double z, GpuSampler terrainSampler) {
-        dev.icehunter.fornax.metalfx.rt.TerrainShadowPass.resetFrame();
+        // Once per frame, ahead of every ray query: each installed tier resets its per-frame
+        // state and says whether it can answer at all.
+        dev.icehunter.fornax.rt.RayRouter.beginFrame();
         if (!GraphRunner.isActive()) {
             return;
         }
@@ -309,7 +278,22 @@ public class SodiumWorldRendererOrchestrationMixin {
         // Must land before the explicit update() call below -- see "Ordering guarantee" above.
         ShadowFrameState.commit(lightMatrices.view(), lightMatrices.proj(),
                 lightMatrices.viewProj(), shadowMapBias);
-        dev.icehunter.fornax.metalfx.rt.TerrainShadowPass.render(this.renderSectionManager, x, y, z, resolution, shadowDistance);
+        // Phase one of the celestial cascade: the exact-geometry tier, here rather than later so
+        // its trace overlaps the terrain draw below. Clamped at zero because a pack that declared
+        // no receiving distance is a pack that did not subscribe, which the tier reads as "do not
+        // trace" rather than as a negative extent.
+        float rtRadius = Math.max(0f, Math.min(GraphRunner.rayTracedShadowDistanceBlocks(), shadowDistance));
+        org.joml.Matrix4f lightViewProj = lightMatrices.viewProj();
+        dev.icehunter.fornax.rt.RayRouter.provider(dev.icehunter.fornax.metalfx.rt.MeshMetalProvider.class)
+                // The caster source is renderer-owned and can only be read here, where this frame's
+                // uploads are complete; it travels by its own type rather than inside the neutral
+                // request, so the coupling is visible at this call site.
+                .ifPresent(provider -> provider.captureCasters(this.renderSectionManager));
+        dev.icehunter.fornax.rt.RayRouter.phaseOne(new dev.icehunter.fornax.rt.CelestialFill(
+                new org.joml.Matrix4f(lightViewProj).invert().get(new float[16]),
+                lightViewProj.get(new float[16]),
+                x, y, z, resolution, rtRadius, shadowMapBias,
+                GraphRunner.rayTracedShadowFilterGuardUv(resolution)));
 
         // MAIN camera matrices and MAIN fog, not the light's -- see "Matrix delivery" and
         // "Fog delivery" above for why: both land in the frame's single guarded update() write.

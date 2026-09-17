@@ -12,6 +12,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.BiConsumer;
 
 /**
@@ -103,12 +104,18 @@ public final class RayRouter {
     public static void beginFrame() {
         profiler.accept("RT cascade CPU", frameNanos * 1e-6);
         frameNanos = 0;
+        // The trusted radius is rebuilt from nothing every frame and widened by each tier that
+        // answers, so it must be cleared here rather than by whichever provider happens to exist.
+        // A platform with no Metal installs no tier at all and would otherwise publish last
+        // frame's radius forever.
+        TerrainShadowResult.invalidateTrustedRadius();
         readyThisFrame.clear();
         for (RayProvider provider : providers) {
             RayTier tier = provider.tier();
             boolean ready = false;
             if (!failed.contains(tier) && tier.ordinal() >= floor.ordinal()) {
                 try {
+                    provider.beginFrame();
                     RayReadiness readiness = provider.readiness();
                     ready = readiness.ready();
                     report(tier, readiness);
@@ -128,15 +135,42 @@ public final class RayRouter {
      * overlapped with the terrain draw.
      */
     public static void phaseOne(CelestialFill request) {
-        fill(request, RayTier.HARDWARE_MESH, RayTier.HARDWARE_MESH);
+        // Every tier, not just the exact one. The split existed to give the approximate tiers a
+        // grid updated later in the frame, but that update runs after the pass loop, so they were
+        // always tracing the previous frame's grid anyway and the split bought nothing.
+        //
+        // What it cost was a frame of camera lag. Tracing here, before the terrain draw, gives the
+        // GPU the whole draw to finish, so the publish that follows waits on work already done
+        // instead of blocking the render thread on work just submitted.
+        fill(request, RayTier.HARDWARE_MESH, RayTier.SOFTWARE_VOXEL);
     }
 
     /**
      * The approximate tiers, run after this frame's voxel grid is current. Anything phase one left
      * unanswered is theirs; anything they leave unanswered is the pack's, exactly as today.
      */
-    public static void phaseTwo(CelestialFill request) {
-        fill(request, RayTier.HARDWARE_VOXEL, RayTier.SOFTWARE_VOXEL);
+    /**
+     * Delivers what phase one traced. Runs where a pack's passes can first read the result, far
+     * enough after the trace that the wait is satisfied rather than blocking.
+     */
+    public static void publish() {
+        long started = System.nanoTime();
+        try {
+            // Lowest tier first: every tier fills the same image, so the last one to write it holds
+            // the final contents. The first that delivers ends the walk.
+            for (int i = providers.size() - 1; i >= 0; i--) {
+                RayProvider provider = providers.get(i);
+                if (runnable(provider) && provider.publishCelestialVisibility()) {
+                    return;
+                }
+            }
+            // Nobody delivered. The target still holds an older frame's image and its own validity
+            // flag, and a pack cannot tell that from a fresh one, so it has to be cleared here.
+            // Leaving it is how a failed tier shows up as a shadow cast by nothing.
+            TerrainShadowResult.invalidate();
+        } finally {
+            frameNanos += System.nanoTime() - started;
+        }
     }
 
     /** Answers a buffer-form query, best tier first. Providers that do not serve the kind sit out. */
@@ -151,10 +185,14 @@ public final class RayRouter {
                 if (!runnable(provider) || !provider.answers(query.kind())) {
                     continue;
                 }
+                long entered = System.nanoTime();
                 try {
                     provider.answer(query);
                 } catch (RuntimeException error) {
                     fail(provider, "buffer query", error);
+                } finally {
+                    profiler.accept("RT tier" + provider.tier().ordinal() + " query CPU",
+                            (System.nanoTime() - entered) * 1e-6);
                 }
             }
         } finally {
@@ -193,6 +231,24 @@ public final class RayRouter {
         return providers;
     }
 
+    /**
+     * The installed provider of this concrete type, if any.
+     *
+     * <p>Exists for the one thing a request record cannot carry: a provider whose geometry source
+     * is a renderer-owned object that must be read at a specific point on the render thread. The
+     * caller hands it over by its own type rather than through the neutral request, so the coupling
+     * is visible at the call site instead of hidden in a field the router knows nothing about.
+     */
+    public static <T extends RayProvider> Optional<T> provider(Class<T> type) {
+        Objects.requireNonNull(type, "provider type");
+        for (RayProvider provider : providers) {
+            if (type.isInstance(provider)) {
+                return Optional.of(type.cast(provider));
+            }
+        }
+        return Optional.empty();
+    }
+
     private static void fill(CelestialFill request, RayTier highest, RayTier lowest) {
         Objects.requireNonNull(request, "celestial fill");
         long started = System.nanoTime();
@@ -205,11 +261,18 @@ public final class RayRouter {
                 if (!runnable(provider)) {
                     continue;
                 }
+                long entered = System.nanoTime();
                 try {
                     provider.fillCelestialVisibility(request);
                 } catch (RuntimeException error) {
                     fail(provider, "celestial fill", error);
                     TerrainShadowResult.invalidate();
+                } finally {
+                    // CPU time in this tier's fill, not GPU time: the call encodes and submits, and
+                    // the work completes later. It is what separates a tier that is expensive to
+                    // drive from one that is expensive to run, which a single frame total cannot.
+                    profiler.accept("RT tier" + tier.ordinal() + " CPU",
+                            (System.nanoTime() - entered) * 1e-6);
                 }
             }
         } finally {

@@ -3,16 +3,22 @@ package dev.icehunter.fornax.metalfx.rt;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
 import com.mojang.blaze3d.vulkan.VulkanGpuBuffer;
+import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.atlas.BlockAtlasView;
 import dev.icehunter.fornax.metalfx.VulkanMetalInterop;
 import dev.icehunter.fornax.mixin.sodium.RenderSectionManagerAccessor;
 import dev.icehunter.fornax.pack.graph.GraphRunner;
-import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
 import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
 import dev.icehunter.fornax.pass.shadow.ShadowCasterLists;
 import dev.icehunter.fornax.pipeline.TerrainMeshRevision;
+import dev.icehunter.fornax.rt.CelestialFill;
+import dev.icehunter.fornax.rt.BufferQuery;
+import dev.icehunter.fornax.rt.RayProvider;
+import dev.icehunter.fornax.rt.RayQueryKind;
+import dev.icehunter.fornax.rt.RayReadiness;
+import dev.icehunter.fornax.rt.RayTier;
 import net.caffeinemc.mods.sodium.client.render.chunk.LocalSectionIndex;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegion;
@@ -32,46 +38,165 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Receiving-distance shadows from accepted GPU meshes, independent of voxel harvesting.
- * All native resources are render-thread confined. The full relevant loaded caster volume supplies
- * both backends; receiver selection happens in the pack after independent depth publication. */
-public final class TerrainShadowPass {
+/**
+ * Celestial visibility at {@link RayTier#HARDWARE_MESH}: hardware traversal of the exact chunk
+ * meshes the renderer already uploaded, with no voxel approximation anywhere in the path.
+ *
+ * <p>The highest tier of the cascade, and the one the router runs first, at the frame point where
+ * the terrain draw can overlap the trace. Everything it leaves unanswered, because the receiver
+ * fell outside the cylinder or outside the warp domain, is what the tiers below it exist to fill.
+ *
+ * <p>All native resources are render-thread confined. The full relevant loaded caster volume
+ * supplies the trace; receiver selection happens in the pack after depth publication.
+ */
+public final class MeshMetalProvider implements RayProvider {
     private record Source(MeshShadowTracer.Key key, long revision, VulkanGpuBuffer buffer,
                           TerrainMeshSelection.VertexRange range) {}
     private record Copy(Source source, MetalRtGeometry.ExportedBuffer buffer) {}
-    private static final Map<MeshShadowTracer.Key, Copy> copies = new HashMap<>();
-    private static MeshShadowTracer tracer;
-    private static VulkanMetalInterop.SharedTimeline timeline;
-    private static VulkanMetalInterop.InteropImage atlas, depth;
-    private static long nextValue = 1, lastValue;
-    private static boolean failed, reportedActive;
+    private final Map<MeshShadowTracer.Key, Copy> copies = new HashMap<>();
+    private MeshShadowTracer tracer;
+    private VulkanMetalInterop.SharedTimeline timeline;
+    private VulkanMetalInterop.InteropImage atlas, depth;
+    private long nextValue = 1, lastValue;
+    private boolean failed, reportedActive;
+    /**
+     * The receiving radius the log last reported. A one-shot activation line goes stale the moment
+     * the pack's distance slider moves, and the reader has no way to tell a stale line from a
+     * current one, which is exactly the wrong property for the line people diagnose from.
+     */
+    private float reportedRadius = Float.NaN;
+    /** This frame's caster source, handed over on the render thread. Cleared every frame. */
+    private RenderSectionManager casters;
 
-    private TerrainShadowPass() {}
+    /**
+     * The coarse grid origin this tier's instances are positioned against, and the structure they
+     * live in, as of the last successful trace. The scene debug needs both: its rays are built in
+     * whichever frame the scene it traces uses, and this one is not the voxel window's.
+     */
+    private long debugTlas;
+    private float debugOriginX, debugOriginY, debugOriginZ;
+    /**
+     * The shared event value this tier's Metal work signals once its structures are built and its
+     * own trace is done. Anything else that reads those structures has to wait for it: they are
+     * built in this tier's command buffer, and a later command buffer on the same queue may begin
+     * before an earlier one finishes.
+     */
+    private long debugEvent, debugEventValue;
 
-    public static void resetFrame() {
-        ShadowFrameState.setRtDistance(0);
-        GraphRunner.frameProfiler().recordValue("rt_shadow_distance_blocks", 0);
-        GraphRunner.frameProfiler().recordValue("rt_shadow_meshes", 0);
-        GraphRunner.frameProfiler().recordValue("rt_shadow_dirty_meshes", 0);
+    /**
+     * This frame's traced image, handed to the tier below to fill and publish. Null when this tier
+     * did not trace, which is the signal for the tier below to start from its own cleared image.
+     */
+    private CascadeImage cascade;
+
+    /** Buffer-form queries, lazily built: a pack that declares none never allocates any of this. */
+    private RayQueryInterop rayQueries;
+
+    public MeshMetalProvider() {
     }
 
-    /** Called after clear + light-camera commit, before globals upload or any terrain shadow draw. */
-    public static void render(RenderSectionManager manager, double x, double y, double z, int resolution, float shadowDistance) {
+    @Override
+    public RayTier tier() {
+        return RayTier.HARDWARE_MESH;
+    }
+
+    /**
+     * Visibility only. A shadow needs "blocked, and how far along the ray", which is what this
+     * traversal produces. Closest-hit needs the atlas UV path the buffer-form query carries, and
+     * this provider does not serve it yet.
+     */
+    @Override
+    public boolean answers(RayQueryKind kind) {
+        return kind == RayQueryKind.VISIBILITY;
+    }
+
+    /**
+     * Per-frame availability is only the failure latch here. Whether this tier answers at all also
+     * depends on the pack's receiving distance, which arrives with the request rather than at the
+     * top of the frame, so that gate lives in the fill and keeps its own invalidation.
+     */
+    @Override
+    public RayReadiness readiness() {
+        return failed
+                ? RayReadiness.notReady("a previous trace failed; raster owns shadows until pack reload")
+                : RayReadiness.answering();
+    }
+
+    /**
+     * Hands over this frame's caster source. Called on the render thread at the point where the
+     * renderer's uploads for the frame are complete, which is the only point the mesh metadata and
+     * the arena handles can be read together.
+     */
+    public void captureCasters(RenderSectionManager manager) {
+        this.casters = manager;
+    }
+
+    @Override
+    public void fillCelestialVisibility(CelestialFill request) {
+        if (casters == null) {
+            // Nothing handed this frame's caster source over, so there is nothing to trace and no
+            // reason to believe last frame's image. Raster owns the frame.
+            TerrainShadowResult.invalidate();
+            return;
+        }
         long started = System.nanoTime();
         try {
-            renderFrame(manager, x, y, z, resolution, shadowDistance);
+            traceFrame(request);
         } finally {
             // System.nanoTime reports nanoseconds; convert elapsed CPU time to milliseconds.
             GraphRunner.frameProfiler().record("RT shadows CPU", (System.nanoTime() - started) * 1e-6);
         }
     }
 
-    private static void renderFrame(RenderSectionManager manager, double x, double y, double z, int resolution, float shadowDistance) {
+    /**
+     * Answers a batch against the structures this tier already built for the frame's shadows. It
+     * adds no build of its own: a ray query rides the acceleration structure the shadow trace
+     * produced, which is why the tier is free to answer at all.
+     */
+    @Override
+    public void answer(BufferQuery query) {
+        if (debugTlas == 0) {
+            // Nothing built this frame, so every record stays at tier 0 for the tier below. Not a
+            // failure: a frame with no caster meshes has nothing exact to say.
+            return;
+        }
+        if (rayQueries == null) {
+            rayQueries = new RayQueryInterop();
+        }
+        rayQueries.answer(query, tier().ordinal(), debugTlas, residentResources(),
+                atlas != null ? atlas.mtlTexture : 0L);
+    }
+
+    @Override
+    public void beginFrame() {
+        casters = null;
+        // The scene, its structure and the event that says when it is ready describe ONE frame. A
+        // teleport empties the caster set, close() destroys the timeline, and a handle held past
+        // that point is a released Metal object: encodeWaitForEvent on one crashes the process
+        // inside objc_msgSend, with no Java frame to name the cause.
+        forgetDebugScene();
         resetFrame();
-        float radius = Math.min(GraphRunner.rayTracedShadowDistanceBlocks(), shadowDistance);
+    }
+
+    private void resetFrame() {
+        dev.icehunter.fornax.pass.shadow.ShadowFrameState.setRtDistance(0);
+        GraphRunner.frameProfiler().recordValue("rt_shadow_distance_blocks", 0);
+        GraphRunner.frameProfiler().recordValue("rt_shadow_meshes", 0);
+        GraphRunner.frameProfiler().recordValue("rt_shadow_dirty_meshes", 0);
+    }
+
+    /** Called after clear + light-camera commit, before globals upload or any terrain shadow draw. */
+    private void traceFrame(CelestialFill request) {
+        RenderSectionManager manager = casters;
+        double x = request.cameraX(), y = request.cameraY(), z = request.cameraZ();
+        int resolution = request.resolution();
+        float radius = request.radiusBlocks();
+        // A zero receiving distance is a pack that did not subscribe, not a pack that wants an
+        // empty answer, so it short-circuits ahead of any device probe.
         if (failed || !MetalRtSupport.isAvailableFor(radius > 0)) {
             TerrainShadowResult.invalidate();
             if (tracer != null && !failed) close();
+            forgetDebugScene();
             return;
         }
         VulkanDevice device = VulkanMetalInterop.vulkanDevice();
@@ -82,10 +207,12 @@ public final class TerrainShadowPass {
         try {
             // Metadata and arena handles are read together on the owning render thread, after this
             // frame's accepted uploads. A failed validation must not leave holes in raster coverage.
-            List<Source> sources = snapshot(manager, x, y, z, ShadowFrameState.current());
+            Matrix4f light = new Matrix4f().set(request.lightVp());
+            List<Source> sources = snapshot(manager, x, y, z, light);
             if (sources == null || sources.isEmpty()) {
                 TerrainShadowResult.invalidate();
                 if (tracer != null) close();
+                forgetDebugScene();
                 return;
             }
             ensureImages(device, atlasSource, resolution);
@@ -168,38 +295,32 @@ public final class TerrainShadowPass {
                 meshes.add(new MeshShadowTracer.Mesh(key, source.revision, copy.buffer.mtlBuffer(),
                         Math.toIntExact(source.range.vertexCount()), (float) ((long) key.x() * 16 - ox), (float) ((long) key.y() * 16 - oy), (float) ((long) key.z() * 16 - oz)));
             }
-            Matrix4f light = ShadowFrameState.current();
+            debugOriginX = (float) ox;
+            debugOriginY = (float) oy;
+            debugOriginZ = (float) oz;
             tracer.trace(VulkanMetalInterop.metalCommandQueue(), meshes, atlas.mtlTexture, depth.mtlTexture,
-                    resolution, new Matrix4f(light).invert().get(new float[16]), light.get(new float[16]),
+                    resolution, request.inverseLightVp(), request.lightVp(),
                     (float) (x - ox), (float) (y - oy), (float) (z - oz), radius,
-                    ShadowFrameState.currentBias(), GraphRunner.rayTracedShadowFilterGuardUv(resolution), timeline.mtlSharedEvent, value, value + 1);
-            // Do not enqueue a wait when submission throws. Later asynchronous GPU/device faults
-            // remain device failures; returning here certifies submission, not completion.
-            encoder = device.createCommandEncoder();
-            encoder.waitSemaphore(timeline.vkSemaphore, value + 1, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-            VulkanMetalInterop.recordIntoStream(encoder, cmd -> {
-                try (MemoryStack stack = MemoryStack.stackPush()) {
-                    long destination = ((VulkanGpuTexture) TerrainShadowResult.texture()).vkImage();
-                    VulkanMetalInterop.prepareInteropTransferRead(cmd, stack, depth);
-                    VulkanMetalInterop.prepareGeneralTransferWrite(cmd, stack, destination, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-                    VulkanMetalInterop.copyImage(cmd, stack, depth.image, depth.layout, destination,
-                            VK13.VK_IMAGE_LAYOUT_GENERAL, VK13.VK_IMAGE_ASPECT_COLOR_BIT, resolution, resolution);
-                    VulkanMetalInterop.finishInteropTransferRead(cmd, stack, depth);
-                    VulkanMetalInterop.finishGeneralTransferWrite(cmd, stack, destination, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-                }
-            });
-            encoder.signalSemaphore(timeline.vkSemaphore, value + 2, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-            encoder.submit();
-            lastValue = value + 2;
-            // Queue order guarantees the graph sees this frame's completed copy. A shader can only
-            // use it where A certifies a traced texel and its receiving position is inside the range.
-            TerrainShadowResult.published();
-            ShadowFrameState.setRtDistance(radius);
+                    request.bias(), request.filterGuardUv(), timeline.mtlSharedEvent, value, value + 1);
+            // No copy-back here. This image IS the cascade's image: the tier below fills the
+            // texels this one left and publishes it once, so the frame pays one Vulkan submit for
+            // both tiers instead of two each. Copying to TerrainShadowResult here and reading it
+            // straight back out cost two submits and an image round trip, which measured at more
+            // than the ray tracing it was carrying.
+            lastValue = value + 1;
+            debugTlas = tracerStructure();
+            debugEvent = timeline.mtlSharedEvent;
+            debugEventValue = value + 1;
+            cascade = new CascadeImage(depth, timeline.mtlSharedEvent, value + 1, resolution);
+            dev.icehunter.fornax.pass.shadow.ShadowFrameState.raiseRtDistance(radius);
             GraphRunner.frameProfiler().recordValue("rt_shadow_distance_blocks", radius);
             GraphRunner.frameProfiler().recordValue("rt_shadow_meshes", meshes.size());
-            if (!reportedActive) {
-                FornaxMod.LOGGER.info("[Fornax] Mesh RT shadows active: {} blocks receiving distance, {} terrain meshes; separate sun/moon depth", radius, meshes.size());
+            if (!reportedActive || radius != reportedRadius) {
+                FornaxMod.LOGGER.info(
+                        "[Fornax] Mesh RT shadows active: {} blocks receiving distance, {} terrain meshes; "
+                                + "separate sun/moon depth", radius, meshes.size());
                 reportedActive = true;
+                reportedRadius = radius;
             }
         } catch (com.mojang.blaze3d.GpuDeviceLossException | dev.icehunter.fornax.util.GpuFatalException e) {
             throw e;
@@ -209,6 +330,90 @@ public final class TerrainShadowPass {
             FornaxMod.LOGGER.error("[Fornax] Mesh RT shadows disabled until pack reload; using full raster shadows", e);
             TerrainShadowResult.invalidate();
         }
+    }
+
+    /**
+     * The structure and frame the scene debug traces when it is pointed at chunk meshes, or null
+     * when this tier has not built one. Read on the render thread inside the same frame.
+     */
+    private void forgetDebugScene() {
+        debugTlas = 0;
+        debugEvent = 0;
+        debugEventValue = 0;
+        cascade = null;
+    }
+
+    /**
+     * The celestial image this tier traced into, the event that says when the trace is done, and
+     * the resolution it was traced at. The tier below fills the same image and publishes it.
+     */
+    public record CascadeImage(VulkanMetalInterop.InteropImage image, long readyEvent,
+            long readyValue, int resolution) {}
+
+    /** This frame's traced image, or null when this tier did not trace. */
+    public CascadeImage cascadeImage() {
+        return cascade;
+    }
+
+    /**
+     * Delivers this tier's own image when no lower tier did. Normally the voxel tier publishes,
+     * because it writes the same image last; this is the path for a frame where that tier sat out
+     * or failed. Without it a working mesh trace would reach the pack as nothing at all, and the
+     * stale image left behind reads as valid.
+     */
+    @Override
+    public boolean publishCelestialVisibility() {
+        CascadeImage image = cascade;
+        VulkanDevice device = VulkanMetalInterop.vulkanDevice();
+        GpuTexture texture = TerrainShadowResult.texture();
+        if (image == null || device == null || texture == null) {
+            return false;
+        }
+        long destination = ((VulkanGpuTexture) texture).vkImage();
+        var encoder = device.createCommandEncoder();
+        // Signalled by this tier's own trace, early in the frame, so the wait is satisfied here.
+        encoder.waitSemaphore(timeline.vkSemaphore, image.readyValue(), VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+        VulkanMetalInterop.recordIntoStream(encoder, cmd -> {
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                VulkanMetalInterop.prepareInteropTransferRead(cmd, stack, image.image());
+                VulkanMetalInterop.prepareGeneralTransferWrite(cmd, stack, destination, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanMetalInterop.copyImage(cmd, stack, image.image().image, image.image().layout,
+                        destination, VK13.VK_IMAGE_LAYOUT_GENERAL, VK13.VK_IMAGE_ASPECT_COLOR_BIT,
+                        image.resolution(), image.resolution());
+                VulkanMetalInterop.finishInteropTransferRead(cmd, stack, image.image());
+                VulkanMetalInterop.finishGeneralTransferWrite(cmd, stack, destination, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
+            }
+        });
+        long published = image.readyValue() + 1;
+        encoder.signalSemaphore(timeline.vkSemaphore, published, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+        encoder.submit();
+        lastValue = published;
+        TerrainShadowResult.published();
+        return true;
+    }
+
+    public DebugScene debugScene() {
+        return debugTlas == 0 ? null
+                : new DebugScene(debugTlas, debugOriginX, debugOriginY, debugOriginZ,
+                        residentResources(), debugEvent, debugEventValue);
+    }
+
+    /** A structure plus the grid origin its instances are positioned against. */
+    public record DebugScene(long structure, float originX, float originY, float originZ,
+            java.util.List<Long> resources, long readyEvent, long readyValue) {}
+
+    /** Every handle the structure refers to; an encoder cannot see through it to them. */
+    private java.util.List<Long> residentResources() {
+        java.util.List<Long> out = new ArrayList<>(copies.size() * 3);
+        if (tracer == null) {
+            return out;
+        }
+        tracer.appendResidentResources(out);
+        return out;
+    }
+
+    private long tracerStructure() {
+        return tracer == null ? 0 : tracer.instanceStructure();
     }
 
     private static boolean sameSource(Source a, Source b) {
@@ -263,7 +468,7 @@ public final class TerrainShadowPass {
         return result;
     }
 
-    private static void ensureImages(VulkanDevice device, VulkanGpuTexture source, int resolution) {
+    private void ensureImages(VulkanDevice device, VulkanGpuTexture source, int resolution) {
         int format = VulkanMetalInterop.mapFormat(source.getFormat().toString());
         if (atlas == null || atlas.width != source.getWidth(0) || atlas.height != source.getHeight(0) || atlas.vkFormat != format) {
             await(device);
@@ -284,7 +489,7 @@ public final class TerrainShadowPass {
     }
 
     /** Measures only mesh-change waits; teardown and resize waits keep their existing path. */
-    private static void awaitMeshChange(VulkanDevice device) {
+    private void awaitMeshChange(VulkanDevice device) {
         long started = System.nanoTime();
         try {
             await(device);
@@ -294,11 +499,17 @@ public final class TerrainShadowPass {
         }
     }
 
-    private static void await(VulkanDevice device) {
+    private void await(VulkanDevice device) {
         if (timeline != null && lastValue > 0) VulkanMetalInterop.waitTimeline(device, timeline, lastValue);
     }
 
-    public static void close() {
+    @Override
+    public void close() {
+        forgetDebugScene();
+        if (rayQueries != null) {
+            rayQueries.close();
+            rayQueries = null;
+        }
         resetFrame();
         VulkanDevice device = VulkanMetalInterop.vulkanDevice();
         if (device != null) {
@@ -313,6 +524,6 @@ public final class TerrainShadowPass {
         }
         TerrainShadowResult.invalidate();
         atlas = depth = null; timeline = null;
-        lastValue = 0; nextValue = 1; failed = reportedActive = false;
+        lastValue = 0; nextValue = 1; failed = reportedActive = false; reportedRadius = Float.NaN;
     }
 }

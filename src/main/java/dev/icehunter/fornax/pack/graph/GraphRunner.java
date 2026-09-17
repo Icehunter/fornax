@@ -39,10 +39,11 @@ import dev.icehunter.fornax.pack.option.PackOption;
 import dev.icehunter.fornax.pass.FrameGenPresenter;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import dev.icehunter.fornax.pipeline.FrameUniformValues;
-import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
 import dev.icehunter.fornax.metalfx.rt.MetalRtShadowPass;
-import dev.icehunter.fornax.metalfx.rt.TerrainShadowPass;
+import dev.icehunter.fornax.metalfx.rt.MeshMetalProvider;
+import dev.icehunter.fornax.rt.RayProvider;
+import dev.icehunter.fornax.rt.RayRouter;
 import dev.icehunter.fornax.metalfx.objc.Objc;
 import dev.icehunter.fornax.config.RayTracingMode;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
@@ -778,7 +779,15 @@ public final class GraphRunner {
                 .anyMatch(p -> p.inputs().contains(ShadowMapManager.ENTITY_TARGET)
                         || p.inputs().contains(ShadowMapManager.ENTITY_RAW_TARGET)));
         TerrainShadowResult.setRequested(pack.graph().passes().stream().flatMap(p -> p.inputs().stream()).anyMatch(TerrainShadowResult.TARGET::equals));
-        RtShadowResult.setRequestedInputs(pack.graph().passes().stream().flatMap(p -> p.inputs().stream()));
+        // The ray tiers this platform can construct, best-first order decided by the router. A
+        // machine without the Metal bridge installs fewer, which is why there is no
+        // availability flag here: an absent tier and a disabled one are the same thing to a pack.
+        List<RayProvider> rayProviders = new ArrayList<>();
+        if (dev.icehunter.fornax.metalfx.objc.Objc.PLATFORM_SUPPORTED) {
+            rayProviders.add(new MeshMetalProvider());
+            rayProviders.add(new dev.icehunter.fornax.metalfx.rt.VoxelMetalProvider());
+        }
+        RayRouter.install(rayProviders);
         computeGraphicsConflicts = ComputeGraphicsWaits.compile(pack.graph().passes());
         // Deferred geometry variants embed the OLD pack's program identifiers, so every one of them
         // is stale the moment the active pack changes. Nothing else clears them, and a stale variant
@@ -1305,10 +1314,14 @@ public final class GraphRunner {
             return;
         }
 
-        // The G-buffer is complete here, including deferred solid-feature writers. Publishing
-        // at renderLevel RETURN was one frame too late for every screen-space graph consumer.
+        // Delivery, not tracing: phase one traced every tier back in the shadow pass, before the
+        // terrain draw, so by here the GPU has had that whole draw to finish and this waits on
+        // work already done. Ahead of the pass loop, so a pack reads a complete image.
         if (Objc.PLATFORM_SUPPORTED) {
-            MetalRtShadowPass.runIfEnabled(gbuffer, FornaxConfig.get().rayTracing != RayTracingMode.OFF);
+            dev.icehunter.fornax.rt.RayRouter
+                    .provider(dev.icehunter.fornax.metalfx.rt.VoxelMetalProvider.class)
+                    .ifPresent(provider -> provider.captureScreen(gbuffer));
+            dev.icehunter.fornax.rt.RayRouter.publish();
         }
 
         int width = gbuffer.getWidth();
@@ -1416,6 +1429,39 @@ public final class GraphRunner {
                             }
                         } else {
                             logMissingRunnerOnce(p.name());
+                        }
+                    }
+                    case RAY_QUERY -> {
+                        // No runner and no shader: the batch goes to the router, which picks the
+                        // best traversal this machine has that the pack's floor allows. A tier that
+                        // cannot answer leaves the records at tier 0, which the pack reads as
+                        // unanswered and handles itself.
+                        var raySpec = p.rayQuery();
+                        var requestBuffer = registry.getBuffer(p.inputs().get(0));
+                        var hitBuffer = registry.getBuffer(p.outputs().get(0));
+                        if (raySpec == null || requestBuffer == null || hitBuffer == null) {
+                            logMissingRunnerOnce(p.name());
+                        } else {
+                            try {
+                                // Before any tier: a declared buffer keeps last frame's tier words,
+                                // and every fill would skip every record, handing the pack a frozen
+                                // answer that looks exactly like a fresh one.
+                                dev.icehunter.fornax.metalfx.rt.RayQueryInterop.clearHits(
+                                        hitBuffer.vkBuffer(), raySpec.rayCount());
+                                dev.icehunter.fornax.rt.RayRouter.tierFloor(raySpec.minTier());
+                                dev.icehunter.fornax.rt.RayRouter.answer(
+                                        new dev.icehunter.fornax.rt.BufferQuery(raySpec.kind(),
+                                                requestBuffer.vkBuffer(), hitBuffer.vkBuffer(),
+                                                raySpec.rayCount()));
+                            } catch (RuntimeException e) {
+                                GpuFatalErrors.rethrowIfFatal(e);
+                                logPassRunFailureOnce(p.name(), e);
+                            } finally {
+                                // The floor is per query, not per frame: leaving it raised would
+                                // silently gate the celestial cascade for the rest of the frame.
+                                dev.icehunter.fornax.rt.RayRouter.tierFloor(
+                                        dev.icehunter.fornax.rt.RayTier.NONE);
+                            }
                         }
                     }
                     case COPY -> {
@@ -1874,9 +1920,26 @@ public final class GraphRunner {
         return spec == null || resolution <= 0 ? 0 : spec.filterGuardTexels() / resolution;
     }
 
-    public static boolean legacyRtShadowSubscriber() {
-        return currentPack != null && currentPack.graph().passes().stream().anyMatch(p ->
-                isEnabledAtCompile(p, compileValues) && enabledThisFrame(p) && p.inputs().stream().anyMatch(RtShadowResult::isLegacyRtShadowRef));
+    /**
+     * Whether the hardware voxel ray tier wants the brick grid this frame. Exactly the conditions
+     * under which it would answer: the platform can construct it, the device supports it and the
+     * setting allows it, and the pack subscribes to ray-traced shadows at all.
+     */
+    private static boolean voxelRayTierNeedsGrid(GraphSpec graph, Map<String, Integer> compileValues) {
+        var spec = graph.rayTracedShadows();
+        if (spec == null || !EnabledIfExpr.parse(spec.enabledIf()).evaluate(compileValues)) {
+            return false;
+        }
+        // Compile gates only, deliberately: the runtime half of a subscription lives behind the
+        // live options buffer, which does not exist outside a running client. Attaching the grid
+        // for a frame a runtime gate would have closed costs streaming that goes unread; asking
+        // for the live values here would mean this predicate could not be tested at all.
+        boolean subscribed = graph.passes().stream().anyMatch(p ->
+                isEnabledAtCompile(p, compileValues)
+                        && p.inputs().contains(TerrainShadowResult.TARGET));
+        return subscribed
+                && dev.icehunter.fornax.metalfx.objc.Objc.PLATFORM_SUPPORTED
+                && dev.icehunter.fornax.metalfx.rt.MetalRtSupport.isAvailable();
     }
 
     private static boolean isEnabledAtCompile(PassSpec p, Map<String, Integer> compileValues) {
@@ -1902,6 +1965,13 @@ public final class GraphRunner {
      * #finish}, rather than trusting a separately-tracked "currently built" set.
      */
     static boolean anyEnabledComputePassReadsVoxelGrid(GraphSpec graph, Map<String, Integer> compileValues) {
+        // The voxel ray tier reads the same grid, and it is not a pack pass, so counting only pack
+        // passes made the tier's own geometry depend on an unrelated pack feature: turning voxel
+        // reflections off detached the grid and the tier went silently dark, leaving exact RT out
+        // to the mesh radius and raster past it, with nothing to say why.
+        if (voxelRayTierNeedsGrid(graph, compileValues)) {
+            return true;
+        }
         for (PassSpec p : graph.passes()) {
             // Covers COMPUTE, FULLSCREEN and PARTICLES, not just COMPUTE, because a voxel-grid
             // consumer can be any of the three: "sun_shadow" is a fullscreen fragment pass whose DDA
@@ -3032,7 +3102,7 @@ public final class GraphRunner {
         // device-idle boundary above is exactly the teardown law its texture/view pair needs;
         // keeping it alive here leaked both the D32 map and its dummy color attachment across
         // every pack switch/unload.
-        TerrainShadowPass.close();
+        RayRouter.close();
         ShadowMapManager.close();
 
         // Water pre-pass targets (see WaterSurfaceManager's own doc): unlike opaqueDepth above, these
@@ -3044,12 +3114,6 @@ public final class GraphRunner {
         // WaterSurfaceManager was never allocated this session (SSR_WATER_MODE never exceeded 1).
         WaterSurfaceManager.close();
 
-        // RT sun-shadow result targets (see RtShadowResult's own doc): allocated unconditionally
-        // every frame the graph is active (SodiumWorldRendererOrchestrationMixin
-        // #fornax$ensureRtShadowResultTargets), same as opaqueDepth above, so they must be torn down
-        // here on every pack teardown or a pack switch/unload leaks both R8_UNORM textures and their
-        // views, same failure class ShadowMapManager.close()'s own comment describes.
-        RtShadowResult.close();
         TerrainShadowResult.close();
 
         for (MipchainRunner m : mipchainRunners.values()) {

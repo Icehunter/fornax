@@ -15,9 +15,16 @@ class MetalRtPublicationTest {
     void graphProducesTheRtResultBeforeItsFirstConsumer() throws Exception {
         String graph = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/pack/graph/GraphRunner.java"));
         String finish = graph.substring(graph.indexOf("public static void finish(ChunkRenderMatrices"));
-        int trace = finish.indexOf("MetalRtShadowPass.runIfEnabled(");
-        assertTrue(trace >= 0 && trace < finish.indexOf("for (PassSpec p : pack.graph().passes())"),
-                "RT must publish before the current frame graph samples its screen-space mask");
+        // The voxel tier reaches the trace through the router. The ordering that matters is
+        // that both tiers finish with the image before any pack pass samples it; breaking it
+        // produces a frame-old shadow everywhere, which reads as a look bug rather than an error.
+        int capture = finish.indexOf("provider.captureScreen(gbuffer)");
+        int publish = finish.indexOf("RayRouter.publish()");
+        int passes = finish.indexOf("for (PassSpec p : pack.graph().passes())");
+        assertTrue(capture >= 0, "the voxel tier is handed this frame's G-buffer for its debug view");
+        assertTrue(publish > capture, "and delivers after it has one");
+        assertTrue(publish < passes,
+                "RT must publish before the current frame graph samples it");
         String end = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/mixin/vanilla/GameRendererMixin.java"));
         assertFalse(end.contains("MetalRtShadowPass.runIfEnabled("), "end-frame only presents the completed result");
         assertTrue(end.contains("MetalRtDebugPass.presentIfEnabled("));

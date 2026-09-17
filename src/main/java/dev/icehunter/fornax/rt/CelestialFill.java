@@ -15,7 +15,7 @@ import java.util.Objects;
  * has moved on.
  */
 public record CelestialFill(float[] inverseLightVp, float[] lightVp,
-        float cameraX, float cameraY, float cameraZ,
+        double cameraX, double cameraY, double cameraZ,
         int resolution, float radiusBlocks, float bias, float filterGuardUv) {
 
     public CelestialFill {
@@ -24,6 +24,9 @@ public record CelestialFill(float[] inverseLightVp, float[] lightVp,
         if (resolution <= 0) {
             throw new IllegalArgumentException("resolution must be positive, got " + resolution);
         }
+        // Doubles, not floats: a provider rebases the camera onto a coarse grid before it
+        // narrows to float, and a world coordinate past a few million blocks loses whole blocks
+        // if it is narrowed first.
         requireFinite(cameraX, "cameraX");
         requireFinite(cameraY, "cameraY");
         requireFinite(cameraZ, "cameraZ");
@@ -33,11 +36,15 @@ public record CelestialFill(float[] inverseLightVp, float[] lightVp,
         if (radiusBlocks < 0 || filterGuardUv < 0) {
             throw new IllegalArgumentException("radius and filter guard are nonnegative");
         }
-        // The radial shadow warp divides by 1 - bias * |q|; at bias 1 every ray on the unit circle
-        // divides by zero, so the open interval is the domain, not a preference.
-        if (bias < 0 || bias >= 1) {
-            throw new IllegalArgumentException("bias must lie in [0, 1), got " + bias);
+        if (bias < 0) {
+            throw new IllegalArgumentException("bias must be nonnegative, got " + bias);
         }
+        // The upper bound is deliberately NOT checked here. The radial warp divides by
+        // 1 - bias * |q|, so the domain is [0, 1), but the traversal is where that division
+        // happens and where a violation can degrade to raster; refusing it at construction would
+        // turn a recoverable failure into an exception thrown at a render-thread call site that
+        // has no fallback.
+        
     }
 
     /** Defensive copy on the way out too, so a provider cannot hand the next one a mutated matrix. */
@@ -64,6 +71,12 @@ public record CelestialFill(float[] inverseLightVp, float[] lightVp,
 
     private static void requireFinite(float value, String name) {
         if (!Float.isFinite(value)) {
+            throw new IllegalArgumentException(name + " must be finite, got " + value);
+        }
+    }
+
+    private static void requireFinite(double value, String name) {
+        if (!Double.isFinite(value)) {
             throw new IllegalArgumentException(name + " must be finite, got " + value);
         }
     }

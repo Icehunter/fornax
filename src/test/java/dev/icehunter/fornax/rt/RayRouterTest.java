@@ -79,7 +79,7 @@ class RayRouterTest {
         RayRouter.install(List.of());
         RayRouter.beginFrame();
         RayRouter.phaseOne(fill());
-        RayRouter.phaseTwo(fill());
+        RayRouter.phaseOne(fill());
         RayRouter.answer(new BufferQuery(RayQueryKind.VISIBILITY, 1L, 2L, 4));
 
         assertEquals(0, image[0], "nothing installed writes nothing");
@@ -90,16 +90,20 @@ class RayRouterTest {
      * overlap it. Phase two is the approximate tiers, after this frame's grid is current. Running
      * a voxel tier in phase one would trace last frame's grid.
      */
+    /**
+     * Every tier traces in one phase, best first. They were split across two frame points to give
+     * the approximate tiers a grid updated later in the frame, but that update runs after the pass
+     * loop: they traced the previous frame's grid either way, and the split cost a frame of camera
+     * lag in the published image for nothing.
+     */
     @Test
-    void phaseOneRunsOnlyTheMeshTierAndPhaseTwoRunsTheVoxelTiersBestFirst() {
+    void oneFillRunsEveryTierBestFirst() {
         RayRouter.install(List.of(fake(RayTier.SOFTWARE_VOXEL), fake(RayTier.HARDWARE_VOXEL),
                 fake(RayTier.HARDWARE_MESH)));
         RayRouter.beginFrame();
 
         RayRouter.phaseOne(fill());
-        assertEquals(List.of("fill:HARDWARE_MESH"), order);
 
-        RayRouter.phaseTwo(fill());
         assertEquals(List.of("fill:HARDWARE_MESH", "fill:HARDWARE_VOXEL", "fill:SOFTWARE_VOXEL"), order);
     }
 
@@ -119,7 +123,6 @@ class RayRouterTest {
         RayRouter.beginFrame();
 
         RayRouter.phaseOne(fill());
-        RayRouter.phaseTwo(fill());
 
         assertEquals(RayTier.HARDWARE_MESH.ordinal(), image[0]);
         assertEquals(RayTier.HARDWARE_MESH.ordinal(), image[1]);
@@ -150,6 +153,28 @@ class RayRouterTest {
         assertEquals(1.0, rows.get("rt_tier3_ready"));
     }
 
+    /**
+     * Readiness is asked once and not asked again, so a provider that only becomes ready later in
+     * the frame is skipped for the whole of it. This is not a bug in the router, it is the rule
+     * providers have to be written to: a tier reporting on state it receives mid-frame reports
+     * "not ready" every frame and is never called, silently, while the tier below answers
+     * everything. That defect shipped once and cost a session to find, so it is pinned here.
+     */
+    @Test
+    void aProviderThatBecomesReadyAfterTheFrameBeganIsStillSkippedForThatFrame() {
+        FakeProvider provider = fake(RayTier.HARDWARE_VOXEL);
+        provider.readiness = RayReadiness.notReady("its input has not arrived yet");
+        RayRouter.install(List.of(provider));
+
+        RayRouter.beginFrame();
+        provider.readiness = RayReadiness.answering();
+        RayRouter.phaseOne(fill());
+
+        assertEquals(List.of(), order,
+                "the router asks once; turning ready afterwards does not take effect until the "
+                        + "next frame");
+    }
+
     /** A query before beginFrame has no readiness to go on, so no provider may run on it. */
     @Test
     void noProviderRunsBeforeTheFrameHasBegun() {
@@ -170,7 +195,6 @@ class RayRouterTest {
 
         RayRouter.beginFrame();
         RayRouter.phaseOne(fill());
-        RayRouter.phaseTwo(fill());
 
         assertEquals(List.of("fill:HARDWARE_MESH", "fill:HARDWARE_VOXEL"), order);
         assertEquals(0.0, rows.get("rt_tier1_ready"), "a floored-out tier reports itself not ready");
@@ -190,7 +214,6 @@ class RayRouterTest {
 
         RayRouter.beginFrame();
         RayRouter.phaseOne(fill());
-        RayRouter.phaseTwo(fill());
 
         assertTrue(RayRouter.hasFailed(RayTier.HARDWARE_MESH));
         assertFalse(RayRouter.hasFailed(RayTier.HARDWARE_VOXEL));
@@ -200,7 +223,8 @@ class RayRouterTest {
         order.clear();
         RayRouter.beginFrame();
         RayRouter.phaseOne(fill());
-        assertEquals(List.of(), order, "and the failed tier is not tried again");
+        assertEquals(List.of("fill:HARDWARE_VOXEL"), order,
+                "the failed tier is not tried again; the tier below still runs");
         assertEquals(0.0, rows.get("rt_tier3_ready"));
     }
 

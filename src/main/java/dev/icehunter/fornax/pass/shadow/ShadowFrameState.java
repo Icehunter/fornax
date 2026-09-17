@@ -28,8 +28,23 @@ public final class ShadowFrameState {
     private static volatile float currentBias = 0.0f;
     private static float rtDistanceSquared;
 
-    /** Positive only after this frame's mesh RT depth was published into its separate depth result. */
+    /**
+     * The radius, in blocks, within which a pack may trust this frame's celestial RT image.
+     *
+     * <p>Positive only after some tier published into that image. More than one tier can fill it in
+     * a frame and they do not cover the same ground, so the published radius is the widest any of
+     * them answered at: {@link #raiseRtDistance} takes the maximum and {@link #setRtDistance} with
+     * zero, at the top of the frame, is what clears it. A texel inside the radius that no tier
+     * answered still carries zero validity, so a pack reading the radius alone never mistakes
+     * coverage for an answer.
+     */
     public static void setRtDistance(float radius) { rtDistanceSquared = radius * radius; }
+
+    /** Widens this frame's trusted radius to {@code radius} if some tier reached further. */
+    public static void raiseRtDistance(float radius) {
+        rtDistanceSquared = Math.max(rtDistanceSquared, radius * radius);
+    }
+
     public static float rtDistanceSquared() { return rtDistanceSquared; }
 
     // The view and projection halves, kept alongside the combined matrix. Geometry submitted for the

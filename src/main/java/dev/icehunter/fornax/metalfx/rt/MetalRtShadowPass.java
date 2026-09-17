@@ -12,8 +12,12 @@ import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.atlas.BlockAtlasView;
 import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.config.RtDebugMode;
+import dev.icehunter.fornax.config.RtDebugScene;
 import dev.icehunter.fornax.config.GBufferDebugView;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
+import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
+import dev.icehunter.fornax.rt.CelestialFill;
+import dev.icehunter.fornax.rt.RayTier;
 import dev.icehunter.fornax.voxel.SectionHarvester;
 import org.joml.Matrix4f;
 import java.util.HashMap;
@@ -21,7 +25,6 @@ import dev.icehunter.fornax.metalfx.VulkanMetalInterop;
 import dev.icehunter.fornax.metalfx.objc.Objc;
 import dev.icehunter.fornax.pack.graph.TargetRegistry;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
-import dev.icehunter.fornax.pass.shadow.RtShadowResult;
 import dev.icehunter.fornax.pipeline.FrameCameraState;
 import dev.icehunter.fornax.pipeline.GBuffer;
 import dev.icehunter.fornax.util.GpuFatalErrors;
@@ -65,8 +68,9 @@ public final class MetalRtShadowPass {
     private static final float MAX_DISTANCE = 512.0f;
 
     /** {@code RtTraceConstants} total size (see {@code rt_trace.metal}'s own layout comment). */
-    private static final long CONSTANTS_BYTES = 144;
-    private static final long SUN_CONSTANTS_BYTES = 176;
+    // 192: the int4 first-section member gives RtSunDepthConstants 16-byte alignment, so the
+    // tier and fill-mode words at 176 and 180 sit in a tail padded out to 192.
+    private static final long SUN_CONSTANTS_BYTES = 192;
 
     /** {@code RtDebugConstants} total size (see {@code rt_debug.metal}'s own layout comment). */
     private static final long DEBUG_CONSTANTS_BYTES = 96;
@@ -77,21 +81,33 @@ public final class MetalRtShadowPass {
 
     private static boolean failed;
 
-    /** Set when {@link #clearRtShadowResultTargetsToInvalid} throws an ordinary (non-fatal)
-     * failure instead of completing, so {@link RtShadowResult}'s targets are left holding whatever
-     * they held before the attempt. Retried from the {@code !available} branch of {@link
-     * #runIfEnabled} on every later frame until a clear succeeds, so a session-disabling
-     * failure whose own cleanup clear also fails still reaches the zero sentinel eventually rather
-     * than freezing rtSunValid/rtSunVisibility on the last real trace for the rest of the session. */
-    private static boolean pendingResultClear;
+
+    /** The voxel window reach the log last reported; see the mesh tier's own note. */
+    private static float reportedVoxelRadius = Float.NaN;
+
+    /**
+     * The timeline value the last committed trace signals, and whether its image still owes the
+     * pack a copy. The copy is taken at the START of the next frame rather than the end of this
+     * one: waiting on a value Metal has not signalled yet blocks the render thread inside
+     * vkQueueSubmit, which measured at 7.8 ms a frame, while waiting on one signalled a whole frame
+     * ago costs nothing. The pack reads a one-frame-old celestial image in exchange, which is
+     * invisible against a shadow map that already lags the camera through its own warp.
+     */
+    private static long pendingPublishValue;
+    private static boolean publishPending;
+    /** The image that pending publish reads. Held so a handover from one frame is not read from
+     * this frame's image, which may be a different allocation after a resolution change. */
+    private static VulkanMetalInterop.InteropImage pendingPublishImage;
 
     private static MetalRtShaders.Compiled compiled;
 
-    private static VulkanMetalInterop.InteropImage depthIn;
-    private static VulkanMetalInterop.InteropImage normalIn;
-    private static VulkanMetalInterop.InteropImage maskOut;
-    private static VulkanMetalInterop.InteropImage validOut;
-    private static VulkanMetalInterop.InteropImage sunDepthOut;
+    /**
+     * The cascade's celestial image, round-tripped through Metal. The engine's copy of it lives in
+     * a Blaze3D texture that Metal cannot address, so the fill is: copy it in, let the voxel
+     * traversal write only the texels no higher tier answered, copy it back. One image, two tiers,
+     * one frame.
+     */
+    private static VulkanMetalInterop.InteropImage celestialIo;
     private static VulkanMetalInterop.InteropImage debugSceneOut;
     private static VulkanMetalInterop.InteropImage atlasIn;
     private static VulkanMetalInterop.SharedTimeline timeline;
@@ -139,20 +155,12 @@ public final class MetalRtShadowPass {
      * not fire: a stale colored frame is a worse failure mode for a debug tool than an empty one. */
     private static boolean debugSceneValid;
     private static boolean debugSceneRenderedThisRun;
-    private static boolean legacyRenderedThisRun;
 
     private static final Vector3f SUN_SCRATCH = new Vector3f();
 
     private MetalRtShadowPass() {
     }
 
-    /** The R8 sun-visibility mask, copied back from Metal this frame: null before the first
-     * successful run, and null again from the moment the pass stops running for any reason
-     * (disabled, deactivated, or torn down) until it next runs successfully. Never a stale frame
-     * from before that point. */
-    public static GpuTextureView maskView() {
-        return maskValid ? maskTextureView : null;
-    }
 
     /** The colored RT scene-debug output, copied back from Metal this frame: null unless {@link
      * RtDebugMode} is something other than {@code OFF} and the {@code rt_debug} dispatch ran this
@@ -170,7 +178,24 @@ public final class MetalRtShadowPass {
      * nothing.
      */
     public static void runIfEnabled(GBuffer gbuffer, boolean wanted) {
-        boolean consumer = dev.icehunter.fornax.pack.graph.GraphRunner.legacyRtShadowSubscriber();
+        runIfEnabled(gbuffer, wanted, null);
+    }
+
+    /**
+     * @param celestial when non-null, this frame also fills {@code TerrainShadowResult} at the
+     *                  {@code HARDWARE_VOXEL} tier, writing only texels no higher tier answered.
+     *                  Its presence is also a reason to bring the backend up at all: a pack that
+     *                  reads only the cascade's image subscribes to none of the legacy targets.
+     */
+    public static void runIfEnabled(GBuffer gbuffer, boolean wanted, CelestialFill celestial) {
+        // A selected scene-debug mode is its own reason to bring the backend up. Without this the
+        // diagnostic is unreachable on any pack that consumes the mesh-based rtTerrainShadowDepth
+        // rather than the legacy rtSunDepth: the setting reads Normal, the view reads Voxel RT
+        // scene, and the pass returns here before tracing anything, so the screen never changes and
+        // nothing reports why.
+        // A scene-debug mode is its own reason to bring the backend up, and so is a celestial
+        // request: a pack that reads only the cascade's image subscribes to nothing else.
+        boolean consumer = FornaxConfig.get().rtDebugMode != RtDebugMode.OFF || celestial != null;
         boolean available = wanted && !failed && MetalRtSupport.isAvailableFor(consumer);
         boolean wasActive = MetalRtGeometry.isActive();
         MetalRtGeometry.setActive(available);
@@ -183,32 +208,10 @@ public final class MetalRtShadowPass {
             // never blit that as if it were current.
             maskValid = false;
             debugSceneValid = false;
-            if (wasActive || pendingResultClear) {
-                // rtSunValid/rtSunVisibility describe whether and how THIS frame's pixel was
-                // traced (RtShadowResult's own contract). The pass just stopped running: setting
-                // off, a session-disabling failure elsewhere, or a FORCE->AUTO flip landing on
-                // non-apple9 hardware. So both must read 0, or a pack keeps compositing the last
-                // real trace as a screen-space imprint that does not follow the camera.
-                // pendingResultClear means an earlier attempt (here or in the session-disabling
-                // catch below) failed without clearing anything: keep retrying every frame until
-                // one succeeds, rather than leaving the targets stale for good.
-                try {
-                    clearRtShadowResultTargetsToInvalid();
-                    pendingResultClear = false;
-                } catch (GpuDeviceLossException | GpuFatalException e) {
-                    throw e;
-                } catch (Throwable retryFailure) {
-                    pendingResultClear = true;
-                    FornaxMod.LOGGER.error(
-                            "[Fornax] Metal RT sun shadow: failed to clear result targets, will retry next frame",
-                            retryFailure);
-                }
-            }
             return;
         }
         try {
-            run(gbuffer);
-            maskValid = legacyRenderedThisRun;
+            run(gbuffer, celestial);
             debugSceneValid = debugSceneRenderedThisRun;
         } catch (GpuDeviceLossException | GpuFatalException e) {
             FornaxMod.LOGGER.error("[Fornax] Metal RT sun shadow: Vulkan device lost, unrecoverable", e);
@@ -225,20 +228,10 @@ public final class MetalRtShadowPass {
             // it until the game closes. Done before the clear below so a GPU device that just
             // failed does not get to leak this pass's state on top of failing the clear too.
             releaseAllGpuState();
-            // Same never-stale contract as the !available branch above: this session will never
-            // trace again, so rtSunValid must read 0 from here on rather than freezing on
-            // whatever the last successful frame traced. Its own try/catch: the failure above is
-            // already logged and resources already released, so a second GPU command failing here
-            // must not escape uncaught into the render path.
-            try {
-                clearRtShadowResultTargetsToInvalid();
-            } catch (Throwable clearFailure) {
-                GpuFatalErrors.rethrowIfFatal(clearFailure);
-                pendingResultClear = true;
-                FornaxMod.LOGGER.error(
-                        "[Fornax] Metal RT sun shadow: failed to clear result targets after session-disabling failure, will retry next frame",
-                        clearFailure);
-            }
+            // The cascade's own image needs no clear here: it carries per-texel validity, and a
+            // session that will never trace again stops writing any, so every texel reads
+            // as unanswered and the pack falls back to raster on its own.
+            TerrainShadowResult.invalidate();
         }
     }
 
@@ -259,19 +252,9 @@ public final class MetalRtShadowPass {
             VulkanDevice device = VulkanMetalInterop.vulkanDevice();
             if (device != null) {
                 MetalRtGeometry.destroy(device);
-                VulkanMetalInterop.destroyImage(device, depthIn);
-                VulkanMetalInterop.destroyImage(device, normalIn);
-                VulkanMetalInterop.destroyImage(device, maskOut);
-                VulkanMetalInterop.destroyImage(device, validOut);
-                VulkanMetalInterop.destroyImage(device, sunDepthOut);
                 VulkanMetalInterop.destroyImage(device, debugSceneOut);
                 VulkanMetalInterop.destroyImage(device, atlasIn);
             }
-            depthIn = null;
-            normalIn = null;
-            maskOut = null;
-            validOut = null;
-            sunDepthOut = null;
             debugSceneOut = null;
             atlasIn = null;
             lastAtlasGeneration = -1;
@@ -320,48 +303,24 @@ public final class MetalRtShadowPass {
         releaseAllGpuState();
     }
 
-    /** Explicitly clears {@link RtShadowResult}'s two pack-visible targets to the same zero
-     * sentinel {@link RtShadowResult#ensureSize} clears them to at allocation, for a frame where
-     * {@code rt_trace} never dispatched at all (no instance structure yet). Without this, the
-     * copy-back in {@link #run} would either skip these two targets, leaving them at whatever
-     * uninitialized VRAM {@link VulkanMetalInterop#createImage} handed {@link #maskOut}/{@link
-     * #validOut} on session start, or, on a later frame with no instances, leave them holding a
-     * stale real value copied on some earlier frame that DID trace. Either way is exactly the
-     * silent-stale-VRAM failure this codebase's zero-fill law exists to catch: {@code rtSunValid}
-     * describes whether THIS frame's pixel was traced, so a frame with nothing to trace must read
-     * 0 for every pixel, not leftover content from a different frame. No-op before {@link
-     * RtShadowResult#ensureSize} has ever run (both getters null). */
-    private static void clearRtShadowResultTargetsToInvalid() {
-        GpuTexture sunDepthTexture = RtShadowResult.getDepthTexture();
-        if (sunDepthTexture != null) RenderSystem.getDevice().createCommandEncoder()
-                .clearColorTexture(sunDepthTexture, new Vector4f(0.0f, 0.0f, 0.0f, 0.0f));
-        clearLegacyRtTargetsToInvalid();
-    }
 
-    private static void clearLegacyRtTargetsToInvalid() {
-        GpuTexture rtVisibilityTexture = RtShadowResult.getVisibilityTexture();
-        if (rtVisibilityTexture != null) {
-            RenderSystem.getDevice().createCommandEncoder()
-                    .clearColorTexture(rtVisibilityTexture, new Vector4f(0.0f, 0.0f, 0.0f, 0.0f));
-        }
-        GpuTexture rtValidTexture = RtShadowResult.getValidTexture();
-        if (rtValidTexture != null) {
-            RenderSystem.getDevice().createCommandEncoder()
-                    .clearColorTexture(rtValidTexture, new Vector4f(0.0f, 0.0f, 0.0f, 0.0f));
-        }
-    }
 
-    private static void run(GBuffer gbuffer) {
+    private static void run(GBuffer gbuffer, CelestialFill celestial) {
         debugSceneRenderedThisRun = false;
-        legacyRenderedThisRun = false;
-        boolean legacyTrace = RtShadowResult.legacyRequested()
-                || FornaxConfig.get().debugView == GBufferDebugView.METAL_RT_SUN_MASK;
-        // A debug-only legacy trace can stop while the sun-space consumer remains active.
-        // Clear that transition too, so even the old getters never retain a valid frozen mask.
-        if (!legacyTrace && maskValid) clearLegacyRtTargetsToInvalid();
-        boolean sunTrace = RtShadowResult.sunDepthRequested();
-        boolean debugTrace = FornaxConfig.get().rtDebugMode != RtDebugMode.OFF;
-        if (!legacyTrace && !sunTrace && !debugTrace) return;
+        // The scene debug traces in screen space, so it needs a G-buffer; the celestial fill
+        // does not, and runs earlier in the frame than one exists.
+        boolean debugTrace = gbuffer != null && FornaxConfig.get().rtDebugMode != RtDebugMode.OFF;
+        // The cascade's own image has to exist before it can be filled; a pack that never declares
+        // rtTerrainShadowDepth has no texture here, so this tier has nothing to do.
+        boolean celestialFill = celestial != null && TerrainShadowResult.texture() != null;
+        // The tier above hands over the image it traced, so this tier fills the same one rather
+        // than copying a fresh one in and the result back out. Two Vulkan submits saved per frame,
+        // which measured larger than the tracing itself.
+        MeshMetalProvider.CascadeImage handover = celestialFill
+                ? dev.icehunter.fornax.rt.RayRouter.provider(MeshMetalProvider.class)
+                        .map(MeshMetalProvider::cascadeImage).orElse(null)
+                : null;
+        if (!debugTrace && !celestialFill) return;
         VulkanDevice device = VulkanMetalInterop.vulkanDevice();
         if (device == null) {
             throw new IllegalStateException("no Vulkan device (GL backend?)");
@@ -370,8 +329,8 @@ public final class MetalRtShadowPass {
 
         VoxelWindow.WindowState sourceWindow = VoxelWindow.currentState();
         VoxelWindow.WindowState window = MetalRtGeometry.exportedWindow(sourceWindow);
-        int width = gbuffer.getWidth();
-        int height = gbuffer.getHeight();
+        int width = gbuffer != null ? gbuffer.getWidth() : 1;
+        int height = gbuffer != null ? gbuffer.getHeight() : 1;
         // Read once here, ahead of the lock-scoped fetch below: ensureBuffers only needs the
         // registry to decide whether VoxelFaceTexture.TARGET is enabled (stable pack-load metadata,
         // not a buffer handle), so this does not need SHARED_QUEUE_LOCK the way the actual buffer
@@ -383,16 +342,17 @@ public final class MetalRtShadowPass {
             VulkanMetalInterop.waitTimeline(device, timeline, lastVulkanSignal);
         }
         MetalRtGeometry.ensureBuffers(device, registryForGeometry, sourceWindow.diameter());
-        ensureImages(device, legacyTrace || debugTrace ? width : 1, legacyTrace || debugTrace ? height : 1);
-        if (sunTrace) ensureSunImage(device, RtShadowResult.sunResolution());
+        ensureImages(device, debugTrace ? width : 1, debugTrace ? height : 1);
+        if (celestialFill && handover == null) ensureCelestialImage(device, celestial.resolution());
         ensureAtlasImage(device);
         if (timeline == null) {
             timeline = VulkanMetalInterop.createSharedTimeline(device);
         }
 
+        // Sub-phase timing, because the tier's total says only that it is expensive. Each row is
+        // CPU time on the render thread: encode and submit, not GPU execution.
+        long phaseStart = System.nanoTime();
         long commandQueue = VulkanMetalInterop.metalCommandQueue();
-        VulkanGpuTexture depthTex = (VulkanGpuTexture) gbuffer.getDepthView().texture();
-        VulkanGpuTexture normalTex = (VulkanGpuTexture) gbuffer.getNormalView().texture();
         VulkanCommandEncoder encoder = device.createCommandEncoder();
         long v = timelineValue;
 
@@ -411,28 +371,10 @@ public final class MetalRtShadowPass {
             TargetRegistry registry = VoxelWindow.attachedRegistry();
             VulkanMetalInterop.CmdRecorder copyIn = cmd -> {
                 try (MemoryStack stack = MemoryStack.stackPush()) {
-                    if (legacyTrace) {
-                    VulkanMetalInterop.prepareGeneralTransferRead(
-                            cmd, stack, depthTex.vkImage(), VK13.VK_IMAGE_ASPECT_DEPTH_BIT);
-                    VulkanMetalInterop.prepareInteropTransferWrite(cmd, stack, depthIn);
-                    VulkanMetalInterop.copyImage(cmd, stack,
-                            depthTex.vkImage(), VK13.VK_IMAGE_LAYOUT_GENERAL,
-                            depthIn.image, depthIn.layout,
-                            VK13.VK_IMAGE_ASPECT_DEPTH_BIT, width, height);
-                    VulkanMetalInterop.finishInteropTransferWrite(cmd, stack, depthIn);
-                    VulkanMetalInterop.prepareGeneralTransferRead(
-                            cmd, stack, normalTex.vkImage(), VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-                    VulkanMetalInterop.prepareInteropTransferWrite(cmd, stack, normalIn);
-                    VulkanMetalInterop.copyImage(cmd, stack,
-                            normalTex.vkImage(), VK13.VK_IMAGE_LAYOUT_GENERAL,
-                            normalIn.image, normalIn.layout,
-                            VK13.VK_IMAGE_ASPECT_COLOR_BIT, width, height);
-                    VulkanMetalInterop.finishInteropTransferWrite(cmd, stack, normalIn);
-                    }
                     copyBlockAtlasIfChanged(cmd, stack);
-                    if (sunTrace) VulkanMetalInterop.prepareInteropMetalWrite(cmd, stack, sunDepthOut);
-                    VulkanMetalInterop.prepareInteropMetalWrite(cmd, stack, maskOut);
-                    VulkanMetalInterop.prepareInteropMetalWrite(cmd, stack, validOut);
+                    // Only when no tier above handed one over: theirs is already Metal-side and
+                    // already carries this frame's answers.
+                    if (celestialFill && handover == null) copyCelestialIn(cmd, stack);
                     VulkanMetalInterop.prepareInteropMetalWrite(cmd, stack, debugSceneOut);
                     if (!dirty.isEmpty() && registry != null) {
                         copiedHolder[0] = MetalRtGeometry.recordSlotCopies(cmd, registry, dirty);
@@ -447,6 +389,7 @@ public final class MetalRtShadowPass {
             encoder.signalSemaphore(timeline.vkSemaphore, v, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
             encoder.submit();
         }
+        phaseStart = record("RT voxel copy-in CPU", phaseStart);
         List<Integer> copiedSlots = copiedHolder[0];
         if (copiedSlots.size() != dirty.size()) {
             Set<Integer> copiedSet = new HashSet<>(copiedSlots);
@@ -464,6 +407,7 @@ public final class MetalRtShadowPass {
             MetalRtAcceleration.rebuildDirty(commandQueue, compiled, copiedSlots, populatedSlots,
                     timeline.mtlSharedEvent, v, capturedSections);
             MetalRtAcceleration.rebuildInstances(commandQueue, populatedSlots);
+            phaseStart = record("RT voxel structures CPU", phaseStart);
             MetalRtGeometry.markPublished(copiedSlots, populatedSlots);
             int[] readiness;
             synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
@@ -491,80 +435,44 @@ public final class MetalRtShadowPass {
             long instanceStructure = MetalRtAcceleration.instanceStructure();
             tracedThisFrame = instanceStructure != 0;
             if (tracedThisFrame) {
-                if (legacyTrace) {
-                // Constants prepared before the encoder exists: a throw from writeConstants (pure
-                // Java, no GPU call) then has no open encoder to leak.
-                try (Arena local = Arena.ofConfined()) {
-                    MemorySegment constants = local.allocate(CONSTANTS_BYTES);
-                    writeConstants(constants, width, height, window);
-
-                    long computeEncoder = Objc.msgSendId(cb, Objc.selector("computeCommandEncoder"));
-                    if (computeEncoder == 0) {
-                        throw new IllegalStateException("Metal compute encoder nil (rt trace)");
-                    }
-                    // Every encoder-mutating call from here on must run inside this try: Metal
-                    // aborts the process on -[_MTLCommandEncoder dealloc] if an open encoder is
-                    // ever released without endEncoding, which is exactly what happens if a throw
-                    // here escaped past a still-open encoder into the autorelease pool pop below.
-                    try {
-                        ensureCutoutFallbacks(metalDevice);
-                        Objc.msgSendVoidIdLongLong(computeEncoder, Objc.selector("setBuffer:offset:atIndex:"), readinessBuffer, 0L, 10L);
-                        long faceTextureBuffer = MetalRtGeometry.faceTexture() != null
-                                ? MetalRtGeometry.faceTexture().mtlBuffer() : dummyFaceTextureBuffer;
-                        long atlasTexture = atlasIn != null ? atlasIn.mtlTexture : dummyAtlasTexture;
-                        // Two independent bits (rt_trace.metal's CUTOUT_ATLAS_BIT/
-                        // CUTOUT_FACE_TEXTURE_BIT): a CROSS entry alpha-tests off the atlas alone,
-                        // so a pack that captures the atlas but never enables
-                        // VoxelFaceTexture.TARGET must not lose plant alpha testing for a reason
-                        // that only matters to the FULL/PARTIAL path.
-                        int cutoutFlags = (atlasIn != null && BlockAtlasView.texture() != null ? 0x1 : 0)
-                                | (MetalRtGeometry.faceTexture() != null ? 0x2 : 0);
-
-                        Objc.msgSendVoid(computeEncoder, Objc.selector("setComputePipelineState:"), compiled.trace().pipeline());
-                        Objc.msgSendVoidIdLong(computeEncoder,
-                                Objc.selector("setAccelerationStructure:atBufferIndex:"), instanceStructure, 1L);
-                        Objc.msgSendVoidIdLongLong(computeEncoder, Objc.selector("setBuffer:offset:atIndex:"),
-                                MetalRtGeometry.palette().mtlBuffer(), 0L, 2L);
-                        Objc.msgSendVoidIdLongLong(computeEncoder, Objc.selector("setBuffer:offset:atIndex:"),
-                                faceTextureBuffer, 0L, 3L);
-                        Objc.msgSendVoidIdLongLong(computeEncoder, Objc.selector("setBuffer:offset:atIndex:"),
-                                MetalRtAcceleration.instanceSlotMap(), 0L, 4L);
-                        try (Arena flagArena = Arena.ofConfined()) {
-                            MemorySegment flag = flagArena.allocate(ValueLayout.JAVA_INT);
-                            flag.set(ValueLayout.JAVA_INT, 0, cutoutFlags);
-                            Objc.msgSendVoidIdLongLong(computeEncoder,
-                                    Objc.selector("setBytes:length:atIndex:"), flag.address(), 4L, 5L);
-                        }
-                        Objc.msgSendVoidIdLong(computeEncoder, Objc.selector("setTexture:atIndex:"), maskOut.mtlTexture, 0L);
-                        Objc.msgSendVoidIdLong(computeEncoder, Objc.selector("setTexture:atIndex:"), depthIn.mtlTexture, 1L);
-                        Objc.msgSendVoidIdLong(computeEncoder, Objc.selector("setTexture:atIndex:"), normalIn.mtlTexture, 2L);
-                        Objc.msgSendVoidIdLong(computeEncoder, Objc.selector("setTexture:atIndex:"), validOut.mtlTexture, 3L);
-                        Objc.msgSendVoidIdLong(computeEncoder, Objc.selector("setTexture:atIndex:"), atlasTexture, 4L);
-                        Objc.msgSendVoidIdLongLong(computeEncoder,
-                                Objc.selector("setBytes:length:atIndex:"), constants.address(), CONSTANTS_BYTES, 0L);
-                        MetalRtAcceleration.useResources(computeEncoder);
-                        long groupsX = (width + TRACE_THREADS_PER_GROUP_X - 1) / TRACE_THREADS_PER_GROUP_X;
-                        long groupsY = (height + TRACE_THREADS_PER_GROUP_Y - 1) / TRACE_THREADS_PER_GROUP_Y;
-                        Objc.dispatchThreadgroups(computeEncoder, groupsX, groupsY, 1,
-                                TRACE_THREADS_PER_GROUP_X, TRACE_THREADS_PER_GROUP_Y, 1);
-                    } finally {
-                        Objc.msgSendVoid(computeEncoder, Objc.selector("endEncoding"));
-                    }
+                if (celestialFill) {
+                    encodeCelestialFill(cb, commandQueue, instanceStructure, readinessBuffer, window,
+                            celestial, handover);
                 }
-
-                legacyRenderedThisRun = true;
-                }
-                if (sunTrace) encodeSunDepth(cb, commandQueue, instanceStructure, readinessBuffer, window);
                 RtDebugMode debugMode = FornaxConfig.get().rtDebugMode;
                 if (debugMode != RtDebugMode.OFF) {
                     // Second, independent dispatch in the same command buffer: rt_debug traces a
                     // primary ray per pixel rather than reading rt_trace's shadow-ray inputs, so it
                     // needs none of maskOut/depthIn/normalIn, only the instance structure and its
                     // own constants.
+                    // Which structure the view shows is the owner's choice, and the two scenes are
+                    // addressed in different frames: the voxel window's first section, or the mesh
+                    // tier's coarse grid origin. The rays are built from whichever one is traced,
+                    // so the scene and its origin always travel together.
+                    MeshMetalProvider.DebugScene meshScene =
+                            FornaxConfig.get().rtDebugScene == RtDebugScene.MESH
+                                    ? dev.icehunter.fornax.rt.RayRouter.provider(MeshMetalProvider.class)
+                                            .map(MeshMetalProvider::debugScene).orElse(null)
+                                    : null;
                     try (Arena local = Arena.ofConfined()) {
                         MemorySegment debugConstants = local.allocate(DEBUG_CONSTANTS_BYTES);
-                        writeDebugConstants(debugConstants, width, height, window, debugMode);
+                        if (meshScene != null) {
+                            writeDebugConstants(debugConstants, width, height, debugMode,
+                                    meshScene.originX(), meshScene.originY(), meshScene.originZ());
+                        } else {
+                            writeDebugConstants(debugConstants, width, height, window, debugMode);
+                        }
 
+                        if (meshScene != null && meshScene.readyEvent() != 0) {
+                            // The mesh tier builds its structures in its own command buffer. A
+                            // later command buffer on the same queue may begin before an earlier
+                            // one finishes, so without this the trace reads a structure mid-build:
+                            // the shapes land, because most of the BVH is already there, and the
+                            // per-triangle data behind them is garbage. That reads as noise
+                            // scattered over surfaces that should each be one flat colour.
+                            Objc.msgSendVoidIdLong(cb, Objc.selector("encodeWaitForEvent:value:"),
+                                    meshScene.readyEvent(), meshScene.readyValue());
+                        }
                         long debugEncoder = Objc.msgSendId(cb, Objc.selector("computeCommandEncoder"));
                         if (debugEncoder == 0) {
                             throw new IllegalStateException("Metal compute encoder nil (rt debug)");
@@ -572,11 +480,18 @@ public final class MetalRtShadowPass {
                         try {
                             Objc.msgSendVoid(debugEncoder, Objc.selector("setComputePipelineState:"), compiled.debug().pipeline());
                             Objc.msgSendVoidIdLong(debugEncoder,
-                                    Objc.selector("setAccelerationStructure:atBufferIndex:"), instanceStructure, 0L);
+                                    Objc.selector("setAccelerationStructure:atBufferIndex:"),
+                                    meshScene != null ? meshScene.structure() : instanceStructure, 0L);
                             Objc.msgSendVoidIdLongLong(debugEncoder, Objc.selector("setBytes:length:atIndex:"),
                                     debugConstants.address(), DEBUG_CONSTANTS_BYTES, 1L);
                             Objc.msgSendVoidIdLong(debugEncoder, Objc.selector("setTexture:atIndex:"), debugSceneOut.mtlTexture, 0L);
-                            MetalRtAcceleration.useResources(debugEncoder);
+                            if (meshScene != null) {
+                                for (long resource : meshScene.resources()) {
+                                    Objc.msgSendVoidIdLong(debugEncoder, Objc.selector("useResource:usage:"), resource, 1L);
+                                }
+                            } else {
+                                MetalRtAcceleration.useResources(debugEncoder);
+                            }
                             long groupsX = (width + TRACE_THREADS_PER_GROUP_X - 1) / TRACE_THREADS_PER_GROUP_X;
                             long groupsY = (height + TRACE_THREADS_PER_GROUP_Y - 1) / TRACE_THREADS_PER_GROUP_Y;
                             Objc.dispatchThreadgroups(debugEncoder, groupsX, groupsY, 1,
@@ -594,15 +509,13 @@ public final class MetalRtShadowPass {
                 // VkImage allocation happened to contain (createImage does not clear it). The
                 // scene-debug output is safe from the same gap: debugSceneValid only ever turns
                 // true on a frame the rt_debug dispatch ran, so debugSceneView() never hands a
-                // presenter that uninitialized content. RtShadowResult's own pack-visible targets
-                // get the same never-stale treatment explicitly, below, since the copy-back that
-                // would otherwise write them only runs when tracedThisFrame is true.
-                FornaxMod.LOGGER.debug("[Fornax] Metal RT sun shadow: no instance structure yet, skipping trace this frame");
-                clearRtShadowResultTargetsToInvalid();
+                // presenter that uninitialized content.
+                FornaxMod.LOGGER.debug("[Fornax] Metal RT voxel tier: no instance structure yet, skipping trace this frame");
             }
 
             Objc.msgSendVoidIdLong(cb, Objc.selector("encodeSignalEvent:value:"), timeline.mtlSharedEvent, v + 1);
             Objc.msgSendVoid(cb, Objc.selector("commit"));
+            phaseStart = record("RT voxel dispatch CPU", phaseStart);
         } finally {
             // Command buffers retain bound resources through completion; each frame has its own
             // immutable readiness allocation, never a CPU overwrite of an in-flight snapshot.
@@ -612,56 +525,6 @@ public final class MetalRtShadowPass {
 
         VulkanMetalInterop.CmdRecorder copyBack = cmd -> {
             try (MemoryStack stack = MemoryStack.stackPush()) {
-                if (tracedThisFrame && legacyTrace) {
-                long maskImage = ((VulkanGpuTexture) maskTexture).vkImage();
-                VulkanMetalInterop.prepareInteropTransferRead(cmd, stack, maskOut);
-                VulkanMetalInterop.prepareGeneralTransferWrite(cmd, stack, maskImage, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-                VulkanMetalInterop.copyImage(cmd, stack,
-                        maskOut.image, maskOut.layout,
-                        maskImage, VK13.VK_IMAGE_LAYOUT_GENERAL,
-                        VK13.VK_IMAGE_ASPECT_COLOR_BIT, width, height);
-                VulkanMetalInterop.finishInteropTransferRead(cmd, stack, maskOut);
-                VulkanMetalInterop.finishGeneralTransferWrite(cmd, stack, maskImage, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-
-                // Same maskOut content, additionally copied into RtShadowResult's own pack-visible
-                // rtSunVisibility target (getTexture() is null only before RtShadowResult.ensureSize
-                // has ever run, which SodiumWorldRendererOrchestrationMixin calls unconditionally
-                // every frame the graph is active: see that class's own doc), but ONLY on a frame
-                // the trace dispatched: maskOut/validOut hold no real content for THIS frame
-                // otherwise (see clearRtShadowResultTargetsToInvalid, which handles that case
-                // instead, called from the tracedThisFrame == false branch above).
-                if (tracedThisFrame) {
-                    GpuTexture rtVisibilityTexture = RtShadowResult.getVisibilityTexture();
-                    if (rtVisibilityTexture != null) {
-                        long rtVisibilityImage = ((VulkanGpuTexture) rtVisibilityTexture).vkImage();
-                        VulkanMetalInterop.prepareInteropTransferRead(cmd, stack, maskOut);
-                        VulkanMetalInterop.prepareGeneralTransferWrite(cmd, stack, rtVisibilityImage, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-                        VulkanMetalInterop.copyImage(cmd, stack,
-                                maskOut.image, maskOut.layout,
-                                rtVisibilityImage, VK13.VK_IMAGE_LAYOUT_GENERAL,
-                                VK13.VK_IMAGE_ASPECT_COLOR_BIT, width, height);
-                        VulkanMetalInterop.finishInteropTransferRead(cmd, stack, maskOut);
-                        VulkanMetalInterop.finishGeneralTransferWrite(cmd, stack, rtVisibilityImage, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-                    }
-
-                    GpuTexture rtValidTexture = RtShadowResult.getValidTexture();
-                    if (rtValidTexture != null) {
-                        long rtValidImage = ((VulkanGpuTexture) rtValidTexture).vkImage();
-                        VulkanMetalInterop.prepareInteropTransferRead(cmd, stack, validOut);
-                        VulkanMetalInterop.prepareGeneralTransferWrite(cmd, stack, rtValidImage, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-                        VulkanMetalInterop.copyImage(cmd, stack,
-                                validOut.image, validOut.layout,
-                                rtValidImage, VK13.VK_IMAGE_LAYOUT_GENERAL,
-                                VK13.VK_IMAGE_ASPECT_COLOR_BIT, width, height);
-                        VulkanMetalInterop.finishInteropTransferRead(cmd, stack, validOut);
-                        VulkanMetalInterop.finishGeneralTransferWrite(cmd, stack, rtValidImage, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-                    }
-                }
-
-                }
-                if (tracedThisFrame && sunTrace) {
-                    copySunDepth(cmd, stack);
-                }
                 if (debugSceneRenderedThisRun) {
                 long debugSceneImage = ((VulkanGpuTexture) debugSceneTexture).vkImage();
                 VulkanMetalInterop.prepareInteropTransferRead(cmd, stack, debugSceneOut);
@@ -675,45 +538,157 @@ public final class MetalRtShadowPass {
                 }
             }
         };
-        encoder.waitSemaphore(timeline.vkSemaphore, v + 1, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-        VulkanMetalInterop.recordIntoStream(encoder, copyBack);
-        encoder.signalSemaphore(timeline.vkSemaphore, v + 2, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-        encoder.submit();
-        lastVulkanSignal = v + 2;
+        // Only the debug scene still copies back within the frame, and only when it was traced:
+        // it is a diagnostic nobody profiles, and its output has no next frame to wait for.
+        if (debugSceneRenderedThisRun) {
+            encoder.waitSemaphore(timeline.vkSemaphore, v + 1, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+            VulkanMetalInterop.recordIntoStream(encoder, copyBack);
+            encoder.signalSemaphore(timeline.vkSemaphore, v + 2, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+            long submitStart = record("RT voxel record CPU", phaseStart);
+            encoder.submit();
+            record("RT voxel submit CPU", submitStart);
+            lastVulkanSignal = v + 2;
+        } else {
+            lastVulkanSignal = v;
+        }
+        record("RT voxel copy-back CPU", phaseStart);
         timelineValue = v + 3;
+        if (celestialFill) {
+            // Owed to the pack, taken at the start of the next frame. Publishing here would mean
+            // waiting on a value Metal has not signalled yet, which blocks the render thread.
+            pendingPublishImage = handover != null ? handover.image() : celestialIo;
+            pendingPublishValue = v + 1;
+            publishPending = true;
+        }
+        if (tracedThisFrame && celestialFill) {
+            // The window is centred on the camera and spans diameter sections of 16 blocks, so its
+            // half-extent is diameter * 8. One block comes off for the outer shell the kernel
+            // refuses to certify (an absent owner outside it cannot prove an interior miss), which
+            // is the same bound rtRayBox applies to every ray this tier traces.
+            float voxelRadius = window.diameter() * 8.0f - 1.0f;
+            if (voxelRadius > 0.0f) {
+                ShadowFrameState.raiseRtDistance(voxelRadius);
+            }
+            dev.icehunter.fornax.pack.graph.GraphRunner.frameProfiler()
+                    .recordValue("rt_tier2_window_blocks", window.diameter() * 16.0);
+            float trusted = (float) Math.sqrt(ShadowFrameState.rtDistanceSquared());
+            dev.icehunter.fornax.pack.graph.GraphRunner.frameProfiler()
+                    .recordValue("rt_trusted_radius_blocks", trusted);
+            // Same reasoning as the mesh tier's own line: reported when it changes, so a reader can
+            // tell what this frame's coverage is rather than what some earlier frame's was.
+            if (voxelRadius != reportedVoxelRadius) {
+                FornaxMod.LOGGER.info(
+                        "[Fornax] Voxel RT shadows filling: {} blocks window reach, {} blocks trusted overall",
+                        voxelRadius, trusted);
+                reportedVoxelRadius = voxelRadius;
+            }
+        }
     }
 
-    private static void ensureSunImage(VulkanDevice device, int resolution) {
-        if (resolution < 1) throw new IllegalStateException("rtSunDepth has no allocated shadow resolution");
-        if (sunDepthOut != null && sunDepthOut.width == resolution) return;
+    /** Publishes the milliseconds since {@code from} under {@code label}; returns a fresh mark. */
+    private static long record(String label, long from) {
+        long now = System.nanoTime();
+        dev.icehunter.fornax.pack.graph.GraphRunner.frameProfiler().record(label, (now - from) * 1e-6);
+        return now;
+    }
+
+    /**
+     * Delivers the image phase one traced. Waits on the value that trace signals, which by this
+     * point in the frame is already signalled, so this records and submits rather than blocking.
+     */
+    static boolean publishPendingCelestial() {
+        if (!publishPending) {
+            return false;
+        }
+        VulkanDevice device = VulkanMetalInterop.vulkanDevice();
+        GpuTexture texture = TerrainShadowResult.texture();
+        if (device == null || texture == null || pendingPublishImage == null) {
+            publishPending = false;
+            return false;
+        }
+        long started = System.nanoTime();
+        VulkanCommandEncoder encoder = device.createCommandEncoder();
+        encoder.waitSemaphore(timeline.vkSemaphore, pendingPublishValue, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+        VulkanMetalInterop.recordIntoStream(encoder, cmd -> {
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                copyCelestialOut(cmd, stack, pendingPublishImage);
+            }
+        });
+        long publishValue = pendingPublishValue + 1;
+        encoder.signalSemaphore(timeline.vkSemaphore, publishValue, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+        encoder.submit();
+        lastVulkanSignal = publishValue;
+        TerrainShadowResult.published();
+        publishPending = false;
+        record("RT celestial publish CPU", started);
+        return true;
+    }
+
+    private static void ensureCelestialImage(VulkanDevice device, int resolution) {
+        if (resolution < 1) throw new IllegalStateException("the celestial target has no resolution");
+        if (celestialIo != null && celestialIo.width == resolution) return;
         if (timeline != null && lastVulkanSignal > 0) VulkanMetalInterop.waitTimeline(device, timeline, lastVulkanSignal);
-        VulkanMetalInterop.destroyImage(device, sunDepthOut);
-        sunDepthOut = VulkanMetalInterop.createImage(device, resolution, resolution,
+        VulkanMetalInterop.destroyImage(device, celestialIo);
+        // TRANSFER_DST as well as SRC: unlike every other interop image here this one is filled
+        // from the engine's own texture before Metal touches it, because its existing contents are
+        // exactly what the fill has to respect.
+        celestialIo = VulkanMetalInterop.createImage(device, resolution, resolution,
                 VK13.VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK13.VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK13.VK_IMAGE_USAGE_STORAGE_BIT | VK13.VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK13.VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK13.VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                        | VK13.VK_IMAGE_USAGE_STORAGE_BIT | VK13.VK_IMAGE_USAGE_SAMPLED_BIT,
                 VK13.VK_IMAGE_ASPECT_COLOR_BIT);
     }
 
-    private static void copySunDepth(VkCommandBuffer cmd, MemoryStack stack) {
-        GpuTexture texture = RtShadowResult.getDepthTexture();
-        if (texture == null) throw new IllegalStateException("rtSunDepth target disappeared during trace");
+    private static void copyCelestialIn(VkCommandBuffer cmd, MemoryStack stack) {
+        GpuTexture texture = TerrainShadowResult.texture();
+        if (texture == null) throw new IllegalStateException("the celestial target disappeared during trace");
+        long source = ((VulkanGpuTexture) texture).vkImage();
+        VulkanMetalInterop.prepareGeneralTransferRead(cmd, stack, source, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
+        VulkanMetalInterop.prepareInteropTransferWrite(cmd, stack, celestialIo);
+        VulkanMetalInterop.copyImage(cmd, stack, source, VK13.VK_IMAGE_LAYOUT_GENERAL,
+                celestialIo.image, celestialIo.layout, VK13.VK_IMAGE_ASPECT_COLOR_BIT,
+                celestialIo.width, celestialIo.height);
+        VulkanMetalInterop.finishInteropTransferWrite(cmd, stack, celestialIo);
+        VulkanMetalInterop.prepareInteropMetalWrite(cmd, stack, celestialIo);
+    }
+
+    private static void copyCelestialOut(VkCommandBuffer cmd, MemoryStack stack,
+            VulkanMetalInterop.InteropImage source) {
+        GpuTexture texture = TerrainShadowResult.texture();
+        if (texture == null) throw new IllegalStateException("the celestial target disappeared during trace");
+        if (source == null) {
+            return;
+        }
         long destination = ((VulkanGpuTexture) texture).vkImage();
-        VulkanMetalInterop.prepareInteropTransferRead(cmd, stack, sunDepthOut);
+        VulkanMetalInterop.prepareInteropTransferRead(cmd, stack, source);
         VulkanMetalInterop.prepareGeneralTransferWrite(cmd, stack, destination, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-        VulkanMetalInterop.copyImage(cmd, stack, sunDepthOut.image, sunDepthOut.layout,
+        VulkanMetalInterop.copyImage(cmd, stack, source.image, source.layout,
                 destination, VK13.VK_IMAGE_LAYOUT_GENERAL, VK13.VK_IMAGE_ASPECT_COLOR_BIT,
-                sunDepthOut.width, sunDepthOut.height);
-        VulkanMetalInterop.finishInteropTransferRead(cmd, stack, sunDepthOut);
+                source.width, source.height);
+        VulkanMetalInterop.finishInteropTransferRead(cmd, stack, source);
         VulkanMetalInterop.finishGeneralTransferWrite(cmd, stack, destination, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
     }
 
-    private static void encodeSunDepth(long cb, long queue, long instances, long readiness,
-            VoxelWindow.WindowState window) {
+    /**
+     * The voxel tier's celestial dispatch: the same kernel the legacy sun path uses, in fill mode
+     * against the shared image, so it writes only where no higher tier answered.
+     */
+    private static void encodeCelestialFill(long cb, long queue, long instances, long readiness,
+            VoxelWindow.WindowState window, CelestialFill request,
+            MeshMetalProvider.CascadeImage handover) {
+        // The tier above traces in its own command buffer, and Metal starts command buffers in
+        // order without holding a later one until an earlier finishes. Reading its image without
+        // this wait samples a half-written trace.
+        if (handover != null && handover.readyEvent() != 0) {
+            Objc.msgSendVoidIdLong(cb, Objc.selector("encodeWaitForEvent:value:"),
+                    handover.readyEvent(), handover.readyValue());
+        }
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment constants = arena.allocate(SUN_CONSTANTS_BYTES);
-            writeSunConstants(constants, RtShadowResult.sunResolution(), window);
+            writeSunConstants(constants, request.resolution(), window,
+                    RayTier.HARDWARE_VOXEL.ordinal(), true);
             long encoder = Objc.msgSendId(cb, Objc.selector("computeCommandEncoder"));
-            if (encoder == 0) throw new IllegalStateException("Metal compute encoder nil (sun depth)");
+            if (encoder == 0) throw new IllegalStateException("Metal compute encoder nil (celestial fill)");
             try {
                 ensureCutoutFallbacks(Objc.msgSendId(queue, Objc.selector("device")));
                 Objc.msgSendVoid(encoder, Objc.selector("setComputePipelineState:"), compiled.sunDepth().pipeline());
@@ -727,12 +702,13 @@ public final class MetalRtShadowPass {
                 Objc.msgSendVoidIdLongLong(encoder, Objc.selector("setBytes:length:atIndex:"), flags.address(), 4L, 5L);
                 Objc.msgSendVoidIdLongLong(encoder, Objc.selector("setBuffer:offset:atIndex:"), readiness, 0L, 10L);
                 Objc.msgSendVoidIdLongLong(encoder, Objc.selector("setBytes:length:atIndex:"), constants.address(), SUN_CONSTANTS_BYTES, 0L);
-                Objc.msgSendVoidIdLong(encoder, Objc.selector("setTexture:atIndex:"), sunDepthOut.mtlTexture, 0L);
+                VulkanMetalInterop.InteropImage target = handover != null ? handover.image() : celestialIo;
+                Objc.msgSendVoidIdLong(encoder, Objc.selector("setTexture:atIndex:"), target.mtlTexture, 0L);
                 Objc.msgSendVoidIdLong(encoder, Objc.selector("setTexture:atIndex:"), atlasIn != null ? atlasIn.mtlTexture : dummyAtlasTexture, 4L);
                 MetalRtAcceleration.useResources(encoder);
                 Objc.dispatchThreadgroups(encoder,
-                        (sunDepthOut.width + TRACE_THREADS_PER_GROUP_X - 1) / TRACE_THREADS_PER_GROUP_X,
-                        (sunDepthOut.height + TRACE_THREADS_PER_GROUP_Y - 1) / TRACE_THREADS_PER_GROUP_Y,
+                        (target.width + TRACE_THREADS_PER_GROUP_X - 1) / TRACE_THREADS_PER_GROUP_X,
+                        (target.height + TRACE_THREADS_PER_GROUP_Y - 1) / TRACE_THREADS_PER_GROUP_Y,
                         1, TRACE_THREADS_PER_GROUP_X, TRACE_THREADS_PER_GROUP_Y, 1);
             } finally {
                 Objc.msgSendVoid(encoder, Objc.selector("endEncoding"));
@@ -740,17 +716,27 @@ public final class MetalRtShadowPass {
         }
     }
 
-    static void writeSunConstants(MemorySegment seg, int resolution, VoxelWindow.WindowState window) {
+
+
+
+    /**
+     * @param tier     the {@code RayTier} ordinal this dispatch writes into G on every texel it answers
+     * @param fillMode true when another tier has already written into this image, so answered texels
+     *                 must be read and left alone; false when this dispatch owns the whole image and
+     *                 clears each texel before deciding
+     */
+    static void writeSunConstants(MemorySegment seg, int resolution, VoxelWindow.WindowState window,
+            int tier, boolean fillMode) {
         Matrix4f projection = new Matrix4f(ShadowFrameState.current());
+        int firstX = window.centerX() - window.radius();
+        int firstY = window.centerY() - window.radius();
+        int firstZ = window.centerZ() - window.radius();
         float[] inverse = new Matrix4f(projection).invert().get(new float[16]);
         float[] forward = projection.get(new float[16]);
         for (int i = 0; i < 16; ++i) {
             seg.set(ValueLayout.JAVA_FLOAT, i * 4L, inverse[i]);
             seg.set(ValueLayout.JAVA_FLOAT, 80 + i * 4L, forward[i]);
         }
-        int firstX = window.centerX() - window.radius();
-        int firstY = window.centerY() - window.radius();
-        int firstZ = window.centerZ() - window.radius();
         seg.set(ValueLayout.JAVA_FLOAT, 64, EmitterFrameState.camX() - firstX * 16.0f);
         seg.set(ValueLayout.JAVA_FLOAT, 68, EmitterFrameState.camY() - firstY * 16.0f);
         seg.set(ValueLayout.JAVA_FLOAT, 72, EmitterFrameState.camZ() - firstZ * 16.0f);
@@ -763,6 +749,10 @@ public final class MetalRtShadowPass {
         seg.set(ValueLayout.JAVA_INT, 164, firstY);
         seg.set(ValueLayout.JAVA_INT, 168, firstZ);
         seg.set(ValueLayout.JAVA_INT, 172, 0);
+        seg.set(ValueLayout.JAVA_INT, 176, tier);
+        seg.set(ValueLayout.JAVA_INT, 180, fillMode ? 1 : 0);
+        seg.set(ValueLayout.JAVA_INT, 184, 0);
+        seg.set(ValueLayout.JAVA_INT, 188, 0);
     }
 
     private static void ensureShaders() {
@@ -774,43 +764,19 @@ public final class MetalRtShadowPass {
     }
 
     private static void ensureImages(VulkanDevice device, int width, int height) {
-        if (depthIn != null && depthIn.width == width && depthIn.height == height) {
+        if (debugSceneOut != null && debugSceneOut.width == width && debugSceneOut.height == height) {
             return;
         }
         if (timeline != null && lastVulkanSignal > 0) {
             VulkanMetalInterop.waitTimeline(device, timeline, lastVulkanSignal);
         }
-        VulkanMetalInterop.destroyImage(device, depthIn);
-        VulkanMetalInterop.destroyImage(device, normalIn);
-        VulkanMetalInterop.destroyImage(device, maskOut);
-        VulkanMetalInterop.destroyImage(device, validOut);
         VulkanMetalInterop.destroyImage(device, debugSceneOut);
-        int depthUsage = VK13.VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK13.VK_IMAGE_USAGE_SAMPLED_BIT;
-        depthIn = VulkanMetalInterop.createImage(
-                device, width, height, VK13.VK_FORMAT_D32_SFLOAT, depthUsage, VK13.VK_IMAGE_ASPECT_DEPTH_BIT);
-        // Matches GBufferManager's own gNormal format exactly (world-space normal, signed, in
-        // .rgb: see terrain.fsh's gNormalOut write; .a carries the flat face index rt_trace.metal
-        // decodes for its ray-origin bias): RGBA16_SNORM, so the same bytes MoltenVK exports read
-        // back as the same already-decoded [-1, 1] floats on the Metal side, no reinterpretation
-        // needed, the same reasoning depthIn's own comment states for the depth format.
-        int normalUsage = VK13.VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK13.VK_IMAGE_USAGE_SAMPLED_BIT;
-        normalIn = VulkanMetalInterop.createImage(device, width, height,
-                VK13.VK_FORMAT_R16G16B16A16_SNORM, normalUsage, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-        int maskUsage = VK13.VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK13.VK_IMAGE_USAGE_STORAGE_BIT
-                | VK13.VK_IMAGE_USAGE_SAMPLED_BIT;
-        maskOut = VulkanMetalInterop.createImage(
-                device, width, height, VK13.VK_FORMAT_R8_UNORM, maskUsage, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-        // Same shape as maskOut: R8_UNORM, written by rt_trace, copied back to RtShadowResult's
-        // own rtSunValid target.
-        validOut = VulkanMetalInterop.createImage(
-                device, width, height, VK13.VK_FORMAT_R8_UNORM, maskUsage, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-        // RGBA16F rather than maskOut's R8: several modes (hit/miss, instance/primitive id hash,
-        // ray direction) write a genuine colour, not a single scalar.
+        // RGBA16F rather than a single scalar: several debug modes (hit/miss, instance and
+        // primitive id hashes, ray direction, face normal) write a genuine colour.
         int debugSceneUsage = VK13.VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK13.VK_IMAGE_USAGE_STORAGE_BIT
                 | VK13.VK_IMAGE_USAGE_SAMPLED_BIT;
         debugSceneOut = VulkanMetalInterop.createImage(device, width, height,
                 VK13.VK_FORMAT_R16G16B16A16_SFLOAT, debugSceneUsage, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
-        ensureMaskTexture(width, height);
         ensureDebugSceneTexture(width, height);
     }
 
@@ -826,6 +792,14 @@ public final class MetalRtShadowPass {
      * pass's own encoder submits to (never a separate compute queue) and read only by Metal through
      * the exported {@code MTLTexture}, exactly like those two, so no additional queue-family sharing
      * or barrier is needed beyond what {@link #copyBlockAtlasIfChanged} already does. */
+    /**
+     * The block atlas as Metal sees it, or the opaque fallback before a pack has captured one. A
+     * ray query alpha-tests against this; binding nothing would make every cutout see-through.
+     */
+    static long atlasTexture() {
+        return atlasIn != null ? atlasIn.mtlTexture : dummyAtlasTexture;
+    }
+
     private static void ensureAtlasImage(VulkanDevice device) {
         GpuTexture atlasTexture = BlockAtlasView.texture();
         if (atlasTexture == null) {
@@ -900,20 +874,6 @@ public final class MetalRtShadowPass {
         }
     }
 
-    private static void ensureMaskTexture(int width, int height) {
-        if (maskTextureView != null) {
-            maskTextureView.close();
-            maskTextureView = null;
-        }
-        if (maskTexture != null) {
-            maskTexture.close();
-            maskTexture = null;
-        }
-        maskTexture = RenderSystem.getDevice().createTexture("Fornax Metal RT Sun Mask",
-                GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
-                GpuFormat.R8_UNORM, width, height, 1, 1);
-        maskTextureView = RenderSystem.getDevice().createTextureView(maskTexture);
-    }
 
     private static void ensureDebugSceneTexture(int width, int height) {
         if (debugSceneTextureView != null) {
@@ -930,43 +890,6 @@ public final class MetalRtShadowPass {
         debugSceneTextureView = RenderSystem.getDevice().createTextureView(debugSceneTexture);
     }
 
-    /** Fills the 144-byte {@code RtTraceConstants} buffer {@code rt_trace.metal} documents at its
-     * own declaration: see that file's byte-offset table, which this method's field order and
-     * comments mirror exactly. */
-    private static void writeConstants(MemorySegment seg, int width, int height, VoxelWindow.WindowState window) {
-        float[] invProjModelView = FrameCameraState.invProjModelView();
-        for (int i = 0; i < 16; i++) {
-            seg.set(ValueLayout.JAVA_FLOAT, (long) i * 4, invProjModelView[i]);
-        }
-        seg.set(ValueLayout.JAVA_FLOAT, 64, EmitterFrameState.camX());
-        seg.set(ValueLayout.JAVA_FLOAT, 68, EmitterFrameState.camY());
-        seg.set(ValueLayout.JAVA_FLOAT, 72, EmitterFrameState.camZ());
-        seg.set(ValueLayout.JAVA_FLOAT, 76, 0.0f);
-        int firstX = window.centerX() - window.radius();
-        int firstY = window.centerY() - window.radius();
-        int firstZ = window.centerZ() - window.radius();
-        seg.set(ValueLayout.JAVA_FLOAT, 80, firstX * 16.0f);
-        seg.set(ValueLayout.JAVA_FLOAT, 84, firstY * 16.0f);
-        seg.set(ValueLayout.JAVA_FLOAT, 88, firstZ * 16.0f);
-        seg.set(ValueLayout.JAVA_FLOAT, 92, 0.0f);
-        Vector3f sun = SunDirection.computeSunDirection(SUN_SCRATCH);
-        seg.set(ValueLayout.JAVA_FLOAT, 96, sun.x());
-        seg.set(ValueLayout.JAVA_FLOAT, 100, sun.y());
-        seg.set(ValueLayout.JAVA_FLOAT, 104, sun.z());
-        seg.set(ValueLayout.JAVA_FLOAT, 108, 0.0f);
-        seg.set(ValueLayout.JAVA_FLOAT, 112, MAX_DISTANCE);
-        // Actual centered RT domain, not the larger source-harvest window.
-        seg.set(ValueLayout.JAVA_INT, 116, window.diameter());
-        seg.set(ValueLayout.JAVA_INT, 120, width);
-        seg.set(ValueLayout.JAVA_INT, 124, height);
-        // Allocation alone cannot certify a miss; every domain section must have current geometry.
-        // ABI mode 2 selects the coherent per-section readiness buffer (0 is invalid, 1 is the
-        // legacy synthetic fixture mode retained for existing screen diagnostic tests).
-        seg.set(ValueLayout.JAVA_INT, 128, 2);
-        seg.set(ValueLayout.JAVA_INT, 132, firstX);
-        seg.set(ValueLayout.JAVA_INT, 136, firstY);
-        seg.set(ValueLayout.JAVA_INT, 140, firstZ);
-    }
 
     /** Fills the 96-byte {@code RtDebugConstants} buffer {@code rt_debug.metal} documents at its
      * own declaration. The ray origin needs no separate camera-relative reconstruction the way
@@ -976,16 +899,23 @@ public final class MetalRtShadowPass {
      * needs. */
     private static void writeDebugConstants(MemorySegment seg, int width, int height,
             VoxelWindow.WindowState window, RtDebugMode mode) {
+        int firstX = window.centerX() - window.radius();
+        int firstY = window.centerY() - window.radius();
+        int firstZ = window.centerZ() - window.radius();
+        writeDebugConstants(seg, width, height, mode,
+                firstX * 16.0f, firstY * 16.0f, firstZ * 16.0f);
+    }
+
+    /** @param originX the world origin the traced scene's own coordinates are relative to */
+    private static void writeDebugConstants(MemorySegment seg, int width, int height, RtDebugMode mode,
+            float originX, float originY, float originZ) {
         float[] invProjModelView = FrameCameraState.invProjModelView();
         for (int i = 0; i < 16; i++) {
             seg.set(ValueLayout.JAVA_FLOAT, (long) i * 4, invProjModelView[i]);
         }
-        int firstX = window.centerX() - window.radius();
-        int firstY = window.centerY() - window.radius();
-        int firstZ = window.centerZ() - window.radius();
-        seg.set(ValueLayout.JAVA_FLOAT, 64, EmitterFrameState.camX() - firstX * 16.0f);
-        seg.set(ValueLayout.JAVA_FLOAT, 68, EmitterFrameState.camY() - firstY * 16.0f);
-        seg.set(ValueLayout.JAVA_FLOAT, 72, EmitterFrameState.camZ() - firstZ * 16.0f);
+        seg.set(ValueLayout.JAVA_FLOAT, 64, EmitterFrameState.camX() - originX);
+        seg.set(ValueLayout.JAVA_FLOAT, 68, EmitterFrameState.camY() - originY);
+        seg.set(ValueLayout.JAVA_FLOAT, 72, EmitterFrameState.camZ() - originZ);
         seg.set(ValueLayout.JAVA_FLOAT, 76, 0.0f);
         seg.set(ValueLayout.JAVA_FLOAT, 80, MAX_DISTANCE);
         seg.set(ValueLayout.JAVA_INT, 84, mode.shaderMode());

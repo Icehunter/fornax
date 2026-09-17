@@ -93,11 +93,11 @@ class FrameGenPresentationContractTest {
     void cpuMeasurementsCoverInteropCallsAndMeshChangeWaitsWithoutNewGpuWaits() throws Exception {
         assertTimed(read("metalfx/FrameGenPass.java"), "public static void runIfEnabled(", "frame generation CPU");
         assertTimed(read("metalfx/MetalFxUpscalePass.java"), "public static boolean runIfEnabled(", "MetalFX upscale CPU");
-        String terrain = read("metalfx/rt/TerrainShadowPass.java");
-        assertTimed(terrain, "public static void render(", "RT shadows CPU");
-        assertTimed(terrain, "private static void awaitMeshChange(", "RT mesh wait CPU");
+        String terrain = read("metalfx/rt/MeshMetalProvider.java");
+        assertTimed(terrain, "public void fillCelestialVisibility(", "RT shadows CPU");
+        assertTimed(terrain, "private void awaitMeshChange(", "RT mesh wait CPU");
         assertTrue(terrain.contains("recordValue(\"rt_shadow_dirty_meshes\", dirty.size())"));
-        String wait = method(terrain, "private static void awaitMeshChange(");
+        String wait = method(terrain, "private void awaitMeshChange(");
         assertEquals(1, wait.split("await\\(device\\)", -1).length - 1,
                 "timing must call the existing wait exactly once");
     }
