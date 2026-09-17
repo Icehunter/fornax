@@ -46,9 +46,18 @@ public class FornaxSettings {
      */
     public RayTracingMode rayTracing = RayTracingMode.AUTO;
 
-    /** Serialized compatibility field only. Migration disables every retired scene-debug mode
-     * before settings reach the renderer; no settings control exposes it. */
+    /**
+     * Colouring mode for the Metal RT scene debug trace, shown through
+     * {@code GBufferDebugView.METAL_RT_SCENE_DEBUG}. {@code OFF} skips the dispatch entirely.
+     *
+     * <p>Exposed by the settings screen. Migration leaves it alone: forcing it off on
+     * every load for exactly that reason; both halves of that pair were lifted together, because
+     * either one alone leaves a control that does nothing or a mode nobody can reach.
+     */
     public RtDebugMode rtDebugMode = RtDebugMode.OFF;
+
+    /** Which acceleration structure the scene-debug view traces. Ignored while the mode is OFF. */
+    public RtDebugScene rtDebugScene = RtDebugScene.VOXEL;
 
     /**
      * The SSAA FACTOR -- how hard to supersample once {@link #aaMethod} selects {@code SSAA};
@@ -243,8 +252,9 @@ public class FornaxSettings {
         }
         // Gson maps persisted enum names that no longer exist to null. Keep old config files safe
         // across diagnostic-view removals before render code calls debugView.shaderId().
-        if (settings.debugView == null || settings.debugView == GBufferDebugView.METAL_RT_SUN_MASK
-                || settings.debugView == GBufferDebugView.METAL_RT_SCENE_DEBUG) {
+        // METAL_RT_SCENE_DEBUG is no longer wiped here: it is selectable again and presents through
+        // MetalRtDebugPass, so resetting it would silently undo the user's own pick on every load.
+        if (settings.debugView == null || settings.debugView == GBufferDebugView.METAL_RT_SUN_MASK) {
             settings.debugView = GBufferDebugView.OFF;
         }
         if (settings.schemaVersion < 4) {
@@ -276,8 +286,17 @@ public class FornaxSettings {
         if (settings.rayTracing == null) {
             settings.rayTracing = RayTracingMode.AUTO;
         }
-        // An invisible persisted mode must never keep its diagnostic dispatch enabled.
-        settings.rtDebugMode = RtDebugMode.OFF;
+        // A removed RtDebugMode constant deserializes to null at any persisted version; same
+        // reasoning as the rayTracing guard above. The mode is NO LONGER force-disabled here: it
+        // was, on the stated grounds that nothing exposed it, and the settings screen now does.
+        if (settings.rtDebugScene == null) {
+            // Absent from every config written before the mesh scene existed, and Gson leaves an
+            // unknown enum field null rather than defaulting it.
+            settings.rtDebugScene = RtDebugScene.VOXEL;
+        }
+        if (settings.rtDebugMode == null) {
+            settings.rtDebugMode = RtDebugMode.OFF;
+        }
         settings.schemaVersion = CURRENT_SCHEMA_VERSION;
         return settings;
     }

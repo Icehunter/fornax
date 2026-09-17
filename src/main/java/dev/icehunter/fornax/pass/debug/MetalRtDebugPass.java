@@ -56,6 +56,17 @@ public final class MetalRtDebugPass {
             .withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
             .build();
 
+    private static final RenderPipeline RAY_TIER_PIPELINE = RenderPipeline.builder()
+            .withBindGroupLayout(BLIT_BIND_GROUP)
+            .withLocation(Identifier.fromNamespaceAndPath("fornax", "ray_tier_map"))
+            .withCull(false)
+            .withVertexShader(Identifier.fromNamespaceAndPath("minecraft", "core/screenquad"))
+            .withFragmentShader(Identifier.fromNamespaceAndPath("fornax", "post/ray_tier_debug_blit"))
+            .withDepthStencilState(Optional.empty())
+            .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+            .withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+            .build();
+
     private MetalRtDebugPass() {
     }
 
@@ -72,6 +83,7 @@ public final class MetalRtDebugPass {
     public static boolean wanted() {
         GBufferDebugView view = FornaxConfig.get().debugView;
         return view == GBufferDebugView.METAL_RT_SUN_MASK
+                || view == GBufferDebugView.RAY_TIER_MAP
                 || view == GBufferDebugView.METAL_RT_SCENE_DEBUG
                 || FornaxConfig.get().rtDebugMode != RtDebugMode.OFF
                 || Boolean.getBoolean("fornax.rt.always");
@@ -87,10 +99,13 @@ public final class MetalRtDebugPass {
      */
     public static void presentIfEnabled(RenderTarget nativeTarget) {
         GBufferDebugView view = FornaxConfig.get().debugView;
-        if (view == GBufferDebugView.METAL_RT_SUN_MASK) {
-            blit(nativeTarget, RED_AS_GRAY_PIPELINE, MetalRtShadowPass.maskView(), "Fornax Metal RT Debug Blit");
-        } else if (view == GBufferDebugView.METAL_RT_SCENE_DEBUG) {
+        if (view == GBufferDebugView.METAL_RT_SCENE_DEBUG) {
             blit(nativeTarget, RGB_PIPELINE, MetalRtShadowPass.debugSceneView(), "Fornax Metal RT Scene Debug Blit");
+        } else if (view == GBufferDebugView.RAY_TIER_MAP) {
+            // Reads the image the cascade already filled this frame rather than tracing anything,
+            // so this view costs one blit and shows exactly what the pack reads.
+            blit(nativeTarget, RAY_TIER_PIPELINE,
+                    dev.icehunter.fornax.pass.shadow.TerrainShadowResult.view(), "Fornax Ray Tier Map Blit");
         }
     }
 

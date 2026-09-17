@@ -222,29 +222,48 @@ class FornaxSettingsMigrationTest {
     }
 
     @Test
-    void savedLegacyRtDiagnosticsAreDisabledBeforeRenderingAtEverySchemaVersion() {
+    void theRetiredSunMaskViewIsStillDisabledBeforeRenderingAtEverySchemaVersion() {
+        // SUN_MASK alone. METAL_RT_SCENE_DEBUG used to be reset here too, on the stated grounds
+        // that no settings control exposed its colouring mode; the screen now builds one, so a
+        // saved pick must survive instead.
         for (int version : new int[]{0, FornaxSettings.CURRENT_SCHEMA_VERSION}) {
-            for (String view : new String[]{"METAL_RT_SUN_MASK", "METAL_RT_SCENE_DEBUG"}) {
-                for (RtDebugMode mode : RtDebugMode.values()) {
-                    String json = "{\"schemaVersion\":%d,\"debugView\":\"%s\",\"rtDebugMode\":\"%s\"}"
-                            .formatted(version, view, mode.name());
-                    var result = FornaxSettings.migrate(new Gson().fromJson(json, FornaxSettings.class));
-                    assertEquals(GBufferDebugView.OFF, result.debugView);
-                    assertEquals(RtDebugMode.OFF, result.rtDebugMode);
-                }
+            for (RtDebugMode mode : RtDebugMode.values()) {
+                String json = "{\"schemaVersion\":%d,\"debugView\":\"METAL_RT_SUN_MASK\",\"rtDebugMode\":\"%s\"}"
+                        .formatted(version, mode.name());
+                var result = FornaxSettings.migrate(new Gson().fromJson(json, FornaxSettings.class));
+                assertEquals(GBufferDebugView.OFF, result.debugView);
             }
         }
     }
 
     @Test
-    void retiredSceneModeCannotRunBehindTheCurrentShadowCoverageView() {
+    void aSavedSceneDebugPickSurvivesMigrationAtEverySchemaVersion() {
+        // The pair that made the view unreachable: the view reset to OFF and the mode forced to
+        // OFF. Both are lifted, and both are asserted, because restoring either one alone puts the
+        // feature back out of reach with the other half still looking correct.
+        for (int version : new int[]{0, FornaxSettings.CURRENT_SCHEMA_VERSION}) {
+            for (RtDebugMode mode : RtDebugMode.values()) {
+                String json = "{\"schemaVersion\":%d,\"debugView\":\"METAL_RT_SCENE_DEBUG\",\"rtDebugMode\":\"%s\"}"
+                        .formatted(version, mode.name());
+                var result = FornaxSettings.migrate(new Gson().fromJson(json, FornaxSettings.class));
+                assertEquals(GBufferDebugView.METAL_RT_SCENE_DEBUG, result.debugView);
+                assertEquals(mode, result.rtDebugMode);
+            }
+        }
+    }
+
+    @Test
+    void theSceneModeIsKeptEvenWhileAnotherViewIsSelected() {
+        // The mode drives whether the trace DISPATCHES; the view drives whether it is PRESENTED.
+        // They are independent on purpose, so a user can leave the mode set while looking at
+        // another view. migrate used to zero the mode here, which silently undid half the setup.
         var settings = new FornaxSettings();
         settings.schemaVersion = FornaxSettings.CURRENT_SCHEMA_VERSION;
         settings.debugView = GBufferDebugView.RT_SHADOW;
         settings.rtDebugMode = RtDebugMode.HIT_MISS;
         var result = FornaxSettings.migrate(settings);
         assertEquals(GBufferDebugView.RT_SHADOW, result.debugView);
-        assertEquals(RtDebugMode.OFF, result.rtDebugMode);
+        assertEquals(RtDebugMode.HIT_MISS, result.rtDebugMode);
     }
 
     @Test

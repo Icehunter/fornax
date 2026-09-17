@@ -270,13 +270,33 @@ class GBufferDebugViewTest {
         // FornaxSettings#rtDebugMode, presented the same bypass way as METAL_RT_SUN_MASK.
         // Appended right after it, so nothing earlier shifts.
         assertEquals(53, GBufferDebugView.METAL_RT_SCENE_DEBUG.ordinal());
-        assertEquals(54, GBufferDebugView.values().length);
-        assertFalse(GBufferDebugView.METAL_RT_SCENE_DEBUG.isSelectable(),
-                "retired diagnostics must stay out of settings and keyboard cycling");
-        assertEquals("Legacy voxel RT scene", GBufferDebugView.METAL_RT_SCENE_DEBUG.label());
+        // Selectable, unlike its SUN_MASK neighbour. It was not, on the grounds that no settings
+        // control reached the mode that colours it; the screen now builds one, and
+        // MetalRtDebugPass.presentIfEnabled has always blitted this view's output. A diagnostic
+        // that traces and presents but cannot be picked reads as a broken feature, not a retired
+        // one, which is what this pairing is here to prevent.
+        assertTrue(GBufferDebugView.METAL_RT_SCENE_DEBUG.isSelectable(),
+                "this view presents through MetalRtDebugPass, so it belongs in cycling");
+        assertEquals("Voxel RT scene", GBufferDebugView.METAL_RT_SCENE_DEBUG.label());
         assertEquals(GBufferDebugView.METAL_RT_SCENE_DEBUG.ordinal(),
                 GBufferDebugView.METAL_RT_SCENE_DEBUG.shaderId());
         assertTrue(GBufferDebugView.METAL_RT_SCENE_DEBUG.graphTargetCandidates().isEmpty());
+    }
+
+    /**
+     * The tier map, appended after the scene debug so nothing earlier shifts. It traces nothing of
+     * its own: it paints the celestial image the cascade already filled, which is why it costs one
+     * blit and shows exactly what a pack reads, including where one tier hands over to the next.
+     */
+    @Test
+    void rayTierMapIsAppendedLast() {
+        assertEquals(54, GBufferDebugView.RAY_TIER_MAP.ordinal());
+        assertEquals(55, GBufferDebugView.values().length);
+        assertTrue(GBufferDebugView.RAY_TIER_MAP.isSelectable(),
+                "it presents through MetalRtDebugPass, so it belongs in cycling");
+        assertEquals("Ray tier map", GBufferDebugView.RAY_TIER_MAP.label());
+        assertEquals(GBufferDebugView.RAY_TIER_MAP.ordinal(), GBufferDebugView.RAY_TIER_MAP.shaderId());
+        assertTrue(GBufferDebugView.RAY_TIER_MAP.graphTargetCandidates().isEmpty());
     }
 
     @Test

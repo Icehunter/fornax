@@ -6,6 +6,8 @@ import dev.icehunter.fornax.config.FornaxSettings;
 import dev.icehunter.fornax.config.FrameGenMode;
 import dev.icehunter.fornax.config.GBufferDebugView;
 import dev.icehunter.fornax.config.RayTracingMode;
+import dev.icehunter.fornax.config.RtDebugMode;
+import dev.icehunter.fornax.config.RtDebugScene;
 import dev.icehunter.fornax.config.SettingsApplyRouter;
 import dev.icehunter.fornax.config.SettingsApplyRouter.Action;
 import dev.icehunter.fornax.config.SidecarMapResolution;
@@ -187,6 +189,8 @@ public final class FornaxSettingsScreen {
                 .option(sunPathRotation)
                 .option(buildSidecarMapResolutionOption())
                 .option(buildRayTracingBackendOption())
+                .option(buildRtDebugModeOption())
+                .option(buildRtDebugSceneOption())
                 .build();
     }
 
@@ -431,6 +435,54 @@ public final class FornaxSettingsScreen {
                 .controller(opt -> CyclingListControllerBuilder.create(opt)
                         .values(RayTracingMode.availableBackends(metalSupported))
                         .formatValue(mode -> Component.literal(mode.backendLabel())))
+                .build();
+    }
+
+    /**
+     * The Metal RT scene debug trace's colouring mode. Needs a control because there was none: the
+     * field existed in the config and could only be changed by hand-editing fornax.json, which is
+     * why the view read as missing rather than off.
+     */
+    /**
+     * Which scene the debug trace runs against. Separate from the mode because the two tiers build
+     * different geometry from different sources: looking at the voxel structure says nothing about
+     * whether the mesh structure is right, and the mesh scene is the only one where an unknown face
+     * is a defect rather than an expected answer.
+     */
+    private static Option<RtDebugScene> buildRtDebugSceneOption() {
+        return Option.<RtDebugScene>createBuilder()
+                .name(Component.translatable("gui.fornax.option.rt_debug_scene"))
+                .description(OptionDescription.of(Component.translatable("gui.fornax.option.rt_debug_scene.tooltip")))
+                .binding(RtDebugScene.VOXEL,
+                        () -> FornaxConfig.get().rtDebugScene,
+                        v -> FornaxConfig.get().rtDebugScene = v)
+                .controller(opt -> CyclingListControllerBuilder.create(opt)
+                        .values(RtDebugScene.values())
+                        .formatValue(scene -> Component.literal(switch (scene) {
+                            case VOXEL -> "Voxel boxes";
+                            case MESH -> "Chunk meshes";
+                        })))
+                .build();
+    }
+
+    private static Option<RtDebugMode> buildRtDebugModeOption() {
+        return Option.<RtDebugMode>createBuilder()
+                .name(Component.translatable("gui.fornax.option.rt_debug_mode"))
+                .description(OptionDescription.of(Component.translatable("gui.fornax.option.rt_debug_mode.tooltip")))
+                .binding(RtDebugMode.OFF,
+                        () -> FornaxConfig.get().rtDebugMode,
+                        v -> FornaxConfig.get().rtDebugMode = v)
+                .controller(opt -> CyclingListControllerBuilder.create(opt)
+                        .values(RtDebugMode.values())
+                        .formatValue(mode -> Component.literal(switch (mode) {
+                            case OFF -> "Off";
+                            case HIT_MISS -> "Hit / miss";
+                            case DISTANCE -> "Distance";
+                            case NORMAL -> "Normal";
+                            case INSTANCE_ID -> "Instance id";
+                            case PRIMITIVE_ID -> "Primitive id";
+                            case RAY_DIRECTION -> "Ray direction";
+                        })))
                 .build();
     }
 

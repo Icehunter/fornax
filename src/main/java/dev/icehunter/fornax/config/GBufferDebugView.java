@@ -495,7 +495,17 @@ public enum GBufferDebugView {
      * Requires an active legacy RT pack reader; selecting this view alone never starts tracing.
      * This is a voxel diagnostic, separate from the receiving-distance mesh shadow result.
      */
-    METAL_RT_SCENE_DEBUG; // Retained for saved-name/ordinal compatibility; not selectable.
+    METAL_RT_SCENE_DEBUG,
+    /**
+     * Which tier answered each texel of the celestial ray result, painted over the shadow map's own
+     * square domain: green for exact chunk meshes, blue for hardware voxel boxes, amber for the
+     * software march, black where nothing answered and raster owns the texel.
+     *
+     * <p>Unlike {@link #METAL_RT_SCENE_DEBUG} this traces nothing of its own. It reads the image
+     * the cascade already filled this frame, so it costs one blit and shows exactly what the pack
+     * is reading, including the boundary where one tier hands over to the next.
+     */
+    RAY_TIER_MAP;
 
     /**
      * Stable integer consumed by pack shaders through {@code u_Param3}. Legacy values retain their
@@ -586,7 +596,8 @@ public enum GBufferDebugView {
             case CONDUCTOR_DIRECT -> "Conductor: Direct Sun Term";
             case CONDUCTOR_LIT -> "Conductor: Final HDR";
             case METAL_RT_SUN_MASK -> "Legacy voxel RT sun mask";
-            case METAL_RT_SCENE_DEBUG -> "Legacy voxel RT scene";
+            case METAL_RT_SCENE_DEBUG -> "Voxel RT scene";
+            case RAY_TIER_MAP -> "Ray tier map";
         };
     }
 
@@ -609,7 +620,12 @@ public enum GBufferDebugView {
             // CELESTIAL_SHADOW_VOXEL has no presenter hooked anywhere; pack targets reach the
             // screen through GraphTargetDebugPass. Listing it would offer a view that presents
             // nothing.
-            case VOXEL_RAYMARCH, CELESTIAL_SHADOW_VOXEL, METAL_RT_SUN_MASK, METAL_RT_SCENE_DEBUG,
+            // METAL_RT_SCENE_DEBUG is absent from this list on purpose, unlike its SUN_MASK
+            // neighbour: MetalRtDebugPass.presentIfEnabled blits debugSceneView for it, and
+            // MetalRtShadowPass runs the trace on rtDebugMode alone, building its own acceleration
+            // structure without needing a legacy pack subscriber. It meets the same bar
+            // WATER_PREPASS does, so it is selectable.
+            case VOXEL_RAYMARCH, CELESTIAL_SHADOW_VOXEL, METAL_RT_SUN_MASK,
                     ENV_SPEC_RATIO, ENV_DECOMP_SKY, ENV_DECOMP_MIX, ENV_DECOMP_MAT,
                     ENV_DECOMP_LOCAL, ENV_DECOMP_AO, ENV_DECOMP_RESIDUAL,
                     ENV_DECOMP_ALBEDO_WRITE_VS_READ, ENV_DECOMP_ALBEDO_IDENTITY_INPUTS,

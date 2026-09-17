@@ -102,10 +102,10 @@ class MetalRtSceneDebugReachableTest {
     }
 
     /**
-     * The pass must treat a selected debug mode as its own subscription. Plague consumes the
-     * mesh-based rtTerrainShadowDepth and never rtSunDepth, so legacyRtShadowSubscriber() is false
-     * for it; gating the backend on that alone made the diagnostic unreachable with every control
-     * set correctly and nothing logged.
+     * Two independent reasons to bring the backend up, and each has to work alone. A pack that
+     * reads only the cascade's image subscribes to nothing else, so gating on a pack subscription
+     * left both the diagnostic and the voxel tier unreachable with every control set correctly and
+     * nothing logged to say why.
      */
     @Test
     void theShadowPassCountsASelectedDebugModeAsItsOwnSubscription() throws IOException {
@@ -114,8 +114,9 @@ class MetalRtSceneDebugReachableTest {
         int at = pass.indexOf("boolean consumer =");
         assertTrue(at > 0, "runIfEnabled must still compute a consumer flag");
         String decl = pass.substring(at, pass.indexOf(';', at));
-        assertTrue(decl.contains("legacyRtShadowSubscriber"),
-                "a real legacy subscriber must still bring the backend up");
+        assertTrue(decl.contains("celestial != null"),
+                "a celestial fill request must bring the backend up on its own, or the voxel tier "
+                        + "never answers for a pack that reads only the cascade's image");
         assertTrue(decl.contains("rtDebugMode"),
                 "a selected scene-debug mode must bring the backend up on its own, or the "
                         + "diagnostic is unreachable on any pack using the mesh shadow path");

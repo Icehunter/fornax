@@ -18,9 +18,12 @@ public enum RtDebugMode {
     /** Hit distance as a near-to-far heatmap; black on a miss. */
     DISTANCE,
 
-    /** Placeholder: needs a per-instance primitive-data lookup this milestone does not wire up
-     * yet (see {@code rt_debug.metal}'s own header comment). Kept in the enum so the setting and
-     * UI are complete even though the shader currently paints a flat placeholder colour for it. */
+    /**
+     * The hit face's outward normal, remapped from [-1,1] to [0,1] so the six axes read as six flat
+     * constant colours; black on a miss. Magenta means the ray met a surface whose face field names
+     * nothing, which is a real answer rather than missing plumbing: only axis-aligned voxel faces
+     * carry a decodable face, so RtSectionGeometry's exact-triangle supplement paints magenta.
+     */
     NORMAL,
 
     /** The hit instance id, hashed to a stable colour; black on a miss. */
