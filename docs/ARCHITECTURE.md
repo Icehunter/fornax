@@ -58,6 +58,7 @@ With no pack active, or with shaders disabled in the config, every one of these 
 | `.pass.ssaa` / `.pass.taa` / `.pass.reconstruct` | The general render-scale target lifecycle: SSAA (render bigger, then shrink down for smoother edges) box downsample, TAA/TAAU temporal reconstruct (spreading anti-aliasing work across several frames using motion history) plus presentation sharpen, and the camera jitter sequence |
 | `.profile` | GPU per-pass timing (`PassTimer` for graphics-encoder work and `ComputePassTimer` for raw compute-queue dispatches, both ring-buffered across frames-in-flight) feeding a pure-JVM rolling-stats aggregator (`FrameProfiler`); `ProfilerOverlay` (top-left HUD) and `ProfilerLogDump` (full-table log dump) read it, both graded against the 11.1 ms / 90 FPS budget |
 | `.pipeline` | Shared per-frame state: `GBuffer`/`GBufferManager` (the G-buffer is the set of full-screen images, such as surface colour, normal direction, and depth, that the deferred step stores before lighting runs), `FornaxChunkVertex`, the render-state latch, push-constant layout, previous-frame camera transform, per-thread material ID, the engine-guaranteed `SceneHistory` target, `FrameCameraState` (this frame's inverse projection*modelView matrix as a plain float array, for the Metal ray-tracing pass) |
+| `.rt` | Platform-neutral ray vocabulary and the cascade that walks it: `RayTier` (which traversal answered a ray and over what geometry; the ordinal is the wire value carried in a result's G channel and in hit-record word 7), `RayQueryKind` (visibility versus closest hit, which decides how much of a record a provider fills and how early it may stop), `RayProvider`/`RayReadiness` (one traversal, and whether it can answer this frame), `CelestialFill`/`BufferQuery` (the two request shapes) and `RayRouter` (static, render-thread confined: installs providers, sorts them best-first, evaluates readiness once per frame, and runs each over what the tiers above left unanswered). The Metal traversals themselves live in `.metalfx.rt` |
 | `.screen` | Pack settings UI: `PackManageScreen` (the pack-agnostic YACL "Manage" entry point, a Shader Options bridge; Import/Export/Defaults live as `mixin.yacl.CategoryTabMixin`-injected chrome, scoped via `PackChromeActions`) and its session-free `PackValuesActions` helper, the legacy bespoke option pages (`PackSettingsScreen`), the YACL-hosted engine-settings factory (`FornaxSettingsScreen`) opened from the pause/title menu, Sodium's video settings, and the open-settings keybind, and its custom Shader Packs tab (`FornaxPacksTab` + the pure `PackListState`) |
 | `.util` | VRAM estimation, renderer-reload request plumbing, sun-direction math |
 
@@ -674,9 +675,11 @@ on top of plain resolvability: `sunShadowMap` (`ShadowMapManager.TARGET`, no his
 `sceneHistory.history`), `builtin.depth_opaque` (`OpaqueDepth.NAME`, an engine-owned,
 self-managed D32 copy of the opaque G-buffer depth, not a `TargetRegistry` target since
 `TargetFormat` has no depth format; captured at the finish-opaque boundary and cleared to the
-reversed-Z far value at allocation; see its own subsection below), and `rtSunVisibility`/
-`rtSunValid` (`RtShadowResult.TARGET`/`RtShadowResult.VALID_TARGET`, validated together by
-`RtShadowResult.isRtShadowRef`, same no-history-slot rule as `sunShadowMap`). Every name resolves
+reversed-Z far value at allocation; see its own subsection below), and `rtTerrainShadowDepth`
+(`TerrainShadowResult.TARGET`, recognised by `TerrainShadowResult.isRef`, same no-history-slot rule
+as `sunShadowMap`). The screen-space `rtSunVisibility`/`rtSunValid`/`rtSunDepth` names and the
+`RtShadowResult` class that owned them are gone; the cascade's one image replaces all three, and a
+pack naming any of them fails load on the ordinary unknown-input error. Every name resolves
 through `GraphInputResolver`'s two switches (`resolveBuiltinView`/`resolveBuiltinTexture`), null-safe
 against a resource that hasn't been captured/allocated yet. `ShadowMapManager.close()` runs inside
 `GraphRunner.closeCurrent()` after its single device-idle-before-destroy boundary, so the D32 map
@@ -1012,6 +1015,22 @@ Inputs are one of two kinds, never mixed in one pass:
 gated pass is refused outright); at least one input, exactly one output; inputs all declared
 targets or all builtins, never mixed; declared-target inputs agree on format and shape; output
 name doesn't collide with a declared target or pack texture asset.
+
+### Engine-shipped shader includes (`<fornax:...>`)
+
+A pack reaches an engine include with `#moj_import <fornax:name.glsl>`; `ShaderImports.ENGINE_INCLUDES`
+is the allow-list, and a name absent from it fails pack load naming the file rather than splicing an
+error message into the composed GLSL. Three names are served: `globals.glsl`, `block_atlas.glsl` and
+`ray_answer.glsl`. `chunk_vertex.glsl` sits in the same resource directory and is deliberately not on
+that list; packs receive their own copy through `fornax_runtime`.
+
+`ray_answer.glsl` decodes a ray-traced result. It declares `FORNAX_RAY_TIER_NONE`,
+`_SOFTWARE_VOXEL`, `_HARDWARE_VOXEL` and `_HARDWARE_MESH` as the ordinals of `RayTier`, and two
+helpers: `fornaxRayAnswered(vec4)` tests the validity channel A, and `fornaxRayTier(vec4)` reads the
+tier out of G with a half-step round, since the channel is a float carrying a small integer. It
+carries no `#version` directive, because blaze3d splices an include into a file that already has one.
+`RayAnswerGlslContractTest` reads the file and the enum together: the two copies of the ordinals have
+no compiler between them.
 
 ## 6. Uniform contracts
 
@@ -2285,12 +2304,22 @@ save cycle before the router ever runs.
 ### Uploaded-mesh celestial shadows
 
 A graph-level `[ray_traced_shadows]` declaration plus an enabled `rtTerrainShadowDepth` reader opts
-into `TerrainShadowPass`. The engine defaults to automatic backend selection; None and absent or
+into `MeshMetalProvider`, the cascade's `HARDWARE_MESH` tier. `GraphRunner.rebuild` installs it in
+`RayRouter` wherever `Objc.PLATFORM_SUPPORTED` holds, and `closeCurrent` closes the router rather
+than the provider by name. The engine defaults to automatic backend selection; None and absent or
 disabled subscriptions short-circuit before hardware probing, mesh snapshots or native dispatch.
 Metal RT is the implemented backend. The stored `rayTracing` enum retains compatibility, while UI
 labels describe backend selection rather than a second pack feature switch.
 
-The pass snapshots accepted SOLID/CUTOUT GPU ranges throughout the loaded light frustum on the
+`SodiumWorldRendererOrchestrationMixin.fornax$renderShadowPass` drives it: `RayRouter.beginFrame()`
+at the top of the shadow pass, then, after the light camera is committed, `captureCasters` hands the
+provider this frame's `RenderSectionManager` and `RayRouter.phaseOne(CelestialFill)` runs the tier.
+The caster source travels by its own type rather than inside the neutral request, because it is
+renderer-owned and can only be read at that point; the request carries the light matrices, the
+camera in doubles, the resolution, the receiving radius, the warp bias and the filter guard.
+Phase one sits here so the trace overlaps the terrain draw that follows.
+
+The provider snapshots accepted SOLID/CUTOUT GPU ranges throughout the loaded light frustum on the
 render thread, copies changed ranges to exported buffers, and feeds `MeshShadowTracer`. Packed
 positions, quad topology and final atlas UVs come from `FornaxChunkVertex`; no voxel harvest or live
 model emission participates. Mutation/relocation stamps prevent equal-size replacements from
@@ -2318,7 +2347,12 @@ arena copies finish before the render thread can relocate/free their source on m
 `rt_shadow_dirty_meshes` counts copied mesh revisions for that frame (zero when inactive or stable).
 These scopes add no GPU queries or waits; total CPU time and its nested wait samples must not be
 added together, and a zero dirty count does not prove that native encoding is inexpensive.
-`TerrainShadowResult` owns the separate RGBA32F target: R forward depth, A current trace validity.
+`TerrainShadowResult` owns the separate RGBA32F target: R forward depth, G the answering tier,
+A current trace validity. `MeshShadowTracer` passes `RayTier.HARDWARE_MESH` in its constant
+buffer at byte 160, and `mesh_shadow_trace` copies it into G in the same store that sets A, so
+a texel never carries a tier without validity. Skipped rays and `mesh_shadow_clear` write
+neither. The constant struct is 176 bytes: 16-byte alignment from its matrices leaves three
+words of tail padding after the tier.
 Disabled/unavailable/failed transitions clear validity. Only successful publication sets
 `u_ShadowMapParams.y` to the effective receiving distance squared. The complete raster map remains
 intact; there is no raster caster clipping or whole-section omission. Unsupported input preserves
@@ -2333,7 +2367,7 @@ alone cannot activate their pass without a live pack reader. Native and contract
 geometry, subscriptions, resource routing, cache/event behavior and filtering; they do not establish
 live frame time, successful runtime mixin injection or visual acceptance.
 
-### Finite-domain ray-traced sun depth (legacy voxel representation)
+### Hardware-voxel fill tier (finite-domain voxel representation)
 
 A graph declaring `rtSunDepth` receives an engine-owned RGBA32_FLOAT image at the exact
 `ShadowMapManager` resolution. R is nearest alpha-tested forward shadow depth (1 for a miss),
@@ -2443,6 +2477,22 @@ Source and pure-data tests pin these contracts; only a client run verifies mixin
 readback content and driver behavior. The capture frame's timing includes readback overhead.
 
 ## 12. Known laws
+
+- **Validity and tier leave a provider in one store.** A ray result carries its answer in R, the
+  answering `RayTier` ordinal in G and validity in A. Writing A without G gives a texel a pack reads
+  as answered by tier NONE; writing G without A gives one it never reads at all. Both are silent:
+  the image samples cleanly either way. `MeshShadowTracer` passes its tier in the constant buffer
+  and `mesh_shadow_trace` writes all four channels in one `output.write`, which is what makes the
+  pairing structural rather than a convention. The buffer form has the same law with the tier in
+  word 7: an untraced hit buffer reads back zero-filled, so the tier word, not the sign of the
+  distance, is what separates an answer from memory nothing ever wrote.
+
+- **A ray provider writes only what is still unanswered.** `RayRouter` walks installed providers
+  from the highest tier down, so a provider that overwrites an answered texel or record destroys a
+  better answer. Leaving a ray unanswered is the normal signal to the tier below and is not a
+  failure: outside coverage, outside the warp domain, a degenerate direction, a section not yet
+  certified. Readiness is per frame and re-evaluated; a provider that throws is latched out until
+  the next `install`, because a traversal that threw has no state a later frame can trust.
 
 - **A semaphore does not transfer exclusive buffer ownership between queue families.** Shared
   uniform buffers use concurrent allocation when graphics and compute families differ, following

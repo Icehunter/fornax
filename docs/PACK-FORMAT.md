@@ -91,9 +91,21 @@ Automatic is the default engine backend policy; None disables RT, and the UI off
 implemented explicit backends. GPU vendors are not separate RT APIs.
 
 `rtTerrainShadowDepth` is a read-only RGBA32F builtin at shadow-map resolution: R is nearest forward
-light depth (1 for a miss), A is current valid trace coverage, and G/B are reserved. Invalid A must
-select raster. Its descriptor exists with zero validity even when RT is unavailable. The target is
-separate from the older voxel-based `rtSunDepth`; reading the mesh result never requests that pass.
+light depth (1 for a miss), G is the tier that answered, A is current valid trace coverage, and B is
+reserved. It is the only ray-traced builtin. The older screen-space names `rtSunVisibility`,
+`rtSunValid` and `rtSunDepth` are gone; a pack listing any of them fails load naming the input. Invalid A must
+select raster. Its descriptor exists with zero validity even when RT is unavailable.
+
+Decode that texel through the engine include rather than by hand: `#moj_import <fornax:ray_answer.glsl>`
+gives `fornaxRayAnswered(vec4)`, which is the A test, and `fornaxRayTier(vec4)`, which reads G. G is
+the channel that names the tier that answered, as one of `FORNAX_RAY_TIER_NONE`,
+`FORNAX_RAY_TIER_SOFTWARE_VOXEL`, `FORNAX_RAY_TIER_HARDWARE_VOXEL` or
+`FORNAX_RAY_TIER_HARDWARE_MESH`. The uploaded-mesh tracer writes `FORNAX_RAY_TIER_HARDWARE_MESH`
+on every texel it traces, including a traced miss; a skipped ray writes zero tier and zero validity.
+The voxel tracer then fills only the texels still carrying zero validity, writing
+`FORNAX_RAY_TIER_HARDWARE_VOXEL`, so one image can carry answers from both at once. Read A per texel:
+the tiers do not cover the same ground and the boundary between them is not a circle. Read A first: an untraced or
+invalidated target is all zeros, and zero is a legal value for R and for G.
 
 The caster scene includes accepted SOLID/CUTOUT meshes throughout the relevant loaded light volume,
 including blockers outside the receiving distance. Final uploaded atlas UVs preserve connected
@@ -202,6 +214,79 @@ vec4 albedo = texture(u_Input0, vec3(texCoord, 0.0));
 vec4 material = texture(u_Input0, vec3(texCoord, 1.0));
 vec4 ao = texture(u_Input0, vec3(texCoord, 2.0));
 ```
+
+### `ray_query`: casting your own rays
+
+A `ray_query` pass hands the engine a buffer of rays and gets a buffer of hits back. It has **no
+shader of your own** and names no hardware: the engine picks the best traversal the machine has, so
+the same declaration is answered by exact mesh ray tracing on one machine and an approximate voxel
+march on another. `program`, `shader`, `target`, `slot` and `blend` are refused on this type,
+because there is nothing for them to name.
+
+```toml
+[targets.rayRequests]
+kind = "buffer"
+stride_bytes = 32
+count = 65536
+
+[targets.rayHits]
+kind = "buffer"
+stride_bytes = 32
+count = 65536
+
+[[pass]]
+name = "seed_bounce_rays"
+type = "compute"
+shader = "compute/seed_bounce.comp"
+outputs = ["rayRequests"]
+dispatch = [256, 1, 1]
+
+[[pass]]
+name = "trace_bounce"
+type = "ray_query"
+inputs = ["rayRequests"]
+outputs = ["rayHits"]
+
+[pass.ray_query]
+kind = "closest_hit"   # or "visibility"
+rays = 65536
+min_tier = "hardware_voxel"   # optional; default accepts any tier
+```
+
+Exactly one input, the request buffer, and one output, the hit buffer. Both must be declared
+`kind = "buffer"` targets, and both must be at least `rays * 32` bytes; a buffer one record short is
+refused at load, because nothing would report it at run time. The request buffer must be written by
+an **earlier** pass in the same frame: an unwritten one holds whatever the allocation left there,
+which is finite floats often enough to trace, so the failure would be a frame of plausible wrong
+answers rather than an error.
+
+**A request** is 8 floats, 32 bytes: origin xyz then `tMin`, direction xyz then `tMax`. The
+direction need not be normalised; distances come back measured along the normalised direction.
+
+**A hit** is 8 words, 32 bytes:
+
+| Word | Type | Meaning |
+|---|---|---|
+| 0 | float | distance along the ray. Negative means the ray met nothing |
+| 1 | uint | flags: bit 0 front-facing, bits 8-11 face (15 = none), bit 12 UV known |
+| 2 | uint | surface word, the voxel tiers' `voxelIndex \| face << 12 \| palette << 16`; 0 for meshes |
+| 3 | uint | atlas UV as two halves, low half u, only when the UV-known flag is set |
+| 4-6 | float | outward normal. The zero vector means the surface names no face; never normalise it |
+| 7 | uint | **the tier that answered. Zero means nothing did** |
+
+**Read word 7 first.** A hit buffer nothing traced reads back all zeros, and zero is a legal
+distance, so the sign of word 0 cannot tell an answer from untouched memory. `<fornax:ray_answer.glsl>`
+carries the tier constants; the same ordinals appear here and in the celestial image's G channel.
+
+`kind` decides how much of a record gets filled and how early a traversal may stop. `visibility`
+answers "is anything on this segment", may accept the first hit rather than the nearest, and may
+leave the surface fields zero: enough for a shadow or an occlusion term. `closest_hit` returns the
+nearest hit with its normal, flags, surface word and atlas UV: what a bounce or a reflection needs.
+Albedo is never returned. Picking a filter and a mip is your decision, not the engine's.
+
+`min_tier` is a floor, not a request. A pack that would rather fall back to its own raster path than
+take an approximate answer raises it, and every tier below is skipped rather than blended. Names are
+`none`, `software_voxel`, `hardware_voxel` and `hardware_mesh`.
 
 ### Builtin targets
 
