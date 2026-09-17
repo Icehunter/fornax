@@ -6,6 +6,9 @@ import dev.icehunter.fornax.pack.graph.BufferSize;
 import dev.icehunter.fornax.pack.graph.TargetBasis;
 import dev.icehunter.fornax.pack.graph.TargetFilter;
 import dev.icehunter.fornax.pack.graph.TargetKind;
+import dev.icehunter.fornax.metalfx.rt.RayQueryAbi;
+import dev.icehunter.fornax.rt.RayTier;
+import dev.icehunter.fornax.rt.RayQueryKind;
 import dev.icehunter.fornax.pack.graph.TextureSize;
 import org.jspecify.annotations.Nullable;
 
@@ -174,7 +177,7 @@ public final class PackTomlLoader {
                 TomlSupport.rejectUnknownKeys(p, Set.of("name", "type", "slot", "program",
                         "shader", "inputs", "outputs", "target", "enabled_if", "runtime_enabled_if",
                         "dispatch", "local_size", "reuse_when_unchanged",
-                        "blend", "vertex_shader", "instances"), file);
+                        "blend", "vertex_shader", "instances", "ray_query"), file);
                 PassType type = parsePassType(TomlSupport.requireString(p, "type", file), name, file);
                 List<Integer> dispatch = TomlSupport.getIntList(p, "dispatch", file);
                 if (type == PassType.COMPUTE && dispatch.size() != 3) {
@@ -235,10 +238,67 @@ public final class PackTomlLoader {
                         TomlSupport.getStringOrNull(p, "blend", file),
                         particles,
                         TomlSupport.getStringOrNull(p, "runtime_enabled_if", file),
-                        parseComputeReuse(p, type, name, file)));
+                        parseComputeReuse(p, type, name, file),
+                        parseRayQuery(p, type, name, file)));
             }
         }
         return new GraphSpec(targets, textures, passes, rayTracedShadows);
+    }
+
+    /**
+     * A ray-query pass carries none of the shader-pass keys. Rejecting them at load rather than
+     * ignoring them is the difference between a typo that says so and a pass that quietly traces
+     * with the wrong count: there is no shader here for a mistake to show up in.
+     */
+    private static @Nullable RayQuerySpec parseRayQuery(Config p, PassType type, String name, String file) {
+        String key = "pass." + name + ".ray_query";
+        if (type != PassType.RAY_QUERY) {
+            if (p.contains("ray_query")) {
+                throw new FornaxPackError(file, key, "'ray_query' is only valid on a ray_query pass");
+            }
+            return null;
+        }
+        for (String rejected : new String[]{"program", "shader", "target", "slot", "blend"}) {
+            if (p.contains(rejected)) {
+                throw new FornaxPackError(file, "pass." + name + "." + rejected,
+                        "a ray_query pass has no shader of its own: the engine picks the traversal, "
+                                + "so '" + rejected + "' has nothing to name");
+            }
+        }
+        if (!p.contains("ray_query")) {
+            throw new FornaxPackError(file, key, "a ray_query pass must declare a [pass.ray_query] table");
+        }
+        Config spec = requireTable(p.get("ray_query"), key, file);
+        TomlSupport.rejectUnknownKeys(spec, Set.of("kind", "rays", "min_tier"), file);
+
+        String kindName = TomlSupport.requireString(spec, "kind", file).toUpperCase(Locale.ROOT);
+        RayQueryKind kind;
+        try {
+            kind = RayQueryKind.valueOf(kindName);
+        } catch (IllegalArgumentException unknown) {
+            throw new FornaxPackError(file, key + ".kind",
+                    "unknown ray query kind '" + kindName.toLowerCase(Locale.ROOT)
+                            + "'; expected visibility or closest_hit");
+        }
+
+        int rays = TomlSupport.requireInt(spec, "rays", file);
+        if (rays <= 0 || rays > RayQueryAbi.MAX_RAYS) {
+            throw new FornaxPackError(file, key + ".rays",
+                    "rays must be between 1 and " + RayQueryAbi.MAX_RAYS + ", got " + rays);
+        }
+
+        RayTier minTier = RayTier.NONE;
+        if (spec.contains("min_tier")) {
+            String tierName = TomlSupport.requireString(spec, "min_tier", file).toUpperCase(Locale.ROOT);
+            try {
+                minTier = RayTier.valueOf(tierName);
+            } catch (IllegalArgumentException unknown) {
+                throw new FornaxPackError(file, key + ".min_tier",
+                        "unknown tier '" + tierName.toLowerCase(Locale.ROOT)
+                                + "'; expected none, software_voxel, hardware_voxel or hardware_mesh");
+            }
+        }
+        return new RayQuerySpec(kind, rays, minTier);
     }
 
     private static @Nullable RayTracedShadowSpec parseRayTracedShadows(Config root, String file) {

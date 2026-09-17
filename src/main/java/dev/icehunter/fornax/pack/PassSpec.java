@@ -28,13 +28,28 @@ import java.util.List;
  * <p>{@code particles} is non-null exactly on a {@link PassType#PARTICLES} pass and carries the two
  * fields only that pass type has -- see {@link ParticleSpec}. Same rule as {@code slot}: every other
  * pass type rejects {@code vertex_shader}/{@code instances} at load.
+ *
+ * <p>{@code rayQuery} is non-null exactly on a {@link PassType#RAY_QUERY} pass. Appended last and
+ * never inserted: every existing call site passes positionally, and moving a field would rebind
+ * arguments silently rather than failing to compile.
  */
 public record PassSpec(String name, PassType type, @Nullable GeometrySlot slot, @Nullable String program,
                        @Nullable String shader, List<String> inputs, List<String> outputs,
                        @Nullable String target, @Nullable String enabledIf, List<Integer> dispatch,
                        @Nullable List<Integer> localSize, @Nullable String blend,
                        @Nullable ParticleSpec particles, @Nullable String runtimeEnabledIf,
-                       @Nullable ComputeReuseSpec reuseWhenUnchanged) {
+                       @Nullable ComputeReuseSpec reuseWhenUnchanged, @Nullable RayQuerySpec rayQuery) {
+
+    /** Without a ray-query spec, which is every pass type but one. */
+    public PassSpec(String name, PassType type, @Nullable GeometrySlot slot, @Nullable String program,
+                    @Nullable String shader, List<String> inputs, List<String> outputs,
+                    @Nullable String target, @Nullable String enabledIf, List<Integer> dispatch,
+                    @Nullable List<Integer> localSize, @Nullable String blend,
+                    @Nullable ParticleSpec particles, @Nullable String runtimeEnabledIf,
+                    @Nullable ComputeReuseSpec reuseWhenUnchanged) {
+        this(name, type, slot, program, shader, inputs, outputs, target, enabledIf, dispatch,
+                localSize, blend, particles, runtimeEnabledIf, reuseWhenUnchanged, null);
+    }
     /** Existing declarations dispatch every frame unless they explicitly opt into reuse. */
     public PassSpec(String name, PassType type, @Nullable GeometrySlot slot, @Nullable String program,
                     @Nullable String shader, List<String> inputs, List<String> outputs,
@@ -42,7 +57,7 @@ public record PassSpec(String name, PassType type, @Nullable GeometrySlot slot, 
                     @Nullable List<Integer> localSize, @Nullable String blend,
                     @Nullable ParticleSpec particles, @Nullable String runtimeEnabledIf) {
         this(name, type, slot, program, shader, inputs, outputs, target, enabledIf, dispatch,
-                localSize, blend, particles, runtimeEnabledIf, null);
+                localSize, blend, particles, runtimeEnabledIf, null, null);
     }
 
     /** Without a per-frame gate, so a call site reads as "no gate" rather than trailing a null. */

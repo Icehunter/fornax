@@ -18,5 +18,14 @@ package dev.icehunter.fornax.pack;
  * (inputs only; the pass itself may not carry {@code enabled_if}) and cycle detection treat it
  * like any other pass; VRAM accounting does not, since its output is not a declared target (a
  * known gap; see docs/ARCHITECTURE.md §12).
+ *
+ * <p>{@code RAY_QUERY} is shader-less like {@code COPY} and {@code CONSOLIDATE}, and is the one pass
+ * type whose work has no fixed implementation at all: the pack declares a buffer of ray requests and
+ * a buffer for the hits, and the engine routes the batch to whichever traversal on this machine can
+ * answer it (see {@code dev.icehunter.fornax.rt.RayRouter}). A pack therefore asks for rays without
+ * naming hardware, and the same declaration is answered by exact mesh tracing on one machine and an
+ * approximate voxel march on another. Its two targets are both {@code kind = "buffer"}; the request
+ * buffer must be written by an earlier pass in the same frame, which the validator checks, because a
+ * batch of uninitialised requests traces garbage directions rather than failing.
  */
-public enum PassType { GEOMETRY, FULLSCREEN, MIPCHAIN, COPY, COMPUTE, PARTICLES, TEMPORAL, CONSOLIDATE }
+public enum PassType { GEOMETRY, FULLSCREEN, MIPCHAIN, COPY, COMPUTE, PARTICLES, TEMPORAL, CONSOLIDATE, RAY_QUERY }
