@@ -46,8 +46,10 @@ class MeshShadowTracerTest {
             Object quad=f.mesh(0,1,f.quad(.25f,false),0,0,0,false);
             f.trace(List.of(quad));
             float forward=f.pixels[(3*8+3)*4], forwardValid=f.pixels[(3*8+3)*4+3];
+            float forwardTier=f.pixels[(3*8+3)*4+1];
             f.traceWithRadius(List.of(quad),REVERSE_LIGHT,REVERSE_LIGHT,2f);
             float reverse=f.pixels[(3*8+3)*4], reverseValid=f.pixels[(3*8+3)*4+3];
+            float reverseTier=f.pixels[(3*8+3)*4+1];
             // Raster's registered shadow pipeline uses cull(false): the opaque plane is a
             // blocker from either side. Forward depth is z; reverse depth is 1-z.
             System.out.println("two-sided opaque: forward="+forward+" reverse="+reverse
@@ -56,7 +58,10 @@ class MeshShadowTracerTest {
                     ()->assertEquals(.25f,forward,1e-5f,"front-facing opaque depth"),
                     ()->assertEquals(.75f,reverse,1e-5f,"reverse-facing opaque depth"),
                     ()->assertEquals(1f,forwardValid,0f),
-                    ()->assertEquals(1f,reverseValid,0f));
+                    ()->assertEquals(1f,reverseValid,0f),
+                    // 3 is RayTier.HARDWARE_MESH.ordinal(); the light direction does not change it.
+                    ()->assertEquals(3f,forwardTier,0f,"front-facing tier"),
+                    ()->assertEquals(3f,reverseTier,0f,"reverse-facing tier"));
         }
     }
 
@@ -68,6 +73,7 @@ class MeshShadowTracerTest {
             Object quad=f.mesh(0,1,f.quad(.25f,false),0,0,0,true);
             f.trace(List.of(quad));
             float forwardRejected=f.pixels[(3*8+1)*4], forwardAccepted=f.pixels[(3*8+6)*4];
+            float rejectedTier=f.pixels[(3*8+1)*4+1], acceptedTier=f.pixels[(3*8+6)*4+1];
             f.traceWithRadius(List.of(quad),REVERSE_LIGHT,REVERSE_LIGHT,2f);
             float reverseAccepted=f.pixels[(3*8+1)*4], reverseRejected=f.pixels[(3*8+6)*4];
             System.out.println("two-sided cutout: forward rejected="+forwardRejected+" accepted="+forwardAccepted
@@ -76,7 +82,11 @@ class MeshShadowTracerTest {
                     ()->assertEquals(1f,forwardRejected,0f,"front transparent texel"),
                     ()->assertEquals(.25f,forwardAccepted,1e-5f,"front opaque texel"),
                     ()->assertEquals(.75f,reverseAccepted,1e-5f,"reverse opaque texel"),
-                    ()->assertEquals(1f,reverseRejected,0f,"reverse transparent texel"));
+                    ()->assertEquals(1f,reverseRejected,0f,"reverse transparent texel"),
+                    // An alpha-rejected texel is still a traced ray: the ray was cast, nothing
+                    // opaque was on it, so the answer is a miss at tier 3, not an absence of one.
+                    ()->assertEquals(3f,rejectedTier,0f,"tier on the alpha-rejected texel"),
+                    ()->assertEquals(3f,acceptedTier,0f,"tier on the opaque texel"));
         }
     }
 
@@ -496,11 +506,16 @@ class MeshShadowTracerTest {
         void assertPixel(int x,int y,float depth) {
             int p=(y*8+x)*4;
             assertEquals(depth,pixels[p],1e-5f,"depth at "+x+","+y);
+            // 3 is RayTier.HARDWARE_MESH.ordinal(), which this tracer writes into G on every traced
+            // texel. Exact compare: the channel is a float carrying a small integer, not a measurement.
+            assertEquals(3f,pixels[p+1],0f,"tier at "+x+","+y);
             assertEquals(1f,pixels[p+3],0f,"validity at "+x+","+y);
         }
         void assertInvalid(int x,int y) {
             int p=(y*8+x)*4;
             assertEquals(1f,pixels[p],0f,"fallback depth at "+x+","+y);
+            // A skipped ray leaves raster owning the texel, so it must claim no tier either.
+            assertEquals(0f,pixels[p+1],0f,"tier at "+x+","+y);
             assertEquals(0f,pixels[p+3],0f,"invalid footprint at "+x+","+y);
         }
         @Override public void close() throws Exception {

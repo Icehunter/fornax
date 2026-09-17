@@ -247,6 +247,32 @@ final class RayQueryScene implements AutoCloseable {
         return traceWithAbiVersion(requests, rayCount, RayQueryAbi.ABI_VERSION);
     }
 
+    /**
+     * Traces into a hit buffer whose records may already be answered, leaving those alone. This is
+     * the discipline the cascade rests on: a lower tier must not overwrite a higher one's answer.
+     */
+    Hit[] fill(float[] requests, int rayCount, int[] seedTiers) {
+        long requestBuffer = MetalRtAcceleration.createBuffer(device, RayQueryAbi.requestByteSize(rayCount));
+        long hitBuffer = MetalRtAcceleration.createBuffer(device, RayQueryAbi.hitByteSize(rayCount));
+        try {
+            writeFloats(requestBuffer, requests);
+            MemorySegment seg = MemorySegment
+                    .ofAddress(Objc.msgSendId(hitBuffer, Objc.selector("contents")))
+                    .reinterpret(RayQueryAbi.hitByteSize(rayCount));
+            seg.fill((byte) 0);
+            for (int i = 0; i < seedTiers.length; i++) {
+                seg.set(ValueLayout.JAVA_INT,
+                        (long) i * RayQueryAbi.HIT_WORDS * Float.BYTES + RayQueryAbi.HIT_TIER_WORD * 4L,
+                        seedTiers[i]);
+            }
+            dispatch(requestBuffer, hitBuffer, rayCount, 1, RayQueryAbi.ABI_VERSION, true);
+            return readHits(hitBuffer, rayCount);
+        } finally {
+            Objc.msgSendVoid(hitBuffer, Objc.selector("release"));
+            Objc.msgSendVoid(requestBuffer, Objc.selector("release"));
+        }
+    }
+
     /** As {@link #trace}, declaring {@code abiVersion} in the constants block, so a test can lie. */
     Hit[] traceWithAbiVersion(float[] requests, int rayCount, int abiVersion) {
         if (requests.length != rayCount * RayQueryAbi.REQUEST_WORDS) {
@@ -292,6 +318,11 @@ final class RayQueryScene implements AutoCloseable {
 
     private void dispatch(long requestBuffer, long hitBuffer, int rayCount, int iterations,
             int abiVersion) {
+        dispatch(requestBuffer, hitBuffer, rayCount, iterations, abiVersion, false);
+    }
+
+    private void dispatch(long requestBuffer, long hitBuffer, int rayCount, int iterations,
+            int abiVersion, boolean fillMode) {
         long cb = Objc.msgSendId(queue, Objc.selector("commandBuffer"));
         long encoder = Objc.msgSendId(cb, Objc.selector("computeCommandEncoder"));
         Objc.msgSendVoid(encoder, Objc.selector("setComputePipelineState:"), rayQuery.pipeline());
@@ -310,7 +341,8 @@ final class RayQueryScene implements AutoCloseable {
             // This scene is the rt_expand brick-grid structure, so its answers are tier 2. The
             // kernel copies this word into every record it writes.
             seg.set(ValueLayout.JAVA_INT, 8L, RayTier.HARDWARE_VOXEL.ordinal());
-            seg.set(ValueLayout.JAVA_INT, 12L, 0);
+            // Fill mode off: this fixture owns its hit buffer and writes every record.
+            seg.set(ValueLayout.JAVA_INT, 12L, fillMode ? 1 : 0);
             Objc.msgSendVoidIdLongLong(encoder, Objc.selector("setBuffer:offset:atIndex:"), constants, 0L, 0L);
             Objc.msgSendVoidIdLongLong(encoder, Objc.selector("setBuffer:offset:atIndex:"), requestBuffer, 0L, 2L);
             Objc.msgSendVoidIdLongLong(encoder, Objc.selector("setBuffer:offset:atIndex:"), hitBuffer, 0L, 3L);

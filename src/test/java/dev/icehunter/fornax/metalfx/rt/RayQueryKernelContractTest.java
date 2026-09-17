@@ -92,4 +92,25 @@ class RayQueryKernelContractTest {
         assertTrue(rayCount > 0 && tier > rayCount,
                 "the tier replaces the first padding word, after rayCount");
     }
+
+    /**
+     * The cascade's buffer-form discipline, and the clear it rests on.
+     *
+     * <p>A pack-declared hit buffer persists between frames, so without an engine clear at the start
+     * of every ray_query pass, last frame's tier words would block this frame's trace entirely and
+     * the pack would read a frozen answer that still looks valid.
+     */
+    @Test
+    void fillModeSkipsAnsweredRecordsAndTheOwnedModeWritesThemAll() throws IOException {
+        String source = source();
+        assertTrue(source.contains("uint fillMode;"),
+                "the constants block must carry the fill flag");
+        assertTrue(source.contains("if (constants.fillMode != 0u && hits[index].tier != 0u) {"),
+                "a filling dispatch must leave an answered record alone");
+
+        int guard = source.indexOf("if (constants.fillMode != 0u && hits[index].tier != 0u)");
+        int trace = source.indexOf("query.reset(r, accelerationStructure, params);");
+        assertTrue(guard > 0 && guard < trace,
+                "the skip must come before the traversal, or the tier pays for rays it discards");
+    }
 }

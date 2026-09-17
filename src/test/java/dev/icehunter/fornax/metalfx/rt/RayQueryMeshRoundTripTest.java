@@ -31,6 +31,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class RayQueryMeshRoundTripTest {
 
+    private static final ThreadLocal<List<Long>> RESIDENT = new ThreadLocal<>();
+
     private static final float[] IDENTITY = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
     /** Half-extent of each quad, in blocks. 0.75 is 1536/2048, exact in the vertex format. */
@@ -84,6 +86,7 @@ class RayQueryMeshRoundTripTest {
 
             long scene = nativeField(tracer, "tlas");
             assertNotEquals(0L, scene, "the tracer must have built an instance structure");
+            RESIDENT.set(meshResources(tracer));
 
             rayQuery = MetalRtShaders.compileKernel(
                     device, MetalRtShaders.RAY_QUERY_RESOURCE, MetalRtShaders.RAY_QUERY_FUNCTION);
@@ -103,7 +106,8 @@ class RayQueryMeshRoundTripTest {
                 requests[at + 7] = 2.0f * (H + STANDOFF);
             }
 
-            float[] hits = dispatch(device, queue, rayQuery, tracer, scene, requests, rays);
+            long rayAtlas = keep(owned, TestAtlas.opaque(device, queue));
+            float[] hits = dispatch(device, queue, rayQuery, scene, rayAtlas, requests, rays);
 
             for (int face = 0; face < rays; face++) {
                 float[] n = FACES[face][0];
@@ -187,7 +191,7 @@ class RayQueryMeshRoundTripTest {
     }
 
     private static float[] dispatch(long device, long queue, MetalRtShaders.CompiledKernel rayQuery,
-            MeshShadowTracer tracer, long scene, float[] requests, int rays) throws Exception {
+            long scene, long atlas, float[] requests, int rays) throws Exception {
         long requestBuffer = MetalRtAcceleration.createBuffer(device, RayQueryAbi.requestByteSize(rays));
         long hitBuffer = MetalRtAcceleration.createBuffer(device, RayQueryAbi.hitByteSize(rays));
         long constants = MetalRtAcceleration.createBuffer(device, 16L);
@@ -213,9 +217,12 @@ class RayQueryMeshRoundTripTest {
             // The instance structure references each mesh's own structure and its two buffers, and
             // the encoder cannot see through it to them. Without this the trace reads unresident
             // memory and every ray comes back a miss.
-            for (long resource : meshResources(tracer)) {
+            for (long resource : RESIDENT.get()) {
                 Objc.msgSendVoidIdLong(encoder, Objc.selector("useResource:usage:"), resource, 1L);
             }
+            // Cutout alpha is tested against this: with no atlas bound every UV samples zero and
+            // the ray passes through geometry it should have hit.
+            Objc.msgSendVoidIdLong(encoder, Objc.selector("setTexture:atIndex:"), atlas, 0L);
             Objc.msgSendVoidIdLongLong(encoder,
                     Objc.selector("setBuffer:offset:atIndex:"), constants, 0L, 0L);
             Objc.msgSendVoidIdLongLong(encoder,

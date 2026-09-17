@@ -1,6 +1,7 @@
 // Compiled after rt_trace.metal: the alpha intersection and readiness code is shared verbatim.
 // Byte offsets: inverse light VP 0, camera grid position 64, light VP 80, bias 144,
-// diameter 148, output uint2 152, first section int4 160. Total 176 bytes.
+// diameter 148, output uint2 152, first section int4 160, tier 176, fill mode 180. The int4 gives
+// the struct 16-byte alignment, so the two trailing words sit in a tail padded to 192 bytes.
 struct RtSunDepthConstants {
     float4x4 inverseSunViewProj;
     float4 cameraGridPosition;
@@ -9,6 +10,12 @@ struct RtSunDepthConstants {
     uint diameter;
     uint2 size;
     int4 firstSection;
+    // RayTier.ordinal() of this traversal, written into G on every texel it answers.
+    uint tier;
+    // Nonzero: this dispatch is filling an image another tier has already written, so it must read
+    // each texel's validity first and leave answered ones alone. Zero: this dispatch owns the whole
+    // image and clears each texel before deciding, which is what a standalone trace needs.
+    uint fillMode;
 };
 
 // Inverse of q=p/(|p|*bias + 1-bias). Beyond q-radius 1/bias the warp has no inverse.
@@ -28,11 +35,19 @@ kernel void rt_sun_depth(
         constant uint& cutoutFlags [[buffer(5)]],
         device const uint* sectionReadiness [[buffer(10)]],
         texture2d<float, access::sample> atlasIn [[texture(4)]],
-        texture2d<float, access::write> sunDepthOut [[texture(0)]],
+        texture2d<float, access::read_write> sunDepthOut [[texture(0)]],
         uint2 gid [[thread_position_in_grid]]) {
     if (any(gid >= constants.size)) return;
-    // Invalid is always zero, including rays outside the finite cube or the inverse warp domain.
-    sunDepthOut.write(float4(0.0), gid);
+    if (constants.fillMode != 0u) {
+        // A higher tier may already own this texel. One texture read per thread is what makes the
+        // cascade additive: without it this dispatch would overwrite an exact answer with an
+        // approximate one, and the image carries no record of which tier wrote what beyond G.
+        if (sunDepthOut.read(gid).a > 0.5) return;
+    } else {
+        // Invalid is always zero, including rays outside the finite cube or the inverse warp
+        // domain. Writing it up front means every early return below leaves the texel invalid.
+        sunDepthOut.write(float4(0.0), gid);
+    }
     float2 p;
     if (!rtUnwarp((float2(gid) + 0.5) / float2(constants.size) * 2.0 - 1.0, constants.bias, p)) return;
     float4 nearClip = constants.inverseSunViewProj * float4(p, 0.0, 1.0);
@@ -58,5 +73,7 @@ kernel void rt_sun_depth(
     // Orthographic forward depth is affine along this exact inverse-projection ray. 0 and 1
     // are its near/far endpoints, so these ratios match raster without cancellation at large Z.
     float hitDepth = isfinite(intersection.x) ? intersection.x / lengthToFar : 1.0;
-    sunDepthOut.write(float4(hitDepth, entryT / lengthToFar, exitT / lengthToFar, 1.0), gid);
+    // G names the answering tier and A certifies it, written in one store so a texel can never
+    // carry one without the other. B is reserved.
+    sunDepthOut.write(float4(hitDepth, float(constants.tier), 0.0, 1.0), gid);
 }

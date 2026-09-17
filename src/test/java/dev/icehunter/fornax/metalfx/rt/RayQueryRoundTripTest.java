@@ -241,6 +241,40 @@ class RayQueryRoundTripTest {
     }
 
     /**
+     * The cascade discipline, in buffer form: a record another tier already answered survives a
+     * lower tier's fill untouched, and one still at tier 0 gets traced. Without this a tier-1 march
+     * overwrites a tier-3 exact hit and nothing in the record says it happened.
+     */
+    @Test
+    void aFillLeavesAnsweredRecordsAloneAndTracesOnlyTheUnansweredOnes() {
+        assumeTrue(Objc.isLoaded(), "Metal bridge not linked on this platform");
+        long device = Objc.createSystemDefaultMetalDevice();
+        assumeTrue(device != 0L, "no system default Metal device");
+
+        try (RayQueryScene scene = RayQueryScene.open(device)) {
+            // Two identical rays that both hit the block. The first is staged as already answered
+            // by the mesh tier, the second left unanswered.
+            float[] rays = rays(
+                    ray(CENTRE, CENTRE, 0.0f, 0.0f, 0.0f, 1.0f, FAR),
+                    ray(CENTRE, CENTRE, 0.0f, 0.0f, 0.0f, 1.0f, FAR));
+            RayQueryScene.Hit[] hits = scene.fill(rays, 2,
+                    new int[]{RayTier.HARDWARE_MESH.ordinal(), RayTier.NONE.ordinal()});
+
+            assertEquals(RayTier.HARDWARE_MESH.ordinal(), hits[0].tier(),
+                    "an answered record keeps the tier that answered it");
+            assertEquals(0.0f, hits[0].distance(), 0f,
+                    "and keeps every other word: this one was staged with a zero distance, so a "
+                            + "distance of 8 here would mean the fill overwrote a better answer");
+
+            assertEquals(RayTier.HARDWARE_VOXEL.ordinal(), hits[1].tier(),
+                    "an unanswered record is traced and carries the filling tier");
+            assertFalse(hits[1].isMiss(), "and the identical ray does hit the block");
+        } finally {
+            Objc.msgSendVoid(device, Objc.selector("release"));
+        }
+    }
+
+    /**
      * The kernel refuses a buffer it was not built to read rather than reading it at the wrong
      * stride. Exercised by lying about the version in the constants block. It answers with an
      * all-zero record rather than with a miss: the caller's own layout may keep the tier somewhere

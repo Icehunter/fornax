@@ -44,6 +44,34 @@ class MetalRtShadersTest {
         }
     }
 
+    /**
+     * rt_ray_query is deliberately outside {@link MetalRtShaders#compile}'s fixed set, so the
+     * check above would never touch it. Without this, an MSL error in it would first surface on the
+     * machine of whoever dispatched it.
+     */
+    @Test
+    void theGeneralRayQueryKernelCompilesWithANonzeroPipeline() {
+        Assumptions.assumeTrue(Objc.isLoaded());
+        long device = Objc.createSystemDefaultMetalDevice();
+        Assumptions.assumeTrue(device != 0);
+
+        long pool = Objc.autoreleasePoolPush();
+        try {
+            MetalRtShaders.CompiledKernel rayQuery = MetalRtShaders.compileKernel(
+                    device, MetalRtShaders.RAY_QUERY_RESOURCE, MetalRtShaders.RAY_QUERY_FUNCTION);
+            try {
+                assertNotEquals(0L, rayQuery.library(), "rt_ray_query library must build");
+                assertNotEquals(0L, rayQuery.function(), "rt_ray_query function must be found");
+                assertNotEquals(0L, rayQuery.pipeline(), "rt_ray_query pipeline state must build");
+            } finally {
+                rayQuery.release();
+            }
+        } finally {
+            Objc.msgSendVoid(device, Objc.selector("release"));
+            Objc.autoreleasePoolPop(pool);
+        }
+    }
+
     @Test
     void brokenSourceSurfacesTheCompilerMessage() {
         Assumptions.assumeTrue(Objc.isLoaded());

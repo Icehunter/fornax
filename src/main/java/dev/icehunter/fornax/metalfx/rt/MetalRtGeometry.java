@@ -638,7 +638,11 @@ public final class MetalRtGeometry {
             VkBufferCreateInfo bufferInfo = VkBufferCreateInfo.calloc(stack)
                     .sType$Default()
                     .size(sizeBytes)
-                    .usage(VK13.VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK13.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
+                    // TRANSFER_SRC as well as DST: a ray-query hit buffer is copied back out to
+                    // the pack's own buffer after Metal fills it, unlike the geometry buffers that
+                    // only ever flow Vulkan to Metal.
+                    .usage(VK13.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK13.VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                            | VK13.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
                     .sharingMode(VK13.VK_SHARING_MODE_EXCLUSIVE);
             LongBuffer bufferOut = stack.mallocLong(1);
             int result = VK13.vkCreateBuffer(device.vkDevice(), bufferInfo, null, bufferOut);

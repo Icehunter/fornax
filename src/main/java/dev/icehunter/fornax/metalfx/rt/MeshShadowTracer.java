@@ -1,6 +1,7 @@
 package dev.icehunter.fornax.metalfx.rt;
 
 import dev.icehunter.fornax.metalfx.objc.Objc;
+import dev.icehunter.fornax.rt.RayTier;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.foreign.Arena;
@@ -59,10 +60,16 @@ public final class MeshShadowTracer implements AutoCloseable {
     private record Instance(long blas,float x,float y,float z) {}
     private static final Comparator<Mesh> ORDER=Comparator.comparingInt((Mesh m)->m.key().x())
             .thenComparingInt(m->m.key().y()).thenComparingInt(m->m.key().z()).thenComparing(m->m.key().cutout());
-    // Metal ABI: float3 positions have an explicitly packed 12-byte vertex stride; primitive UVs
-    // occupy 32 bytes. Instance descriptors are the existing MetalRtAcceleration 64-byte layout.
+    // Metal ABI: float3 positions have an explicitly packed 12-byte vertex stride; a primitive
+    // record is 32 bytes, the surface word and a pad followed by three UV pairs. Word 0 is the
+    // surface word every geometry record in this engine starts with, so one decode reaches the
+    // face from a mesh record and from an rt_expand voxel record alike; its bit 30 is what says
+    // the UVs of this record start at byte 8. Instance descriptors are the existing
+    // MetalRtAcceleration 64-byte layout.
     private static final long PRIMITIVE_BYTES=32;
-    private static final long CONSTANT_BYTES=160;
+    // 176, not 164: MeshShadowConstants holds float4x4 members, so it carries 16-byte alignment
+    // and three words of tail padding after the tier at byte 160.
+    private static final long CONSTANT_BYTES=176;
     // Power-of-two workgroups, bounded below Metal's supported group-size limit. Not a look setting.
     private static final int DECODE_THREADS=64;
     private static final int TRACE_SIDE=8;
@@ -74,6 +81,23 @@ public final class MeshShadowTracer implements AutoCloseable {
     private boolean closed,failed;
 
     public MeshShadowTracer() {}
+
+    /** The instance structure this tracer last built, or 0 before the first successful build. */
+    public synchronized long instanceStructure() { return tlas; }
+
+    /**
+     * Appends every native handle the instance structure refers to. A compute encoder cannot see
+     * through an acceleration structure to the buffers and structures beneath it, so a dispatch
+     * that binds this one has to make all of them resident or it reads unresident memory and every
+     * ray comes back a miss.
+     */
+    public synchronized void appendResidentResources(List<Long> out) {
+        for (Cached item : cache.values()) {
+            out.add(item.blas());
+            out.add(item.vertices());
+            out.add(item.primitives());
+        }
+    }
 
     public synchronized void trace(long commandQueue,List<Mesh> meshes,long atlasTexture,long outputTexture,
             int resolution,float[] inverseLightVp,float[] lightVp,float cameraX,float cameraY,float cameraZ,
@@ -235,6 +259,9 @@ public final class MeshShadowTracer implements AutoCloseable {
                 constants.set(ValueLayout.JAVA_FLOAT,136,z);constants.set(ValueLayout.JAVA_FLOAT,144,radius);
                 constants.set(ValueLayout.JAVA_FLOAT,148,bias);constants.set(ValueLayout.JAVA_INT,152,resolution);
                 constants.set(ValueLayout.JAVA_FLOAT,156,filterGuardUv);
+                // The kernel copies this into G on every traced texel; it is what tells a reader
+                // this answer came from uploaded meshes rather than from a voxel approximation.
+                constants.set(ValueLayout.JAVA_INT,160,RayTier.HARDWARE_MESH.ordinal());
                 Objc.msgSendVoidIdLongLong(enc,Objc.selector("setBytes:length:atIndex:"),constants.address(),CONSTANT_BYTES,0);
                 Objc.msgSendVoidIdLong(enc,Objc.selector("setAccelerationStructure:atBufferIndex:"),scene,1);
                 Objc.msgSendVoidIdLong(enc,Objc.selector("setTexture:atIndex:"),atlas,0);

@@ -3,8 +3,19 @@
 using namespace metal;
 using namespace metal::raytracing;
 
-// Three UV pairs plus padding: 32 bytes, matching the Java primitive-data stride.
-struct MeshShadowPrimitive { float2 uv0; float2 uv1; float2 uv2; uint2 padding; };
+// The surface word first, then three UV pairs: 32 bytes, matching the Java primitive-data stride.
+//
+// Word 0 is the surface word every geometry record in this engine starts with, so one kernel can
+// decode a face from any of them without knowing which structure it traced. Bits 12-15 name the
+// face; bit 30 says six UV floats follow at byte 8; bit 31 says they follow at byte 4, which is
+// where the voxel supplement record keeps them. The order matters: the voxel box record is a single
+// word, so a reader that assumed UVs at a fixed offset would read a neighbouring triangle's word
+// as a coordinate.
+struct MeshShadowPrimitive { uint surface; uint pad; float2 uv0; float2 uv1; float2 uv2; };
+
+// Set in a mesh record's surface word. Distinct from the voxel supplement's bit 31 so one decode
+// rule covers both, and high enough to stay clear of the voxel index, face and palette fields.
+constant uint MESH_SURFACE_BIT = 1u << 30;
 
 kernel void mesh_shadow_decode(device const ushort* packed [[buffer(0)]],
         device float* positions [[buffer(1)]], device MeshShadowPrimitive* primitives [[buffer(2)]],
@@ -21,11 +32,20 @@ kernel void mesh_shadow_decode(device const ushort* packed [[buffer(0)]],
         positions[destination]=p.x; positions[destination+1]=p.y; positions[destination+2]=p.z;
         uv[v]=float2(packed[source+4],packed[source+5]) / 65535.0;
     }
-    primitives[triangle] = {uv[0],uv[1],uv[2],uint2(0)};
+    // FornaxChunkVertex byte 20 holds Direction.ordinal() for the whole quad, so the face comes
+    // from its first vertex: ushort index 10 of that vertex, low byte. A value outside 0..5 is not
+    // a face this engine can name, and writes 15 so rt_face_normal returns the zero vector rather
+    // than a plausible wrong axis.
+    uint face = packed[(triangle / 2) * 4 * 12 + 10] & 0xFFu;
+    if (face > 5u) face = 0xFu;
+    primitives[triangle] = {MESH_SURFACE_BIT | (face << 12u), 0u, uv[0], uv[1], uv[2]};
 }
 
-// Column-major matrices, camera float4, radius/bias floats, resolution uint and filter guard float.
-// Java supplies exactly 160 bytes; never place a scalar after float3.
+// Column-major matrices, camera float4, radius/bias floats, resolution uint, filter guard float and
+// the tier. Java supplies exactly 176 bytes; never place a scalar after float3.
+// 176 bytes: the float4x4 members give the struct 16-byte alignment, so the five trailing scalars
+// occupy bytes 144..163 and three words of tail padding follow. MeshShadowTracer.CONSTANT_BYTES
+// must agree; a short allocation reads the tier out of unmapped memory.
 struct MeshShadowConstants {
     float4x4 inverseLightVp;
     float4x4 lightVp;
@@ -34,6 +54,9 @@ struct MeshShadowConstants {
     float bias;
     uint resolution;
     float filterGuardUv;
+    // RayTier.ordinal() of whichever traversal this dispatch is. Written into G on a traced texel
+    // so a reader can tell which tier answered without knowing which pass ran.
+    uint tier;
 };
 
 // A receiver filter can request a neighboring shadow UV even when that ray's center misses the
@@ -125,6 +148,7 @@ kernel void mesh_shadow_trace(constant MeshShadowConstants& c [[buffer(0)]],
             depth=clamp(clip.z/clip.w,0.0,1.0);
         }
     }
-    // A traced miss is valid; skipped rays and empty scenes require raster fallback.
-    output.write(float4(depth,0.0,0.0,1.0),pixel);
+    // A traced miss is valid; skipped rays and empty scenes require raster fallback. G names the
+    // answering tier and is written in the same store as validity, so G is never nonzero with A zero.
+    output.write(float4(depth,float(c.tier),0.0,1.0),pixel);
 }

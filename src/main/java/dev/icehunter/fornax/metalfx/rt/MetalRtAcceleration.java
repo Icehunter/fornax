@@ -431,6 +431,28 @@ public final class MetalRtAcceleration {
      * Metal's automatic residency tracking never sees that read on its own. {@code rt_trace} does
      * not read primitive data yet, but marking it here means the first pass that does (an
      * intersection function table payload, say) does not silently read unmapped memory. */
+    /**
+     * The same set {@link #useResources} marks, as a list, for a caller that binds them itself.
+     * One source for both, so a structure added here cannot be made resident on one path only:
+     * a missed handle returns misses for every ray rather than failing.
+     */
+    public static java.util.List<Long> residentResources() {
+        java.util.List<Long> out = new java.util.ArrayList<>();
+        for (SlotAccel accel : slots.values()) {
+            if (accel.accelerationStructure == 0) {
+                continue;
+            }
+            out.add(accel.accelerationStructure);
+            out.add(accel.vertexBuffer);
+            out.add(accel.primitiveDataBuffer);
+            if (accel.supplementalTriangles > 0) {
+                out.add(accel.supplementalVertexBuffer);
+                out.add(accel.supplementalPrimitiveBuffer);
+            }
+        }
+        return out;
+    }
+
     public static void useResources(long computeEncoder) {
         for (SlotAccel accel : slots.values()) {
             if (accel.accelerationStructure == 0) {

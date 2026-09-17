@@ -356,7 +356,7 @@ class MetalRtSmokeTest {
     }
 
     @Test
-    void sunDepthKernelProjectsNearestDepthAndCertifiesOnlyIntersectedOwners() {
+    void sunDepthKernelProjectsNearestDepthCertifiesOnlyIntersectedOwnersAndFillsOnlyUnansweredTexels() {
         Assumptions.assumeTrue(Objc.isLoaded());
         long device = Objc.createSystemDefaultMetalDevice();
         Assumptions.assumeTrue(device != 0);
@@ -463,7 +463,10 @@ class MetalRtSmokeTest {
                 Objc.msgSendVoid(buildCb, Objc.selector("waitUntilCompleted"));
 
                 // Both rays cross the finite 48-block cube. One hits the voxel, the other misses.
-                long output = createTexture(device, MTL_PIXEL_FORMAT_RGBA32_FLOAT, 2, 1, MTL_TEXTURE_USAGE_SHADER_WRITE);
+                // Read as well as write: the kernel's output is a read_write texture, because in fill
+                // mode it has to see whether a higher tier already answered a texel.
+                long output = createTexture(device, MTL_PIXEL_FORMAT_RGBA32_FLOAT, 2, 1,
+                        MTL_TEXTURE_USAGE_SHADER_READ | MTL_TEXTURE_USAGE_SHADER_WRITE);
                 owned.push(output);
                 InactiveCutoutFixtures fixtures = createInactiveCutoutFixtures(device, 2, 1, owned);
                 long readiness = MetalRtAcceleration.createBuffer(device, 27 * 4);
@@ -486,7 +489,7 @@ class MetalRtSmokeTest {
                     Objc.msgSendVoidIdLongLong(enc, Objc.selector("setBuffer:offset:atIndex:"), readiness, 0L, 10L);
                     Objc.msgSendVoidIdLong(enc, Objc.selector("setTexture:atIndex:"), output, 0L);
                     try (Arena arena = Arena.ofConfined()) {
-                        MemorySegment constants = arena.allocate(176);
+                        MemorySegment constants = arena.allocate(192);
                         constants.fill((byte)0);
                         // x=16*ndc.x+16.5 -> 8.5 and 24.5. Depth runs down from48 to0,
                         // except scenario3 where it runs up from0 to48 to place unknown behind hit.
@@ -499,7 +502,10 @@ class MetalRtSmokeTest {
                         constants.set(ValueLayout.JAVA_INT, 148, 3);
                         constants.set(ValueLayout.JAVA_INT, 152, 2);
                         constants.set(ValueLayout.JAVA_INT, 156, 1);
-                        Objc.msgSendVoidIdLongLong(enc, Objc.selector("setBytes:length:atIndex:"), constants.address(), 176, 0L);
+                        // Byte 176 is the tier this dispatch reports; 2 is RayTier.HARDWARE_VOXEL.
+                        // Byte 180 stays zero: this dispatch owns the image and clears it.
+                        constants.set(ValueLayout.JAVA_INT, 176, 2);
+                        Objc.msgSendVoidIdLongLong(enc, Objc.selector("setBytes:length:atIndex:"), constants.address(), 192, 0L);
                     }
                     Objc.msgSendVoidIdLong(enc, Objc.selector("useResource:usage:"), primStructure, MTL_RESOURCE_USAGE_READ);
                     Objc.msgSendVoidIdLong(enc, Objc.selector("useResource:usage:"), vertexBuffer, MTL_RESOURCE_USAGE_READ);
@@ -516,12 +522,47 @@ class MetalRtSmokeTest {
                         assertEquals(scenario == 4 ? 0.0f : 1.0f, out.get(ValueLayout.JAVA_FLOAT, 28), "miss validity scenario " + scenario);
                         if (firstValid) {
                             assertEquals((scenario == 3 ? 8.0f : 39.0f) / 48.0f, out.get(ValueLayout.JAVA_FLOAT, 0), 1e-6f);
-                            assertEquals(1.0f / 48.0f, out.get(ValueLayout.JAVA_FLOAT, 4), 1e-6f);
-                            assertEquals(47.0f / 48.0f, out.get(ValueLayout.JAVA_FLOAT, 8), 1e-6f);
+                            // G is the answering tier, not a second depth: 2 is the value byte 176
+                            // carries above. B is reserved and stays zero. The entry and exit
+                            // pair holds no second depth: nothing read one.
+                            assertEquals(2.0f, out.get(ValueLayout.JAVA_FLOAT, 4), 0f);
+                            assertEquals(0.0f, out.get(ValueLayout.JAVA_FLOAT, 8), 0f);
                         }
                         if (scenario != 4) assertEquals(1.0f, out.get(ValueLayout.JAVA_FLOAT, 16), "forward-Z miss clears to1");
                     }
                 }
+
+                // Fill mode, against the image the cascade actually shares. The loop above left
+                // scenario 5 behind, which is not a controlled starting point, so this stages its
+                // own: scenario 4 answers the hit texel and leaves the miss texel unanswered, then
+                // one fill dispatch with everything ready must answer the second without disturbing
+                // the first. That is the whole contract a lower tier has to honour.
+                for (int i = 0; i < 27; ++i) ready.setAtIndex(ValueLayout.JAVA_INT, i, 1);
+                ready.setAtIndex(ValueLayout.JAVA_INT, 10, 0);
+                // Staged as tier 3 on purpose. The two dispatches would otherwise compute the same
+                // depth for the hit texel, and overwriting it would be indistinguishable from
+                // skipping it; a different tier in G is what makes an overwrite visible.
+                dispatchSunDepth(queue, compiled, instanceStructure, palette, fixtures, readiness, output,
+                        primStructure, vertexBuffer, 3, false);
+                float[] staged = readSunDepth(output);
+                assertEquals(1.0f, staged[3], "the hit texel starts answered");
+                assertEquals(3.0f, staged[1], "staged as the tier above the one that fills below");
+                assertEquals(0.0f, staged[7], "the miss texel starts unanswered");
+
+                for (int i = 0; i < 27; ++i) ready.setAtIndex(ValueLayout.JAVA_INT, i, 1);
+                dispatchSunDepth(queue, compiled, instanceStructure, palette, fixtures, readiness, output,
+                        primStructure, vertexBuffer, 2, true);
+                float[] filled = readSunDepth(output);
+
+                for (int word = 0; word < 4; word++) {
+                    assertEquals(staged[word], filled[word], 0f,
+                            "an answered texel must survive a lower tier's fill, word " + word);
+                }
+                assertEquals(1.0f, filled[4], 1e-6f, "the filled texel is a traced miss, depth 1");
+                // 2 is RayTier.HARDWARE_VOXEL.ordinal(), the tier this dispatch declares.
+                assertEquals(2.0f, filled[5], 0f, "the filled texel names the tier that answered it");
+                assertEquals(0.0f, filled[6], 0f, "B is reserved");
+                assertEquals(1.0f, filled[7], 0f, "and it is certified");
             } finally {
                 compiled.release();
             }
@@ -2580,5 +2621,58 @@ class MetalRtSmokeTest {
         seg.set(ValueLayout.JAVA_INT, 132, 0);
         seg.set(ValueLayout.JAVA_INT, 136, 0);
         seg.set(ValueLayout.JAVA_INT, 140, 0);
+    }
+
+    /**
+     * One rt_sun_depth dispatch over the 2x1 fixture above. Extracted only so the fill-mode
+     * assertions can run the same encode twice with one flag changed; every binding here mirrors
+     * what the loop above does inline.
+     */
+    private static void dispatchSunDepth(long queue, MetalRtShaders.Compiled compiled, long instanceStructure,
+            long palette, InactiveCutoutFixtures fixtures, long readiness, long output,
+            long primStructure, long vertexBuffer, int tier, boolean fillMode) {
+        long cb = Objc.msgSendId(queue, Objc.selector("commandBuffer"));
+        long enc = Objc.msgSendId(cb, Objc.selector("computeCommandEncoder"));
+        Objc.msgSendVoid(enc, Objc.selector("setComputePipelineState:"), compiled.sunDepth().pipeline());
+        Objc.msgSendVoidIdLong(enc, Objc.selector("setAccelerationStructure:atBufferIndex:"), instanceStructure, 1L);
+        bindCutoutArgs(enc, palette, fixtures, false);
+        Objc.msgSendVoidIdLongLong(enc, Objc.selector("setBuffer:offset:atIndex:"), readiness, 0L, 10L);
+        Objc.msgSendVoidIdLong(enc, Objc.selector("setTexture:atIndex:"), output, 0L);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment constants = arena.allocate(192);
+            constants.fill((byte) 0);
+            constants.set(ValueLayout.JAVA_FLOAT, 0, 16.0f);
+            constants.set(ValueLayout.JAVA_FLOAT, 36, -48.0f);
+            constants.set(ValueLayout.JAVA_FLOAT, 48, 16.5f);
+            constants.set(ValueLayout.JAVA_FLOAT, 52, 48.0f);
+            constants.set(ValueLayout.JAVA_FLOAT, 56, 8.5f);
+            constants.set(ValueLayout.JAVA_FLOAT, 60, 1.0f);
+            constants.set(ValueLayout.JAVA_INT, 148, 3);
+            constants.set(ValueLayout.JAVA_INT, 152, 2);
+            constants.set(ValueLayout.JAVA_INT, 156, 1);
+            constants.set(ValueLayout.JAVA_INT, 176, tier);
+            constants.set(ValueLayout.JAVA_INT, 180, fillMode ? 1 : 0);
+            Objc.msgSendVoidIdLongLong(enc, Objc.selector("setBytes:length:atIndex:"), constants.address(), 192, 0L);
+        }
+        Objc.msgSendVoidIdLong(enc, Objc.selector("useResource:usage:"), primStructure, MTL_RESOURCE_USAGE_READ);
+        Objc.msgSendVoidIdLong(enc, Objc.selector("useResource:usage:"), vertexBuffer, MTL_RESOURCE_USAGE_READ);
+        Objc.msgSendVoidIdLong(enc, Objc.selector("useResource:usage:"), instanceStructure, MTL_RESOURCE_USAGE_READ);
+        Objc.dispatchThreadgroups(enc, 2, 1, 1, 1, 1, 1);
+        Objc.msgSendVoid(enc, Objc.selector("endEncoding"));
+        Objc.msgSendVoid(cb, Objc.selector("commit"));
+        Objc.msgSendVoid(cb, Objc.selector("waitUntilCompleted"));
+    }
+
+    /** The 2x1 RGBA32F output as eight floats: texel 0's RGBA then texel 1's. */
+    private static float[] readSunDepth(long output) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(32);
+            Objc.getBytesFromRegion(output, out.address(), 32, 0, 0, 0, 2, 1, 1, 0);
+            float[] words = new float[8];
+            for (int i = 0; i < words.length; i++) {
+                words[i] = out.get(ValueLayout.JAVA_FLOAT, i * 4L);
+            }
+            return words;
+        }
     }
 }

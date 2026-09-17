@@ -8,11 +8,11 @@ using namespace metal::raytracing;
 // acceleration structure and writes the closest hit. Unlike rt_trace, nothing here is tied to the
 // sun: origin and direction come from the caller's buffer, which is the whole point of this kernel.
 //
-// Opaque closest-hit only. Cutout alpha testing needs the atlas, the palette, the face-texture
-// table and the instance slot map, all of which rt_trace already carries; a caller that needs
-// leaves and glass to be see-through wants that kernel's path, not this one. Stated here because a
-// ray query that silently treats a leaf block as solid is the kind of wrong answer that reads as a
-// shading bug three layers away.
+// Cutout alpha is tested against the block atlas for any record that carries UVs, at the same 0.1
+// cutoff the raster shadow pipeline uses, so leaves and glass are see-through to a ray query the
+// same way they are to a shadow. A record with no UVs (an rt_expand voxel box) is solid by
+// construction and is accepted without a sample; a caller can tell which it got from the
+// UV-known flag.
 //
 // Winding matches rt_trace's own native facing probe (clockwise front-facing), so a front-facing
 // result here means the same thing it means there.
@@ -23,7 +23,10 @@ struct RayQueryConstants {
     // RayTier.ordinal() of the traversal this dispatch is. Copied into every record, hit and miss
     // alike, so a reader can tell an answer from an untouched buffer without a second flag.
     uint tier;
-    uint pad0;
+    // Nonzero: this dispatch is filling a buffer another tier may already have written, so it must
+    // read each record's tier first and leave answered ones alone. Zero: this dispatch owns the
+    // buffer and writes every record, which is what a benchmark and a single-tier caller want.
+    uint fillMode;
 };
 
 // Mirrors RayQueryAbi's word table: one float, three uints, the normal, then the tier. The normal
@@ -56,9 +59,21 @@ kernel void rt_ray_query(
         instance_acceleration_structure accelerationStructure [[buffer(1)]],
         device const float4* requests [[buffer(2)]],
         device RayHit* hits [[buffer(3)]],
+        texture2d<float, access::sample> atlasIn [[texture(0)]],
         uint index [[thread_position_in_grid]])
 {
     if (index >= constants.rayCount) {
+        return;
+    }
+
+    // A higher tier may already own this record. One word read per ray is what makes the buffer
+    // form cascade the same way the image form does: without it a lower tier overwrites an exact
+    // answer with an approximate one, and nothing in the record would say it happened.
+    //
+    // This rests on the engine clearing the hit buffer at the start of every ray_query pass. A
+    // pack-declared buffer persists between frames, so without that clear last frame's tier words
+    // would block this frame's trace entirely.
+    if (constants.fillMode != 0u && hits[index].tier != 0u) {
         return;
     }
 
@@ -108,13 +123,38 @@ kernel void rt_ray_query(
     intersection_params params;
     params.set_triangle_cull_mode(triangle_cull_mode::none);
     params.set_triangle_front_facing_winding(winding::clockwise);
+    // Non-opaque so every candidate reaches this loop: a leaf or a pane of glass is a triangle the
+    // ray has to see through, and the atlas is the only thing that knows which texels are holes.
+    params.force_opacity(forced_opacity::non_opaque);
 
     intersection_query<triangle_data, instancing> query;
     query.reset(r, accelerationStructure, params);
-    // Opaque geometry auto-commits, so this loop runs to completion once and leaves the closest
-    // hit committed. The loop body is empty on purpose: every candidate this kernel cares about is
-    // already committed by the time next() returns false.
     while (query.next()) {
+        if (query.get_candidate_intersection_type() != intersection_type::triangle) {
+            continue;
+        }
+        device const uint* candidate = (device const uint*) query.get_candidate_primitive_data();
+        uint candidateSurface = candidate != nullptr ? *candidate : 0u;
+        uint candidateUvWords = (candidateSurface & SURFACE_UV_AT_BYTE_4) ? 1u
+                : (candidateSurface & SURFACE_UV_AT_BYTE_8) ? 2u : 0u;
+        if (candidateUvWords == 0u) {
+            // A record with no UVs carries no alpha to test. An rt_expand voxel box is solid by
+            // construction, so accepting it here matches what the shadow trace does with one.
+            query.commit_triangle_intersection();
+            continue;
+        }
+        device const float* candidateUvs = (device const float*)(candidate + candidateUvWords);
+        float2 bary = query.get_candidate_triangle_barycentric_coord();
+        float2 uv = float2(candidateUvs[0], candidateUvs[1]) * (1.0f - bary.x - bary.y)
+                + float2(candidateUvs[2], candidateUvs[3]) * bary.x
+                + float2(candidateUvs[4], candidateUvs[5]) * bary.y;
+        constexpr sampler nearestAtlas(coord::normalized, address::clamp_to_edge, filter::nearest);
+        // The same 0.1 cutoff the raster shadow pipeline and rt_mesh_shadow both use. A ray that
+        // disagrees with the rasteriser about which texels are holes lights foliage differently
+        // from the way it shadows.
+        if (atlasIn.sample(nearestAtlas, uv).a >= 0.1f) {
+            query.commit_triangle_intersection();
+        }
     }
 
     if (query.get_committed_intersection_type() == intersection_type::none) {

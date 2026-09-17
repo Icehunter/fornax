@@ -29,6 +29,13 @@ public final class MetalRtShaders {
     private static final String TRACE_RESOURCE = "/assets/fornax/shaders_engine/rt_trace.metal";
     private static final String SUN_DEPTH_RESOURCE = "/assets/fornax/shaders_engine/rt_sun_depth.metal";
     private static final String DEBUG_RESOURCE = "/assets/fornax/shaders_engine/rt_debug.metal";
+    /** General caller-driven ray query. Not part of {@link #compile}: nothing in the frame loop
+     * dispatches it yet, and a kernel compiled every pack load that no pass encodes is cost with no
+     * consumer. Callers compile it through {@link #compileKernel} when they need it. */
+    static final String RAY_QUERY_RESOURCE = "/assets/fornax/shaders_engine/rt_ray_query.metal";
+    /** Shared face-to-normal decode, prepended to every kernel that needs it. */
+    private static final String FACE_NORMAL_RESOURCE = "/assets/fornax/shaders_engine/rt_face_normal.metal";
+    static final String RAY_QUERY_FUNCTION = "rt_ray_query";
 
     private MetalRtShaders() {
     }
@@ -104,9 +111,13 @@ public final class MetalRtShaders {
         }
     }
 
-    private static CompiledKernel compileKernel(long device, String resourcePath, String functionName) {
-        String source = readResource(resourcePath);
-        if (resourcePath.equals(SUN_DEPTH_RESOURCE)) source = readResource(TRACE_RESOURCE) + "\n" + source;
+    /**
+     * Compiles one kernel and builds its pipeline state. Package-private so a caller outside
+     * {@link #compile}'s fixed set, and the tests, can build a single kernel without the whole
+     * milestone's worth.
+     */
+    static CompiledKernel compileKernel(long device, String resourcePath, String functionName) {
+        String source = prelude(resourcePath) + readResource(resourcePath);
         long library = compileSource(device, resourcePath, source);
 
         long function = Objc.msgSendId(library, Objc.selector("newFunctionWithName:"),
@@ -129,6 +140,22 @@ public final class MetalRtShaders {
         }
 
         return new CompiledKernel(library, function, pipeline.id());
+    }
+
+    /**
+     * Source prepended to a kernel before compiling it. MSL resources here have no include path, so
+     * a helper shared by two kernels is concatenated in rather than imported. A kernel absent from
+     * this switch gets nothing, which is a compile error at its first use of a shared helper rather
+     * than a silent miscompile.
+     */
+    private static String prelude(String resourcePath) {
+        if (resourcePath.equals(SUN_DEPTH_RESOURCE)) {
+            return readResource(TRACE_RESOURCE) + "\n";
+        }
+        if (resourcePath.equals(RAY_QUERY_RESOURCE) || resourcePath.equals(DEBUG_RESOURCE)) {
+            return readResource(FACE_NORMAL_RESOURCE) + "\n";
+        }
+        return "";
     }
 
     /**
