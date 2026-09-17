@@ -18,7 +18,7 @@ public final class ShaderImports {
     private static final Pattern MOJ_IMPORT = Pattern.compile("#moj_import\\s*<([a-z0-9_.-]+):([^>]+)>");
 
     /** The include files the fornax engine jar itself still ships (assets/fornax/shaders/include/). */
-    private static final Set<String> ENGINE_INCLUDES = Set.of("globals.glsl", "block_atlas.glsl");
+    private static final Set<String> ENGINE_INCLUDES = Set.of("globals.glsl", "block_atlas.glsl", "ray_answer.glsl");
 
     /** Namespaces served by other jars, out of a pack's (and this check's) hands. */
     private static final Set<String> EXTERNAL_NAMESPACES = Set.of("sodium", "minecraft");
