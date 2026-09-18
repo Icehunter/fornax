@@ -22,14 +22,14 @@ class RayQueryAbiTest {
 
     /** 8 words: distance, flags, surface, atlasUv, normal xyz, tier. */
     @Test
-    void oneHitRecordIsThirtyTwoBytes() {
-        assertEquals(32L, RayQueryAbi.hitByteSize(1));
+    void oneHitRecordIsThirtySixBytes() {
+        assertEquals(36L, RayQueryAbi.hitByteSize(1));
     }
 
     @Test
     void byteSizesScaleLinearlyWithRayCount() {
         assertEquals(32L * 1024L, RayQueryAbi.requestByteSize(1024));
-        assertEquals(32L * 1024L, RayQueryAbi.hitByteSize(1024));
+        assertEquals(36L * 1024L, RayQueryAbi.hitByteSize(1024));
     }
 
     @Test
@@ -46,8 +46,8 @@ class RayQueryAbiTest {
      * kernel as a valid buffer at the wrong offsets.
      */
     @Test
-    void abiVersionIsThree() {
-        assertEquals(3, RayQueryAbi.ABI_VERSION);
+    void abiVersionIsFour() {
+        assertEquals(4, RayQueryAbi.ABI_VERSION);
     }
 
     /**

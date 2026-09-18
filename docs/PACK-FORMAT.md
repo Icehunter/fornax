@@ -269,7 +269,7 @@ onto its window's first section, and the engine moves your ray into whichever on
 world coordinates instead traces a scene displaced by up to the grid step: every hit lands on real
 geometry in the wrong place, with nothing to report it.
 
-**A hit** is 8 words, 32 bytes:
+**A hit** is 9 words, 36 bytes:
 
 | Word | Type | Meaning |
 |---|---|---|
@@ -279,6 +279,7 @@ geometry in the wrong place, with nothing to report it.
 | 3 | uint | atlas UV as two halves, low half u, only when the UV-known flag is set |
 | 4-6 | float | outward normal. The zero vector means the surface names no face; never normalise it |
 | 7 | uint | **the tier that answered. Zero means nothing did** |
+| 8 | uint | tint in the low three bytes, the block's own light level 0-15 in the top one |
 
 **Read word 7 first.** A hit buffer nothing traced reads back all zeros, and zero is a legal
 distance, so the sign of word 0 cannot tell an answer from untouched memory. `<fornax:ray_answer.glsl>`

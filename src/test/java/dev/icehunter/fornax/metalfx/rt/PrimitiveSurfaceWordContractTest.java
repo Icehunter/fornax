@@ -30,7 +30,7 @@ class PrimitiveSurfaceWordContractTest {
     @Test
     void theMeshPrimitiveRecordStartsWithItsSurfaceWord() throws IOException {
         assertTrue(read("rt_mesh_shadow.metal").contains(
-                        "struct MeshShadowPrimitive { uint surface; uint pad; float2 uv0; float2 uv1; float2 uv2; };"),
+                        "struct MeshShadowPrimitive { uint surface; uint tint; float2 uv0; float2 uv1; float2 uv2; };"),
                 "the surface word must be first and the record must stay 32 bytes");
     }
 

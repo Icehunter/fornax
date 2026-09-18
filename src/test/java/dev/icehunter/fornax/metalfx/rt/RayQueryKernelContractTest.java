@@ -54,11 +54,11 @@ class RayQueryKernelContractTest {
      * words. Everything past the normal would read at the wrong offset and nothing would say so.
      */
     @Test
-    void theNormalIsPackedSoTheTierStaysInsideTheThirtyTwoByteRecord() throws IOException {
+    void theNormalIsPackedSoTheWordsAfterItKeepTheirOffsets() throws IOException {
         assertTrue(source().contains("packed_float3 normal;"),
-                "an unpacked float3 would push the tier out of the record");
-        assertEquals(32L, RayQueryAbi.hitByteSize(1),
-                "the record the kernel writes is 32 bytes; this is the Java side of the same claim");
+                "an unpacked float3 would push the tier and the tint out of the record");
+        assertEquals(36L, RayQueryAbi.hitByteSize(1),
+                "the record the kernel writes is 36 bytes; this is the Java side of the same claim");
     }
 
     /** The version the kernel implements and the version callers declare are one number. */

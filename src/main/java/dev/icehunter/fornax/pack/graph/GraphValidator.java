@@ -783,14 +783,17 @@ public final class GraphValidator {
         }
         String requests = p.inputs().get(0);
         String hits = p.outputs().get(0);
-        requireRayBuffer(p, graph, requests, "inputs", RayQueryAbi.requestByteSize(spec.rayCount()),
-                "requests");
-        requireRayBuffer(p, graph, hits, "outputs", RayQueryAbi.hitByteSize(spec.rayCount()), "hits");
+        // Ahead of the size checks. One buffer named twice is short for one of the two roles as
+        // well, and the size alone would send a reader off measuring a stride that was never the
+        // problem.
         if (requests.equals(hits)) {
             throw new FornaxPackError(FILE, "pass." + p.name() + ".outputs",
                     "'" + hits + "' is both the request and the hit buffer; a traversal reads the "
                             + "whole request set while it writes, so one buffer cannot be both");
         }
+        requireRayBuffer(p, graph, requests, "inputs", RayQueryAbi.requestByteSize(spec.rayCount()),
+                "requests");
+        requireRayBuffer(p, graph, hits, "outputs", RayQueryAbi.hitByteSize(spec.rayCount()), "hits");
 
         // A request buffer nothing wrote holds whatever the allocation left there. Those are finite
         // floats often enough to trace, so the failure is a frame of plausible wrong answers.

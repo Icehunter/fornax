@@ -43,7 +43,7 @@ class PackTomlLoaderRayQueryTest {
 
                 [targets.rayHits]
                 kind = "buffer"
-                stride_bytes = 32
+                stride_bytes = 36
                 count = 1024
 
                 [[pass]]
@@ -135,11 +135,11 @@ class PackTomlLoaderRayQueryTest {
         GraphSpec spec = load(graph(VALID_PASS).replace("""
                 [targets.rayHits]
                 kind = "buffer"
-                stride_bytes = 32
+                stride_bytes = 36
                 count = 1024""", """
                 [targets.rayHits]
                 kind = "buffer"
-                stride_bytes = 32
+                stride_bytes = 36
                 count = 1023"""));
         FornaxPackError error = assertThrows(FornaxPackError.class,
                 () -> GraphValidator.validate(spec, Map.of(), 1920, 1080));
@@ -157,7 +157,7 @@ class PackTomlLoaderRayQueryTest {
 
                 [targets.rayHits]
                 kind = "buffer"
-                stride_bytes = 32
+                stride_bytes = 36
                 count = 1024
 
                 """ + VALID_PASS);

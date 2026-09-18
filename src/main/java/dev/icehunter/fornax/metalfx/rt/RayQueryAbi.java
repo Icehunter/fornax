@@ -28,13 +28,13 @@ import dev.icehunter.fornax.rt.RayTier;
 public final class RayQueryAbi {
 
     /** Bumped whenever any offset below moves. rt_ray_query.metal refuses a mismatched buffer. */
-    public static final int ABI_VERSION = 3;
+    public static final int ABI_VERSION = 4;
 
     /** origin.xyz, tMin, direction.xyz, tMax. */
     public static final int REQUEST_WORDS = 8;
 
     /** distance (float); flags, surface, atlasUv (uint); normal xyz (float); tier (uint). */
-    public static final int HIT_WORDS = 8;
+    public static final int HIT_WORDS = 9;
 
     /**
      * 4 Mi rays: 128 MiB of request and 64 MiB of hit buffer. Above a one-ray-per-pixel pass at
@@ -79,6 +79,23 @@ public final class RayQueryAbi {
      * which is what an untraced buffer and an ABI-version mismatch both produce.
      */
     public static final int HIT_TIER_WORD = 7;
+
+    /**
+     * Word offset of what the atlas cannot say: the vertex tint in the low three bytes and the
+     * block's own light level, 0 to 15, in the top one.
+     *
+     * <ul>
+     *   <li>Grass and leaves are grey in the atlas and take their colour from this tint, so a
+     *       caller that ignores it lights a world with white plants.
+     *   <li>A glowing block's light is in neither its texture nor its tint, so without the top
+     *       byte a bounce off one carries nothing.
+     *   <li>Alpha is left out: on a chunk vertex that channel is baked ambient occlusion, not
+     *       tint.
+     *   <li>White and unlit on a miss, and from the voxel tiers, which build their own records
+     *       and have no vertex to read.
+     * </ul>
+     */
+    public static final int HIT_TINT_WORD = 8;
 
     /** Flag bit 0: the ray met the triangle's front face. */
     public static final int FLAG_FRONT_FACING = 1;

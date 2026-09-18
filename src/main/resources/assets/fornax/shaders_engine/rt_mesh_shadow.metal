@@ -11,7 +11,10 @@ using namespace metal::raytracing;
 // where the voxel supplement record keeps them. The order matters: the voxel box record is a single
 // word, so a reader that assumed UVs at a fixed offset would read a neighbouring triangle's word
 // as a coordinate.
-struct MeshShadowPrimitive { uint surface; uint pad; float2 uv0; float2 uv1; float2 uv2; };
+// The second word carries what the atlas cannot say: the vertex tint in the low three bytes and
+// the block's own light level in the top one. Grass and leaves are grey in the atlas and take
+// their colour from that tint, and a glowing block's light is not in its texture at all.
+struct MeshShadowPrimitive { uint surface; uint tint; float2 uv0; float2 uv1; float2 uv2; };
 
 // Set in a mesh record's surface word. Distinct from the voxel supplement's bit 31 so one decode
 // rule covers both, and high enough to stay clear of the voxel index, face and palette fields.
@@ -38,7 +41,16 @@ kernel void mesh_shadow_decode(device const ushort* packed [[buffer(0)]],
     // than a plausible wrong axis.
     uint face = packed[(triangle / 2) * 4 * 12 + 10] & 0xFFu;
     if (face > 5u) face = 0xFu;
-    primitives[triangle] = {MESH_SURFACE_BIT | (face << 12u), 0u, uv[0], uv[1], uv[2]};
+
+    // FornaxChunkVertex's 24 bytes: a_Color RGBA8 at bytes 12..15, so ushorts 6 and 7 of the
+    // vertex. Alpha is baked ambient occlusion rather than tint, so it is left out. The light
+    // level rides a_Position.w's low four bits, ushort 3.
+    uint first = (triangle / 2) * 4 * 12;
+    uint rg = packed[first + 6];
+    uint ba = packed[first + 7];
+    uint emission = packed[first + 3] & 15u;
+    uint tint = (rg & 0xFFu) | ((rg >> 8) << 8) | ((ba & 0xFFu) << 16) | (emission << 24);
+    primitives[triangle] = {MESH_SURFACE_BIT | (face << 12u), tint, uv[0], uv[1], uv[2]};
 }
 
 // Column-major matrices, camera float4, radius/bias floats, resolution uint, filter guard float and

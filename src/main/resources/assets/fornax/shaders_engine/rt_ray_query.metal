@@ -48,6 +48,10 @@ struct RayHit {
     uint atlasUv;
     packed_float3 normal;
     uint tier;
+    // What the atlas cannot say: the vertex tint in the low three bytes, the block's own light
+    // level in the top one. Grass and leaves are grey in the atlas and take their colour from the
+    // tint; a glowing block's light is not in its texture at all.
+    uint tint;
 };
 
 // Flag bits, mirroring RayQueryAbi's FLAG_ constants.
@@ -93,11 +97,13 @@ kernel void rt_ray_query(
     miss.atlasUv = 0u;
     miss.normal = float3(0.0);
     miss.tier = constants.tier;
+    // White and unlit: a miss met no block, so it has neither a tint nor a light of its own.
+    miss.tint = 0x00FFFFFFu;
 
     // A caller built for other offsets gets an unanswered record rather than a buffer read at the
     // wrong stride. Tier zero, not the miss above: the caller's own layout may put the tier
     // elsewhere, and an all-zero record reads as unanswered under every layout this kernel has had.
-    if (constants.abiVersion != 3u) {
+    if (constants.abiVersion != 4u) {
         RayHit unanswered;
         unanswered.distance = 0.0f;
         unanswered.flags = 0u;
@@ -105,6 +111,7 @@ kernel void rt_ray_query(
         unanswered.atlasUv = 0u;
         unanswered.normal = float3(0.0);
         unanswered.tier = 0u;
+        unanswered.tint = 0u;
         hits[index] = unanswered;
         return;
     }
@@ -197,6 +204,11 @@ kernel void rt_ray_query(
     } else {
         hit.surface = surface;
     }
+
+    // Word 1 of a mesh primitive. The voxel tiers build their own records and have no vertex to
+    // read, so they report white and unlit rather than a tint that is not theirs.
+    hit.tint = (primitiveData != nullptr && (surface & SURFACE_UV_AT_BYTE_8))
+            ? primitiveData[1] : 0x00FFFFFFu;
 
     hit.atlasUv = 0u;
     if (uvOffsetWords != 0u) {
