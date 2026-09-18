@@ -2675,4 +2675,29 @@ class MetalRtSmokeTest {
             return words;
         }
     }
+
+    /**
+     * A double comes back in d0, so it needs a descriptor of its own.
+     *
+     * <ul>
+     *   <li>{@code GPUStartTime} read through the long-returning handle gives the raw bit
+     *       pattern, which converts to a plausible-looking number rather than an error.
+     *   <li>That is how a trace time can read as a sane number and be wrong.
+     * </ul>
+     */
+    @Test
+    void aDoubleReturningMessageSendHasItsOwnDescriptor() throws java.io.IOException {
+        String objc = java.nio.file.Files.readString(
+                java.nio.file.Path.of("src/main/java/dev/icehunter/fornax/metalfx/objc/Objc.java"));
+        assertTrue(objc.contains("public static double msgSendDouble(long receiver, long sel)"));
+        assertTrue(objc.contains("FunctionDescriptor.of(ValueLayout.JAVA_DOUBLE,\n"
+                + "                                ValueLayout.ADDRESS, ValueLayout.ADDRESS)"),
+                "msgSendDouble must bind a JAVA_DOUBLE return, not reuse the long handle");
+        String tracer = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src/main/java/dev/icehunter/fornax/metalfx/rt/MeshShadowTracer.java"));
+        assertTrue(tracer.contains("Objc.msgSendDouble(cb,Objc.selector(\"GPUStartTime\"))"));
+        assertTrue(tracer.contains("Objc.msgSendDouble(cb,Objc.selector(\"GPUEndTime\"))"));
+        assertTrue(tracer.contains("if(status==4)lastGpuMillis=gpuMillis(cb);"),
+                "read the times only from a buffer that completed; an errored one reports zeros");
+    }
 }

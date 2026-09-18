@@ -106,6 +106,7 @@ public final class Objc {
     private static final MethodHandle MSG_SEND_VOID_BOOL;   // void objc_msgSend(id, SEL, BOOL)
     private static final MethodHandle MSG_SEND_VOID_ID_LONG; // void objc_msgSend(id, SEL, id, uint64)
     private static final MethodHandle MSG_SEND_LONG;        // NSUInteger objc_msgSend(id, SEL)
+    private static final MethodHandle MSG_SEND_DOUBLE;      // CFTimeInterval objc_msgSend(id, SEL)
     private static final MethodHandle MSG_SEND_ID_LONG_LONG; // id objc_msgSend(id, SEL, NSUInteger, NSUInteger)
     private static final MethodHandle MSG_SEND_VOID_ID_LONG_LONG; // void objc_msgSend(id, SEL, id, NSUInteger, NSUInteger)
     private static final MethodHandle MSG_SEND_ID_ID_PTR;    // id objc_msgSend(id, SEL, id, ptr)
@@ -146,6 +147,7 @@ public final class Objc {
         MethodHandle msgSendVoidBool = null;
         MethodHandle msgSendVoidIdLong = null;
         MethodHandle msgSendLong = null;
+        MethodHandle msgSendDouble = null;
         MethodHandle msgSendIdLongLong = null;
         MethodHandle msgSendVoidIdLongLong = null;
         MethodHandle msgSendIdIdPtr = null;
@@ -226,6 +228,9 @@ public final class Objc {
                 msgSendLong = linker.downcallHandle(msgSendSym,
                         FunctionDescriptor.of(ValueLayout.JAVA_LONG,
                                 ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                msgSendDouble = linker.downcallHandle(msgSendSym,
+                        FunctionDescriptor.of(ValueLayout.JAVA_DOUBLE,
+                                ValueLayout.ADDRESS, ValueLayout.ADDRESS));
                 msgSendIdLongLong = linker.downcallHandle(msgSendSym,
                         FunctionDescriptor.of(ValueLayout.ADDRESS,
                                 ValueLayout.ADDRESS, ValueLayout.ADDRESS,
@@ -294,6 +299,7 @@ public final class Objc {
         MSG_SEND_VOID_BOOL = msgSendVoidBool;
         MSG_SEND_VOID_ID_LONG = msgSendVoidIdLong;
         MSG_SEND_LONG = msgSendLong;
+        MSG_SEND_DOUBLE = msgSendDouble;
         MSG_SEND_ID_LONG_LONG = msgSendIdLongLong;
         MSG_SEND_VOID_ID_LONG_LONG = msgSendVoidIdLongLong;
         MSG_SEND_ID_ID_PTR = msgSendIdIdPtr;
@@ -515,6 +521,21 @@ public final class Objc {
                     MemorySegment.ofAddress(receiver), MemorySegment.ofAddress(sel));
         } catch (Throwable t) {
             throw new RuntimeException("objc_msgSend(long)", t);
+        }
+    }
+
+    /**
+     * {@code [receiver sel]} returning a CFTimeInterval, for example a command buffer's
+     * {@code GPUStartTime}. A double comes back in d0 on arm64, so it needs its own descriptor:
+     * reading one through the long-returning handle gives the bit pattern as an integer.
+     */
+    public static double msgSendDouble(long receiver, long sel) {
+        requireLoaded();
+        try {
+            return (double) MSG_SEND_DOUBLE.invokeExact(
+                    MemorySegment.ofAddress(receiver), MemorySegment.ofAddress(sel));
+        } catch (Throwable t) {
+            throw new RuntimeException("objc_msgSend(double)", t);
         }
     }
 

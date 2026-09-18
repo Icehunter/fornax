@@ -77,6 +77,7 @@ public final class MeshShadowTracer implements AutoCloseable {
     private Map<Key,Cached> cache=new LinkedHashMap<>();
     private List<Instance> instances=List.of();
     private final Deque<Long> pending=new ArrayDeque<>();
+    private double lastGpuMillis=Double.NaN;
     private long queue,device,decodePipeline,tracePipeline,clearPipeline,tlas;
     private boolean closed,failed;
 
@@ -280,9 +281,31 @@ public final class MeshShadowTracer implements AutoCloseable {
             long status=Objc.msgSendLong(cb,Objc.selector("status"));
             // MTLCommandBufferStatusCompleted=4, Error=5. Querying status does not wait/read geometry.
             if(status<4)return;
+            if(status==4)lastGpuMillis=gpuMillis(cb);
             pending.removeFirst();release(cb);
             if(status==5) { failed=true;throw new IllegalStateException("previous mesh shadow Metal command failed"); }
         }
+    }
+
+    /**
+     * How long the GPU spent in the last completed trace, in milliseconds, or NaN before one
+     * completes.
+     *
+     * <ul>
+     *   <li>The Vulkan timers see their own queue only, so nothing else measures this dispatch.
+     *   <li>Read from a buffer that already reports completed, so it never waits.
+     *   <li>Lags by the frames in flight: it answers what a trace costs, not what this frame did.
+     * </ul>
+     */
+    public synchronized double lastGpuMillis() {
+        return lastGpuMillis;
+    }
+
+    private static double gpuMillis(long cb) {
+        double start=Objc.msgSendDouble(cb,Objc.selector("GPUStartTime"));
+        double end=Objc.msgSendDouble(cb,Objc.selector("GPUEndTime"));
+        // Both read zero on a buffer the driver never scheduled, which is not a zero-cost trace.
+        return end>start ? (end-start)*1000.0 : Double.NaN;
     }
 
     @Override public synchronized void close() {
