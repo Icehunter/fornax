@@ -118,6 +118,56 @@ class VulkanPartialFlushContractTest {
         }
     }
 
+    /**
+     * The mesh shadow tier hands its command buffer to Metal the same way, and must flush it the
+     * same way.
+     *
+     * <ul>
+     *   <li>Metal waits on the timeline value the flush sends out. That is all it needs.
+     *   <li>A full submit also waits for resource retirement, which costs far more than
+     *       recording the whole command buffer, block atlas copy included.
+     *   <li>What the partial flush cannot do, satisfy an encoder fence or recycle a pool, this
+     *       path never asks of it: the wait before a mesh buffer is freed is on the shared
+     *       timeline.
+     * </ul>
+     */
+    @Test
+    void theMeshShadowTierDispatchesItsEventHandoffWithoutAFullSubmit() throws IOException {
+        String trace = method(read("metalfx/rt/MeshMetalProvider.java"), "private void traceFrame(");
+        assertEquals(1, occurrences(trace, FLUSH), "one cross-queue handoff per traced frame");
+        assertFalse(trace.contains("encoder.submit();"),
+                "a full submit host-waits an earlier frame batch for a signal Metal already has");
+        assertOrdered(trace, "VulkanMetalInterop.recordIntoStream(encoder,", "encoder.signalSemaphore(",
+                FLUSH, "tracer.trace(");
+    }
+
+    /**
+     * Every per-frame cascade handoff flushes; none of them submits.
+     *
+     * <ul>
+     *   <li>The retirement wait is one cost per frame and lands on whichever cascade submit
+     *       goes first, so leaving one of them a full submit moves the cost rather than removing
+     *       it.
+     *   <li>What every one of these needs is the timeline signal reaching Metal, and what their
+     *       readers need is graphics-queue order, which a partial flush keeps.
+     *   <li>The debug scene copy-back keeps its full submit. It runs only when a scene debug view
+     *       is on, so it is not part of the per-frame path this pins.
+     * </ul>
+     */
+    @Test
+    void everyPerFrameCascadeHandoffFlushesWithoutAFullSubmit() throws IOException {
+        String pass = read("metalfx/rt/MetalRtShadowPass.java");
+        for (String signature : new String[] {"private static void run(", "static boolean publishPendingCelestial("}) {
+            String body = method(pass, signature);
+            assertEquals(1, occurrences(body, FLUSH), signature + " has one cross-queue handoff");
+            assertOrdered(body, "encoder.signalSemaphore(", FLUSH);
+        }
+        String publish = method(read("metalfx/rt/MeshMetalProvider.java"), "public boolean publishCelestialVisibility(");
+        assertEquals(1, occurrences(publish, FLUSH), "the mesh tier publishes the shared image");
+        assertFalse(publish.contains("encoder.submit();"));
+        assertOrdered(publish, "encoder.signalSemaphore(", FLUSH, "TerrainShadowResult.published();");
+    }
+
     @Test
     void hardSyncFenceWaitsAndThePresenterKeepFullSubmission() throws IOException {
         String upscale = method(read("metalfx/MetalFxUpscalePass.java"), "private static void run(");

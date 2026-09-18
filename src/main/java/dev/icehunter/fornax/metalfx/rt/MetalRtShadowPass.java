@@ -16,6 +16,7 @@ import dev.icehunter.fornax.config.RtDebugScene;
 import dev.icehunter.fornax.config.GBufferDebugView;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
 import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
+import dev.icehunter.fornax.pipeline.VulkanPartialFlush;
 import dev.icehunter.fornax.rt.CelestialFill;
 import dev.icehunter.fornax.rt.RayTier;
 import dev.icehunter.fornax.voxel.SectionHarvester;
@@ -89,8 +90,8 @@ public final class MetalRtShadowPass {
      * The timeline value the last committed trace signals, and whether its image still owes the
      * pack a copy. The copy is taken at the START of the next frame rather than the end of this
      * one: waiting on a value Metal has not signalled yet blocks the render thread inside
-     * vkQueueSubmit, which measured at 7.8 ms a frame, while waiting on one signalled a whole frame
-     * ago costs nothing. The pack reads a one-frame-old celestial image in exchange, which is
+     * vkQueueSubmit, while waiting on one signalled a whole frame ago costs nothing. The pack
+     * reads a one-frame-old celestial image in exchange, which is
      * invisible against a shadow map that already lags the camera through its own warp.
      */
     private static long pendingPublishValue;
@@ -387,7 +388,9 @@ public final class MetalRtShadowPass {
             };
             VulkanMetalInterop.recordIntoStream(encoder, copyIn);
             encoder.signalSemaphore(timeline.vkSemaphore, v, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-            encoder.submit();
+            // The handoff is the timeline value reaching Metal. The retirement a full submit
+            // waits for is a frame-level cost that lands on whichever cascade submit goes first.
+            ((VulkanPartialFlush) encoder).fornax$flushPending();
         }
         phaseStart = record("RT voxel copy-in CPU", phaseStart);
         List<Integer> copiedSlots = copiedHolder[0];
@@ -553,7 +556,13 @@ public final class MetalRtShadowPass {
         }
         record("RT voxel copy-back CPU", phaseStart);
         timelineValue = v + 3;
-        if (celestialFill) {
+        // Only a frame this tier traced. The copy waits on this tier's timeline, and only
+        // encodeCelestialFill waits on the tier above's event, so arming the publish without it
+        // copies the handed-over image while the tier above is still writing it: the dispatch
+        // covers the map in threadgroups, so the reader gets this frame's answers in the ones that
+        // finished and the last frame's in the rest. Leaving it unarmed hands the publish to the
+        // tier above, whose own copy waits on the event that orders it.
+        if (celestialFill && tracedThisFrame) {
             // Owed to the pack, taken at the start of the next frame. Publishing here would mean
             // waiting on a value Metal has not signalled yet, which blocks the render thread.
             pendingPublishImage = handover != null ? handover.image() : celestialIo;
@@ -616,7 +625,9 @@ public final class MetalRtShadowPass {
         });
         long publishValue = pendingPublishValue + 1;
         encoder.signalSemaphore(timeline.vkSemaphore, publishValue, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-        encoder.submit();
+        // The pack samples this image later in the same frame. A partial flush keeps the
+        // graphics queue in order, which is what that reader needs.
+        ((VulkanPartialFlush) encoder).fornax$flushPending();
         lastVulkanSignal = publishValue;
         TerrainShadowResult.published();
         publishPending = false;
