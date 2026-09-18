@@ -5,6 +5,7 @@ import dev.icehunter.fornax.rt.RayTier;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -40,6 +41,46 @@ class RayQueryRoundTripTest {
             System.arraycopy(each[i], 0, out, i * RayQueryAbi.REQUEST_WORDS, RayQueryAbi.REQUEST_WORDS);
         }
         return out;
+    }
+
+    /**
+     * A caller's origin is camera-relative, and the kernel puts it in the structure's own frame.
+     *
+     * <ul>
+     *   <li>The mesh tier builds on a coarse grid origin and the voxel tier on its window's first
+     *       section. A pack has no way to know either, and nothing in a request says which frame
+     *       it is in.
+     *   <li>Without the offset a ray traces against geometry displaced by up to the grid step, so
+     *       every hit lands somewhere real and wrong, with no error.
+     *   <li>Shifting the origin by an amount and passing that amount back must return the same
+     *       distance as the unshifted ray.
+     * </ul>
+     */
+    @Test
+    void aCameraRelativeOriginIsRebasedIntoTheStructureFrame() {
+        assumeTrue(Objc.isLoaded(), "Metal bridge not linked on this platform");
+        long device = Objc.createSystemDefaultMetalDevice();
+        assumeTrue(device != 0L, "no system default Metal device");
+
+        try (RayQueryScene scene = RayQueryScene.open(device)) {
+            // Straight at the near face from z=0: the block spans [8,9], so t=8.
+            float[] direct = rays(ray(CENTRE, CENTRE, 0.0f, 0.0f, 0.0f, 1.0f, FAR));
+            RayQueryScene.Hit[] plain = scene.trace(direct, 1);
+            assertEquals(8.0f, plain[0].distance(), 1e-3f, "the unshifted ray reaches the near face");
+
+            // The same ray written by a caller whose camera sits at (256, 64, -128) in this frame.
+            float camX = 256.0f, camY = 64.0f, camZ = -128.0f;
+            float[] relative = rays(ray(CENTRE - camX, CENTRE - camY, 0.0f - camZ,
+                    0.0f, 0.0f, 1.0f, FAR));
+            RayQueryScene.Hit[] rebased = scene.traceRebased(relative, 1, camX, camY, camZ);
+            assertEquals(plain[0].distance(), rebased[0].distance(), 1e-3f,
+                    "a camera-relative ray plus its frame offset is the same ray");
+
+            // The same relative origins with no offset: a real hit somewhere else, or a miss.
+            RayQueryScene.Hit[] unrebased = scene.trace(relative, 1);
+            assertNotEquals(plain[0].distance(), unrebased[0].distance(),
+                    "without the offset the ray traces a displaced scene, which is the silent case");
+        }
     }
 
     @Test

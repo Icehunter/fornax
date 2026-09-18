@@ -263,6 +263,12 @@ answers rather than an error.
 **A request** is 8 floats, 32 bytes: origin xyz then `tMin`, direction xyz then `tMax`. The
 direction need not be normalised; distances come back measured along the normalised direction.
 
+**Origins are camera-relative**, the frame `u_InvProjModelView` already hands you. Each tier builds
+its structure in a frame of its own, the mesh tier's rebased onto a coarse grid and the voxel tier's
+onto its window's first section, and the engine moves your ray into whichever one answers. Writing
+world coordinates instead traces a scene displaced by up to the grid step: every hit lands on real
+geometry in the wrong place, with nothing to report it.
+
 **A hit** is 8 words, 32 bytes:
 
 | Word | Type | Meaning |

@@ -811,6 +811,35 @@ public final class MetalRtShadowPass {
         return atlasIn != null ? atlasIn.mtlTexture : dummyAtlasTexture;
     }
 
+    /**
+     * The camera in the frame this tier's structure is built in, as x, y, z.
+     *
+     * <ul>
+     *   <li>The window addresses itself from its first section, so world coordinates do not reach
+     *       the structure.
+     *   <li>A ray-query caller writes camera-relative origins, having no way to know this frame.
+     *       Adding this puts such a ray where the geometry is.
+     *   <li>All zero before a window exists, which is the camera itself: a caller gets a trace
+     *       against an empty structure, and the record stays at tier zero for the tier below.
+     * </ul>
+     */
+    static float[] cameraInWindowFrame() {
+        // The EXPORTED window, the same one the fill builds its structure from. The live window
+        // can already have moved past what the structure holds.
+        VoxelWindow.WindowState window = MetalRtGeometry.exportedWindow(VoxelWindow.currentState());
+        if (window == null) {
+            return new float[] {0.0f, 0.0f, 0.0f};
+        }
+        float originX = (window.centerX() - window.radius()) * 16.0f;
+        float originY = (window.centerY() - window.radius()) * 16.0f;
+        float originZ = (window.centerZ() - window.radius()) * 16.0f;
+        return new float[] {
+                EmitterFrameState.camX() - originX,
+                EmitterFrameState.camY() - originY,
+                EmitterFrameState.camZ() - originZ,
+        };
+    }
+
     private static void ensureAtlasImage(VulkanDevice device) {
         GpuTexture atlasTexture = BlockAtlasView.texture();
         if (atlasTexture == null) {

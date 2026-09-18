@@ -251,6 +251,24 @@ final class RayQueryScene implements AutoCloseable {
      * Traces into a hit buffer whose records may already be answered, leaving those alone. This is
      * the discipline the cascade rests on: a lower tier must not overwrite a higher one's answer.
      */
+    /**
+     * Traces with a caller frame offset, as a tier does for a ray-query pass: the caller writes
+     * camera-relative origins and the kernel adds the camera's place in the structure's own frame.
+     */
+    Hit[] traceRebased(float[] requests, int rayCount, float offsetX, float offsetY, float offsetZ) {
+        long requestBuffer = MetalRtAcceleration.createBuffer(device, RayQueryAbi.requestByteSize(rayCount));
+        long hitBuffer = MetalRtAcceleration.createBuffer(device, RayQueryAbi.hitByteSize(rayCount));
+        try {
+            writeFloats(requestBuffer, requests);
+            dispatch(requestBuffer, hitBuffer, rayCount, 1, RayQueryAbi.ABI_VERSION, false,
+                    offsetX, offsetY, offsetZ);
+            return readHits(hitBuffer, rayCount);
+        } finally {
+            Objc.msgSendVoid(hitBuffer, Objc.selector("release"));
+            Objc.msgSendVoid(requestBuffer, Objc.selector("release"));
+        }
+    }
+
     Hit[] fill(float[] requests, int rayCount, int[] seedTiers) {
         long requestBuffer = MetalRtAcceleration.createBuffer(device, RayQueryAbi.requestByteSize(rayCount));
         long hitBuffer = MetalRtAcceleration.createBuffer(device, RayQueryAbi.hitByteSize(rayCount));
@@ -318,11 +336,16 @@ final class RayQueryScene implements AutoCloseable {
 
     private void dispatch(long requestBuffer, long hitBuffer, int rayCount, int iterations,
             int abiVersion) {
-        dispatch(requestBuffer, hitBuffer, rayCount, iterations, abiVersion, false);
+        dispatch(requestBuffer, hitBuffer, rayCount, iterations, abiVersion, false, 0f, 0f, 0f);
     }
 
     private void dispatch(long requestBuffer, long hitBuffer, int rayCount, int iterations,
             int abiVersion, boolean fillMode) {
+        dispatch(requestBuffer, hitBuffer, rayCount, iterations, abiVersion, fillMode, 0f, 0f, 0f);
+    }
+
+    private void dispatch(long requestBuffer, long hitBuffer, int rayCount, int iterations,
+            int abiVersion, boolean fillMode, float offsetX, float offsetY, float offsetZ) {
         long cb = Objc.msgSendId(queue, Objc.selector("commandBuffer"));
         long encoder = Objc.msgSendId(cb, Objc.selector("computeCommandEncoder"));
         Objc.msgSendVoid(encoder, Objc.selector("setComputePipelineState:"), rayQuery.pipeline());
@@ -332,10 +355,12 @@ final class RayQueryScene implements AutoCloseable {
         Objc.msgSendVoidIdLong(encoder, Objc.selector("setAccelerationStructure:atBufferIndex:"),
                 instanceStructure, 1L);
 
-        long constants = MetalRtAcceleration.createBuffer(device, 16L);
+        // Sized to the whole struct. A short constants buffer reads whatever follows it for the
+        // origin offset, and a page that happens to be zero looks like a working trace.
+        long constants = MetalRtAcceleration.createBuffer(device, 32L);
         try {
             long ptr = Objc.msgSendId(constants, Objc.selector("contents"));
-            MemorySegment seg = MemorySegment.ofAddress(ptr).reinterpret(16L);
+            MemorySegment seg = MemorySegment.ofAddress(ptr).reinterpret(32L);
             seg.set(ValueLayout.JAVA_INT, 0L, abiVersion);
             seg.set(ValueLayout.JAVA_INT, 4L, rayCount);
             // This scene is the rt_expand brick-grid structure, so its answers are tier 2. The
@@ -343,6 +368,11 @@ final class RayQueryScene implements AutoCloseable {
             seg.set(ValueLayout.JAVA_INT, 8L, RayTier.HARDWARE_VOXEL.ordinal());
             // Fill mode off: this fixture owns its hit buffer and writes every record.
             seg.set(ValueLayout.JAVA_INT, 12L, fillMode ? 1 : 0);
+            // The camera in this structure's frame. Zero for a fixture whose rays are already in it.
+            seg.set(ValueLayout.JAVA_FLOAT, 16L, offsetX);
+            seg.set(ValueLayout.JAVA_FLOAT, 20L, offsetY);
+            seg.set(ValueLayout.JAVA_FLOAT, 24L, offsetZ);
+            seg.set(ValueLayout.JAVA_INT, 28L, 0);
             Objc.msgSendVoidIdLongLong(encoder, Objc.selector("setBuffer:offset:atIndex:"), constants, 0L, 0L);
             Objc.msgSendVoidIdLongLong(encoder, Objc.selector("setBuffer:offset:atIndex:"), requestBuffer, 0L, 2L);
             Objc.msgSendVoidIdLongLong(encoder, Objc.selector("setBuffer:offset:atIndex:"), hitBuffer, 0L, 3L);

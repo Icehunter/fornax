@@ -39,10 +39,14 @@ public final class VoxelMetalProvider implements RayProvider {
         return RayTier.HARDWARE_VOXEL;
     }
 
-    /** Visibility only, the same as the mesh tier: closest hit needs the buffer-form query. */
+    /**
+     * Both kinds. The kernel commits the nearest intersection and reads back its distance, flags,
+     * surface word, atlas UV and normal, which is what closest hit means; a visibility caller reads
+     * the same record and ignores the rest.
+     */
     @Override
     public boolean answers(RayQueryKind kind) {
-        return kind == RayQueryKind.VISIBILITY;
+        return kind != null;
     }
 
     /**
@@ -133,8 +137,10 @@ public final class VoxelMetalProvider implements RayProvider {
         if (rayQueries == null) {
             rayQueries = new RayQueryInterop();
         }
+        float[] camera = MetalRtShadowPass.cameraInWindowFrame();
         rayQueries.answer(query, tier().ordinal(), structure,
-                MetalRtAcceleration.residentResources(), MetalRtShadowPass.atlasTexture());
+                MetalRtAcceleration.residentResources(), MetalRtShadowPass.atlasTexture(),
+                camera[0], camera[1], camera[2]);
     }
 
     @Override

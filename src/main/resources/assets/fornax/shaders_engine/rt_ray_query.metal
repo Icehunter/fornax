@@ -27,6 +27,13 @@ struct RayQueryConstants {
     // read each record's tier first and leave answered ones alone. Zero: this dispatch owns the
     // buffer and writes every record, which is what a benchmark and a single-tier caller want.
     uint fillMode;
+    // The caller's origin is camera-relative. Each structure is built in a frame of its own, the
+    // mesh tier's rebased onto a coarse grid and the voxel tier's onto its window's first section,
+    // and a caller has no way to know either. This is the camera in that frame, so adding it puts
+    // a camera-relative ray where the geometry is. packed_float3 for the same reason RayHit uses
+    // one: a float3 member carries 16 bytes of size and would move the pad.
+    packed_float3 originOffset;
+    uint pad;
 };
 
 // Mirrors RayQueryAbi's word table: one float, three uints, the normal, then the tier. The normal
@@ -115,7 +122,7 @@ kernel void rt_ray_query(
     }
 
     ray r;
-    r.origin = originAndMin.xyz;
+    r.origin = originAndMin.xyz + constants.originOffset;
     r.min_distance = originAndMin.w;
     r.direction = direction * rsqrt(lengthSquared);
     r.max_distance = directionAndMax.w;

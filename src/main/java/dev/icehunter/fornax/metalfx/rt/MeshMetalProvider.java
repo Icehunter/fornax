@@ -76,6 +76,9 @@ public final class MeshMetalProvider implements RayProvider {
      */
     private long debugTlas;
     private float debugOriginX, debugOriginY, debugOriginZ;
+    /** The camera in the grid-rebased frame the structure is built in. A ray-query caller's origin
+     * is camera-relative, so this is what puts it where the geometry is. */
+    private float structureCameraX, structureCameraY, structureCameraZ;
     /**
      * The shared event value this tier's Metal work signals once its structures are built and its
      * own trace is done. Anything else that reads those structures has to wait for it: they are
@@ -102,13 +105,13 @@ public final class MeshMetalProvider implements RayProvider {
     }
 
     /**
-     * Visibility only. A shadow needs "blocked, and how far along the ray", which is what this
-     * traversal produces. Closest-hit needs the atlas UV path the buffer-form query carries, and
-     * this provider does not serve it yet.
+     * Both kinds. The kernel commits the nearest intersection and reads back its distance, flags,
+     * surface word, atlas UV and normal, which is what closest hit means; a visibility caller reads
+     * the same record and ignores the rest.
      */
     @Override
     public boolean answers(RayQueryKind kind) {
-        return kind == RayQueryKind.VISIBILITY;
+        return kind != null;
     }
 
     /**
@@ -165,7 +168,8 @@ public final class MeshMetalProvider implements RayProvider {
             rayQueries = new RayQueryInterop();
         }
         rayQueries.answer(query, tier().ordinal(), debugTlas, residentResources(),
-                atlas != null ? atlas.mtlTexture : 0L);
+                atlas != null ? atlas.mtlTexture : 0L,
+                structureCameraX, structureCameraY, structureCameraZ);
     }
 
     @Override
@@ -306,6 +310,9 @@ public final class MeshMetalProvider implements RayProvider {
                         Math.toIntExact(source.range.vertexCount()), (float) ((long) key.x() * 16 - ox), (float) ((long) key.y() * 16 - oy), (float) ((long) key.z() * 16 - oz)));
             }
             phase = record("RT mesh instances CPU", phase);
+            structureCameraX = (float) (x - ox);
+            structureCameraY = (float) (y - oy);
+            structureCameraZ = (float) (z - oz);
             debugOriginX = (float) ox;
             debugOriginY = (float) oy;
             debugOriginZ = (float) oz;

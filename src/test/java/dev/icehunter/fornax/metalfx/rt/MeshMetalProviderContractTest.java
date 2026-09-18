@@ -30,14 +30,23 @@ class MeshMetalProviderContractTest {
         return Files.readString(SOURCE.resolve(path));
     }
 
+    /**
+     * Both kinds, at the mesh tier.
+     *
+     * <ul>
+     *   <li>The kernel commits the nearest intersection and reads back its distance, flags,
+     *       surface word, atlas UV and normal. That is closest hit.
+     *   <li>A tier that declines a kind it can answer is skipped by the router with nothing said,
+     *       and every record in the batch stays at tier zero: a pack reads an untraced buffer.
+     * </ul>
+     */
     @Test
-    void theProviderAnswersVisibilityAtTheMeshTierAndNotClosestHit() {
+    void theProviderAnswersBothQueryKindsAtTheMeshTier() {
         MeshMetalProvider provider = new MeshMetalProvider();
         assertEquals(RayTier.HARDWARE_MESH, provider.tier());
         assertTrue(provider.answers(RayQueryKind.VISIBILITY));
-        assertFalse(provider.answers(RayQueryKind.CLOSEST_HIT),
-                "closest hit needs the atlas UV path the buffer query carries; claiming it would "
-                        + "make the router skip a lower tier that could actually answer");
+        assertTrue(provider.answers(RayQueryKind.CLOSEST_HIT),
+                "the buffer query IS the atlas UV path, so a bounce can be answered here");
     }
 
     /**

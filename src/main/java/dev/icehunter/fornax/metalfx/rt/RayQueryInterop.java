@@ -55,7 +55,8 @@ public final class RayQueryInterop implements AutoCloseable {
      * @return false when the batch could not be answered at all, so the caller leaves the records
      *         for a lower tier rather than reporting a failure
      */
-    boolean answer(BufferQuery query, int tier, long structure, List<Long> resident, long atlas) {
+    boolean answer(BufferQuery query, int tier, long structure, List<Long> resident, long atlas,
+            float cameraInStructureX, float cameraInStructureY, float cameraInStructureZ) {
         VulkanDevice device = VulkanMetalInterop.vulkanDevice();
         if (device == null || structure == 0 || query.rayCount() <= 0) {
             return false;
@@ -103,17 +104,21 @@ public final class RayQueryInterop implements AutoCloseable {
                 throw new IllegalStateException("Metal compute encoder nil (ray query)");
             }
             try (Arena arena = Arena.ofConfined()) {
-                MemorySegment constants = arena.allocate(16L);
+                MemorySegment constants = arena.allocate(32L);
                 constants.set(ValueLayout.JAVA_INT, 0L, RayQueryAbi.ABI_VERSION);
                 constants.set(ValueLayout.JAVA_INT, 4L, query.rayCount());
                 constants.set(ValueLayout.JAVA_INT, 8L, tier);
                 // Fill mode: this batch may already carry a higher tier's answers.
                 constants.set(ValueLayout.JAVA_INT, 12L, 1);
+                constants.set(ValueLayout.JAVA_FLOAT, 16L, cameraInStructureX);
+                constants.set(ValueLayout.JAVA_FLOAT, 20L, cameraInStructureY);
+                constants.set(ValueLayout.JAVA_FLOAT, 24L, cameraInStructureZ);
+                constants.set(ValueLayout.JAVA_INT, 28L, 0);
                 Objc.msgSendVoid(computeEncoder, Objc.selector("setComputePipelineState:"), kernel.pipeline());
                 Objc.msgSendVoidIdLong(computeEncoder,
                         Objc.selector("setAccelerationStructure:atBufferIndex:"), structure, 1L);
                 Objc.msgSendVoidIdLongLong(computeEncoder, Objc.selector("setBytes:length:atIndex:"),
-                        constants.address(), 16L, 0L);
+                        constants.address(), 32L, 0L);
                 Objc.msgSendVoidIdLongLong(computeEncoder, Objc.selector("setBuffer:offset:atIndex:"),
                         requests.mtlBuffer(), 0L, 2L);
                 Objc.msgSendVoidIdLongLong(computeEncoder, Objc.selector("setBuffer:offset:atIndex:"),

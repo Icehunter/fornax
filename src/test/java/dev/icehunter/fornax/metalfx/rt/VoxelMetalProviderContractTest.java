@@ -62,12 +62,13 @@ class VoxelMetalProviderContractTest {
                 "a pack with no ray_query pass would keep tracing for one that had one");
     }
 
+    /** Both kinds: the kernel commits the nearest hit and carries its surface fields back. */
     @Test
-    void theProviderAnswersVisibilityAtTheVoxelTier() {
+    void theProviderAnswersBothQueryKindsAtTheVoxelTier() {
         VoxelMetalProvider provider = new VoxelMetalProvider();
         assertEquals(RayTier.HARDWARE_VOXEL, provider.tier());
         assertTrue(provider.answers(RayQueryKind.VISIBILITY));
-        assertFalse(provider.answers(RayQueryKind.CLOSEST_HIT));
+        assertTrue(provider.answers(RayQueryKind.CLOSEST_HIT));
     }
 
     /**
