@@ -104,9 +104,9 @@ class PlaguePackLoadsTest {
                         "WATER_SCATTERING_QUALITY must be declared"));
 
         assertEquals("Underwater Light Shafts", option.label());
-        assertEquals("1", option.defaultValue(), "Balanced must be the shipped default");
+        assertEquals("1", option.defaultValue(), "High must be the shipped default");
         assertEquals(List.of("0", "1", "2"), option.allowedValues());
-        assertEquals(Map.of("0", "Off", "1", "Balanced", "2", "High"),
+        assertEquals(Map.of("0", "Off", "1", "High", "2", "Epic"),
                 option.enumNames(),
                 "the settings UI must render words instead of exposing GLSL integer values");
     }
@@ -528,14 +528,14 @@ class PlaguePackLoadsTest {
     // spanning both repos is the only place the two are visible at once.
 
     /**
-     * "Fast" reflections must actually be faster than "Fancy", and faster by RESOLUTION.
+     * The cheaper reflection tier must actually be cheaper, and cheaper by RESOLUTION.
      *
      * <p>This pins a defect the pack shipped with for its whole life: {@code SSR_QUALITY} was declared
-     * {@code {0="Off" 1="Fancy" 2="Fast"}} while every reflection pass was gated on
+     * {@code {0="Off" 1="High" 2="Epic"}} while every reflection pass was gated on
      * {@code SSR_QUALITY != 0}, so both non-zero values ran the identical full-resolution chain. The
      * setting was in the menu, it applied cleanly, it triggered a graph rebuild, and it changed
      * nothing at all. That is the worst shape a defect can take -- there is no error, no artifact and
-     * no log line, only a user wondering why the fast option is not fast -- and it is exactly the
+     * no log line, only a user wondering why the cheaper option is not cheaper, and it is exactly the
      * class this suite exists to pin.
      *
      * <p>Asserting merely that the two option values enable different PASS NAMES would re-admit the
@@ -545,48 +545,48 @@ class PlaguePackLoadsTest {
      * future rename cannot quietly satisfy it.
      */
     @Test
-    void fastReflectionsRunAtALowerResolutionThanFancy() {
+    void theCheaperReflectionTierRunsAtALowerResolution() {
         Path root = locatePlague();
         assumeTrue(root != null, "Plague pack not present next to this checkout -- skipping");
 
         PackModel pack = PackDiscovery.loadFrom(root, 1920, 1080);
         assumeTrue(pack.options().containsKey("SSR_QUALITY"), "Plague declares no SSR_QUALITY -- skipping");
 
-        Set<String> fancyPasses = enabledPassNames(pack, 1);
-        Set<String> fastPasses = enabledPassNames(pack, 2);
-        assertNotEquals(fancyPasses, fastPasses,
-                "SSR_QUALITY 1 (Fancy) and 2 (Fast) enable the identical set of passes, so the Fast"
-                        + " setting does nothing -- it is a promise in the settings UI the pack does not"
+        Set<String> fastPasses = enabledPassNames(pack, 1);
+        Set<String> bestPasses = enabledPassNames(pack, 2);
+        assertNotEquals(fastPasses, bestPasses,
+                "SSR_QUALITY 1 (High) and 2 (Epic) enable the identical set of passes, so the High"
+                        + " setting does nothing: it is a promise in the settings UI the pack does not"
                         + " keep");
 
-        double fancyTrace = outputScaleOfEnabledPassUsing(pack, "shaders/post/ssr_trace.fsh", 1);
-        double fastTrace = outputScaleOfEnabledPassUsing(pack, "shaders/post/ssr_trace.fsh", 2);
-        assertEquals(1.0, fancyTrace, 1e-9, "Fancy must keep tracing at full resolution");
-        assertTrue(fastTrace < fancyTrace,
-                "Fast traces into a scale " + fastTrace + " target, the same size as Fancy's -- the"
+        double fastTrace = outputScaleOfEnabledPassUsing(pack, "shaders/post/ssr_trace.fsh", 1);
+        double bestTrace = outputScaleOfEnabledPassUsing(pack, "shaders/post/ssr_trace.fsh", 2);
+        assertEquals(1.0, bestTrace, 1e-9, "Epic must keep tracing at full resolution");
+        assertTrue(fastTrace < bestTrace,
+                "High traces into a scale " + fastTrace + " target, the same size as Epic's: the"
                         + " tier saves nothing");
 
-        double fancyBlur = outputScaleOfEnabledPassUsing(pack, "shaders/post/ssr_blur.fsh", 1);
-        double fastBlur = outputScaleOfEnabledPassUsing(pack, "shaders/post/ssr_blur.fsh", 2);
-        assertEquals(1.0, fancyBlur, 1e-9, "Fancy must keep blurring at full resolution");
-        assertTrue(fastBlur < fancyBlur,
+        double fastBlur = outputScaleOfEnabledPassUsing(pack, "shaders/post/ssr_blur.fsh", 1);
+        double bestBlur = outputScaleOfEnabledPassUsing(pack, "shaders/post/ssr_blur.fsh", 2);
+        assertEquals(1.0, bestBlur, 1e-9, "Epic must keep blurring at full resolution");
+        assertTrue(fastBlur < bestBlur,
                 "the blur was the most expensive pass in the pack (1.84 ms measured, against the"
-                        + " 1.12 ms trace that feeds it), so a Fast tier that halves the trace and"
+                        + " 1.12 ms trace that feeds it), so a High tier that halves the trace and"
                         + " leaves the blur at full resolution gives up most of its own saving");
 
         // The engine hands the Hi-Z level count to a trace pass by EXACT name equality
         // (GraphRunner.computeParams). A rename leaves u_Param2 at zero, which pins the tile-skip
         // clamp `min(level + 1, levelCount - 1)` at -1 and corrupts every ray, silently.
-        assertEquals(Set.of("ssr_trace_fancy"),
+        assertEquals(Set.of("ssr_trace_fast"),
                 enabledPassNamesUsing(pack, "shaders/post/ssr_trace.fsh", 1),
                 "the engine only supplies u_Param2 to a pass named exactly ssr_trace_fancy/_fast/_water");
-        assertEquals(Set.of("ssr_trace_fast"),
+        assertEquals(Set.of("ssr_trace_fancy"),
                 enabledPassNamesUsing(pack, "shaders/post/ssr_trace.fsh", 2),
                 "the engine only supplies u_Param2 to a pass named exactly ssr_trace_fancy/_fast/_water");
 
         // The resolve samples `ssr` every frame with no #ifdef, so it must stay ungated and full-size
         // whatever the tier does upstream -- gate-consistency refuses an ungated pass reading a gated
-        // target, and a half-size `ssr` would silently halve Fancy too.
+        // target, and a half-size `ssr` would silently halve Epic too.
         TargetSpec ssr = pack.graph().targets().get("ssr");
         assertNotNull(ssr, "the resolve's reflection input must exist");
         assertNull(ssr.enabledIf(), "`ssr` must stay ungated: the resolve reads it unconditionally");
