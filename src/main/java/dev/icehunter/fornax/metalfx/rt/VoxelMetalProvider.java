@@ -107,8 +107,8 @@ public final class VoxelMetalProvider implements RayProvider {
      * </ul>
      *
      * <p>Tracing nothing is not free: the fill runs on a command buffer taken mid-frame under the
-     * shared queue lock. With a zero radius on an M5 Pro that submit cost 15.3 ms of render-thread
-     * time per frame out of a 23.2 ms frame, behind a dispatch of 0.047 ms.
+     * shared queue lock, and that submit costs the render thread far more than the dispatch it
+     * carries.
      */
     static boolean tracesThisFrame(float radiusBlocks, boolean queryDemand, boolean sceneDebug) {
         return radiusBlocks > 0f || queryDemand || sceneDebug;

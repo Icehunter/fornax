@@ -33,11 +33,9 @@ class VoxelMetalProviderContractTest {
      * A trace with no reader is skipped, and each of the three readers keeps it.
      *
      * <ul>
-     *   <li>The cost of skipping nothing: on an M5 Pro with ray-traced shadows off in the pack,
-     *       the fill still took 15.3 ms of render-thread time per frame out of a 23.2 ms frame.
-     *       It runs on a command buffer taken mid-frame under the shared queue lock. The dispatch
-     *       behind that submit was 0.047 ms and the radius was zero, so none of it bought
-     *       anything.
+     *   <li>A fill with no reader is not free: it runs on a command buffer taken mid-frame
+     *       under the shared queue lock, and that submit costs the render thread far more than
+     *       the dispatch it carries.
      *   <li>Gating on the shadow reader alone hands a ray_query pass an unbuilt structure and a
      *       miss for every ray.
      *   <li>Gating it out of the scene debug views leaves the setting reading Voxel RT scene with

@@ -11,6 +11,7 @@ import dev.icehunter.fornax.metalfx.VulkanMetalInterop;
 import dev.icehunter.fornax.mixin.sodium.RenderSectionManagerAccessor;
 import dev.icehunter.fornax.pack.graph.GraphRunner;
 import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
+import dev.icehunter.fornax.pipeline.VulkanPartialFlush;
 import dev.icehunter.fornax.pass.shadow.ShadowCasterLists;
 import dev.icehunter.fornax.pipeline.TerrainMeshRevision;
 import dev.icehunter.fornax.rt.CelestialFill;
@@ -208,6 +209,7 @@ public final class MeshMetalProvider implements RayProvider {
             // Metadata and arena handles are read together on the owning render thread, after this
             // frame's accepted uploads. A failed validation must not leave holes in raster coverage.
             Matrix4f light = new Matrix4f().set(request.lightVp());
+            long phase = System.nanoTime();
             List<Source> sources = snapshot(manager, x, y, z, light);
             if (sources == null || sources.isEmpty()) {
                 TerrainShadowResult.invalidate();
@@ -215,6 +217,7 @@ public final class MeshMetalProvider implements RayProvider {
                 forgetDebugScene();
                 return;
             }
+            phase = record("RT mesh snapshot CPU", phase);
             ensureImages(device, atlasSource, resolution);
             if (timeline == null) timeline = VulkanMetalInterop.createSharedTimeline(device);
             if (tracer == null) tracer = new MeshShadowTracer();
@@ -247,6 +250,8 @@ public final class MeshMetalProvider implements RayProvider {
                 }
             }
 
+            phase = record("RT mesh diff CPU", phase);
+
             GraphRunner.frameProfiler().recordValue("rt_shadow_dirty_meshes", dirty.size());
             var encoder = device.createCommandEncoder();
             long value = nextValue;
@@ -275,8 +280,13 @@ public final class MeshMetalProvider implements RayProvider {
                     VulkanMetalInterop.prepareInteropMetalWrite(cmd, stack, depth);
                 }
             });
+            phase = record("RT mesh record CPU", phase);
             encoder.signalSemaphore(timeline.vkSemaphore, value, VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
-            encoder.submit();
+            // The handoff is the timeline signal reaching Metal. A full submit also waits for
+            // resource retirement, which this path does not need: the wait before a mesh buffer is
+            // freed is on the shared timeline, not on an encoder fence.
+            ((VulkanPartialFlush) encoder).fornax$flushPending();
+            phase = record("RT mesh submit CPU", phase);
             lastValue = value;
             // Arena relocation/free does not know about the raw vkCmdCopyBuffer. Complete copies
             // before returning to the owning renderer, only on mesh-change frames, not every frame.
@@ -295,6 +305,7 @@ public final class MeshMetalProvider implements RayProvider {
                 meshes.add(new MeshShadowTracer.Mesh(key, source.revision, copy.buffer.mtlBuffer(),
                         Math.toIntExact(source.range.vertexCount()), (float) ((long) key.x() * 16 - ox), (float) ((long) key.y() * 16 - oy), (float) ((long) key.z() * 16 - oz)));
             }
+            phase = record("RT mesh instances CPU", phase);
             debugOriginX = (float) ox;
             debugOriginY = (float) oy;
             debugOriginZ = (float) oz;
@@ -302,6 +313,10 @@ public final class MeshMetalProvider implements RayProvider {
                     resolution, request.inverseLightVp(), request.lightVp(),
                     (float) (x - ox), (float) (y - oy), (float) (z - oz), radius,
                     request.bias(), request.filterGuardUv(), timeline.mtlSharedEvent, value, value + 1);
+            record("RT mesh trace CPU", phase);
+            // The Metal dispatch. Every other timer here measures the CPU that encodes it.
+            double traceGpu = tracer.lastGpuMillis();
+            if (!Double.isNaN(traceGpu)) GraphRunner.frameProfiler().record("RT mesh trace GPU", traceGpu);
             // No copy-back here. This image IS the cascade's image: the tier below fills the
             // texels this one left and publishes it once, so the frame pays one Vulkan submit for
             // both tiers instead of two each. Copying to TerrainShadowResult here and reading it
@@ -386,7 +401,9 @@ public final class MeshMetalProvider implements RayProvider {
         });
         long published = image.readyValue() + 1;
         encoder.signalSemaphore(timeline.vkSemaphore, published, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-        encoder.submit();
+        // Same handoff as the trace above, same reason: the reader is later on the graphics queue,
+        // which a partial flush keeps in order, and the retirement wait is not part of the handoff.
+        ((VulkanPartialFlush) encoder).fornax$flushPending();
         lastValue = published;
         TerrainShadowResult.published();
         return true;
@@ -486,6 +503,26 @@ public final class MeshMetalProvider implements RayProvider {
                     VK13.VK_IMAGE_ASPECT_COLOR_BIT);
 
         }
+    }
+
+    /**
+     * Times one phase of the fill and hands back the clock for the next.
+     *
+     * <ul>
+     *   <li>snapshot: reading the caster set out of the renderer.
+     *   <li>diff: deciding which meshes changed.
+     *   <li>record and submit: the Vulkan command buffer, which carries a full atlas copy.
+     *   <li>instances: building the per-mesh list the tracer takes.
+     *   <li>trace: the Metal encode and dispatch.
+     * </ul>
+     *
+     * <p>One span cannot say which phase a cost belongs to.
+     */
+    private static long record(String label, long from) {
+        long at = System.nanoTime();
+        // System.nanoTime reports nanoseconds; the profiler takes milliseconds.
+        GraphRunner.frameProfiler().record(label, (at - from) * 1e-6);
+        return at;
     }
 
     /** Measures only mesh-change waits; teardown and resize waits keep their existing path. */
