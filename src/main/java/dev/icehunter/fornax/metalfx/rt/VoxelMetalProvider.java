@@ -2,12 +2,14 @@ package dev.icehunter.fornax.metalfx.rt;
 
 import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.config.RayTracingMode;
+import dev.icehunter.fornax.config.RtDebugMode;
 import dev.icehunter.fornax.pipeline.GBuffer;
 import dev.icehunter.fornax.rt.BufferQuery;
 import dev.icehunter.fornax.rt.CelestialFill;
 import dev.icehunter.fornax.rt.RayProvider;
 import dev.icehunter.fornax.rt.RayQueryKind;
 import dev.icehunter.fornax.rt.RayReadiness;
+import dev.icehunter.fornax.rt.RayRouter;
 import dev.icehunter.fornax.rt.RayTier;
 
 /**
@@ -83,7 +85,33 @@ public final class VoxelMetalProvider implements RayProvider {
      */
     @Override
     public void fillCelestialVisibility(CelestialFill request) {
-        MetalRtShadowPass.runIfEnabled(screen, FornaxConfig.get().rayTracing != RayTracingMode.OFF, request);
+        boolean wanted = FornaxConfig.get().rayTracing != RayTracingMode.OFF
+                && tracesThisFrame(request.radiusBlocks(), RayRouter.queryDemand(),
+                        FornaxConfig.get().rtDebugMode != RtDebugMode.OFF);
+        // Standing down calls the same method instead of returning early: that path also marks
+        // the geometry inactive and drops the old mask. An early return would leave a pack that
+        // turned ray-traced shadows off mid-session still streaming its window.
+        MetalRtShadowPass.runIfEnabled(screen, wanted, wanted ? request : null);
+    }
+
+    /**
+     * Whether a trace this frame has a reader. Three things count as one:
+     *
+     * <ul>
+     *   <li>A radius above zero. {@link
+     *       dev.icehunter.fornax.pack.graph.GraphRunner#rayTracedShadowDistanceBlocks()} returns
+     *       zero when no enabled pass reads the cascade image, and the mesh tier reads it the
+     *       same way.
+     *   <li>A buffer-form query, which answers against structures this fill builds.
+     *   <li>A scene debug view, which has no other route to a traced picture.
+     * </ul>
+     *
+     * <p>Tracing nothing is not free: the fill runs on a command buffer taken mid-frame under the
+     * shared queue lock. With a zero radius on an M5 Pro that submit cost 15.3 ms of render-thread
+     * time per frame out of a 23.2 ms frame, behind a dispatch of 0.047 ms.
+     */
+    static boolean tracesThisFrame(float radiusBlocks, boolean queryDemand, boolean sceneDebug) {
+        return radiusBlocks > 0f || queryDemand || sceneDebug;
     }
 
     @Override

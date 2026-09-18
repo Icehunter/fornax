@@ -29,6 +29,41 @@ class VoxelMetalProviderContractTest {
         return Files.readString(SOURCE.resolve(path));
     }
 
+    /**
+     * A trace with no reader is skipped, and each of the three readers keeps it.
+     *
+     * <ul>
+     *   <li>The cost of skipping nothing: on an M5 Pro with ray-traced shadows off in the pack,
+     *       the fill still took 15.3 ms of render-thread time per frame out of a 23.2 ms frame.
+     *       It runs on a command buffer taken mid-frame under the shared queue lock. The dispatch
+     *       behind that submit was 0.047 ms and the radius was zero, so none of it bought
+     *       anything.
+     *   <li>Gating on the shadow reader alone hands a ray_query pass an unbuilt structure and a
+     *       miss for every ray.
+     *   <li>Gating it out of the scene debug views leaves the setting reading Voxel RT scene with
+     *       a screen that never changes.
+     * </ul>
+     */
+    @Test
+    void aFillWithNoReaderIsSkippedAndEveryReaderKeepsIt() {
+        assertFalse(VoxelMetalProvider.tracesThisFrame(0f, false, false),
+                "a zero radius with no query pass and no scene debug has no reader at all");
+        assertTrue(VoxelMetalProvider.tracesThisFrame(16f, false, false), "a subscribed pack reads it");
+        assertTrue(VoxelMetalProvider.tracesThisFrame(0f, true, false), "a ray_query pass reads it");
+        assertTrue(VoxelMetalProvider.tracesThisFrame(0f, false, true), "a scene debug view reads it");
+    }
+
+    /** A pack swap must not leave the previous pack's query demand standing. */
+    @Test
+    void installingProvidersClearsTheQueryDemand() {
+        dev.icehunter.fornax.rt.RayRouter.install(java.util.List.of());
+        dev.icehunter.fornax.rt.RayRouter.setQueryDemand(true);
+        assertTrue(dev.icehunter.fornax.rt.RayRouter.queryDemand());
+        dev.icehunter.fornax.rt.RayRouter.install(java.util.List.of());
+        assertFalse(dev.icehunter.fornax.rt.RayRouter.queryDemand(),
+                "a pack with no ray_query pass would keep tracing for one that had one");
+    }
+
     @Test
     void theProviderAnswersVisibilityAtTheVoxelTier() {
         VoxelMetalProvider provider = new VoxelMetalProvider();

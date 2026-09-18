@@ -43,6 +43,18 @@ public final class RayRouter {
             Comparator.comparingInt((RayProvider provider) -> provider.tier().ordinal()).reversed();
 
     private static List<RayProvider> providers = List.of();
+
+    /**
+     * Whether any pass in the active pack asks buffer-form queries.
+     *
+     * <ul>
+     *   <li>A tier answers those against structures its celestial fill built earlier in the frame,
+     *       so a fill skipped for want of a shadow reader leaves a query pass with no structure
+     *       and no error.
+     *   <li>{@link #install} clears it, so a pack swap cannot leave the old pack's demand standing.
+     * </ul>
+     */
+    private static boolean queryDemand;
     private static final EnumSet<RayTier> failed = EnumSet.noneOf(RayTier.class);
     private static final EnumSet<RayTier> readyThisFrame = EnumSet.noneOf(RayTier.class);
     private static final Map<RayTier, String> lastReason = new EnumMap<>(RayTier.class);
@@ -63,7 +75,17 @@ public final class RayRouter {
      *                               tier is what a pack compares and a duplicate makes the answer
      *                               depend on list order
      */
+    /** Declares what the active pack asks for. Call after {@link #install}. */
+    public static void setQueryDemand(boolean value) {
+        queryDemand = value;
+    }
+
+    public static boolean queryDemand() {
+        return queryDemand;
+    }
+
     public static void install(List<RayProvider> installed) {
+        queryDemand = false;
         Objects.requireNonNull(installed, "providers");
         List<RayProvider> next = new ArrayList<>(installed);
         Map<RayTier, RayProvider> byTier = new EnumMap<>(RayTier.class);

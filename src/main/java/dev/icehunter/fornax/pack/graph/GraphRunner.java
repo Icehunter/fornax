@@ -788,6 +788,8 @@ public final class GraphRunner {
             rayProviders.add(new dev.icehunter.fornax.metalfx.rt.VoxelMetalProvider());
         }
         RayRouter.install(rayProviders);
+        RayRouter.setQueryDemand(pack.graph().passes().stream()
+                .anyMatch(p -> p.type() == dev.icehunter.fornax.pack.PassType.RAY_QUERY));
         computeGraphicsConflicts = ComputeGraphicsWaits.compile(pack.graph().passes());
         // Deferred geometry variants embed the OLD pack's program identifiers, so every one of them
         // is stale the moment the active pack changes. Nothing else clears them, and a stale variant
