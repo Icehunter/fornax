@@ -12,11 +12,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * One image, filled by both tiers, published once.
  *
- * <p>The shape this replaces had each tier copy the celestial image in and its own result back out:
- * four Vulkan submits a frame for two tiers. Measured on an M5 Pro, a mid-frame submit costs about
- * 2.3 ms of render-thread time and the one that waits on the Metal trace costs about 6.5, against
- * 0.03 ms for the acceleration structure rebuild and 0.55 for the dispatch encode. The copying, not
- * the ray tracing, was the cost.
+ * <p>One image, filled by both tiers and copied once. A tier that copies the image in and its own
+ * result back out costs two Vulkan submits, and a mid-frame submit costs the render thread far more
+ * than the structure rebuild and dispatch encode behind it. The copying, not the ray tracing, is
+ * the cost.
  */
 class CascadeHandoverContractTest {
 
@@ -69,14 +68,41 @@ class CascadeHandoverContractTest {
     }
 
     /**
+     * A tier delivers the shared image only on a frame it encoded against it.
+     *
+     * <ul>
+     *   <li>The copy waits on the delivering tier's own timeline. The wait that orders it behind
+     *       the tier above is encoded by the fill, so a frame with no fill has no such wait.
+     *   <li>Arming the delivery anyway copies the handed-over image while the tier above is still
+     *       writing it. The trace covers the map in threadgroups, so the reader gets this frame's
+     *       answers in the ones that finished and the last frame's in the rest: rectangles.
+     *   <li>The voxel tier has no structure until its window finishes harvesting, which a join, a
+     *       dimension change or a teleport all reach, while the mesh tier traces from chunk
+     *       meshes that are already up.
+     *   <li>Unarmed, the router walks to the tier above, whose own copy waits on the event that
+     *       orders it.
+     * </ul>
+     */
+    @Test
+    void aTierDeliversOnlyOnAFrameItEncodedAgainstTheSharedImage() throws IOException {
+        String pass = read("metalfx/rt/MetalRtShadowPass.java");
+        assertTrue(pass.contains("if (celestialFill && tracedThisFrame) {"),
+                "the delivery is armed only where the fill that carries the ordering wait ran");
+        int fill = pass.indexOf("encodeCelestialFill(cb, commandQueue, instanceStructure");
+        int guard = pass.lastIndexOf("if (tracedThisFrame) {", fill);
+        assertTrue(guard >= 0 && guard < fill,
+                "the fill, and the only wait on the tier above's event, stay under the same guard");
+    }
+
+    /**
      * Tracing and delivery sit at different frame points on purpose, and they want opposite ones.
      *
      * <p>The trace wants to be early, before the terrain draw, so the GPU has that whole draw to
      * finish it. The delivery wants to be late, just before a pack can read it, so its wait is on
      * work already done. Put the delivery next to the trace and the render thread blocks inside
-     * {@code vkQueueSubmit}: measured at 6 to 7.8 ms a frame, against 0.008 ms to record the same
-     * copy. Defer it a whole frame instead and the image is a frame behind the camera, which is
-     * visible as shadows shifting when the player moves.
+     * {@code vkQueueSubmit}, which costs far more than recording the same copy. Defer it a whole
+     * frame instead and the image is a frame behind the camera, which is visible as shadows
+     * shifting when the player moves.
      */
     @Test
     void theTraceAndTheDeliveryAreSeparateStepsAtDifferentFramePoints() throws IOException {
