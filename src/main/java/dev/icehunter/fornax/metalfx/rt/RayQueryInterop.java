@@ -4,6 +4,7 @@ import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
 import dev.icehunter.fornax.metalfx.VulkanMetalInterop;
 import dev.icehunter.fornax.metalfx.objc.Objc;
+import dev.icehunter.fornax.pipeline.VulkanPartialFlush;
 import dev.icehunter.fornax.rt.BufferQuery;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK13;
@@ -90,7 +91,9 @@ public final class RayQueryInterop implements AutoCloseable {
             }
         });
         encoder.signalSemaphore(timeline.vkSemaphore, value, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-        encoder.submit();
+        // The handoff is the timeline value reaching Metal. A full submit also waits for resource
+        // retirement, which this path does not need: the trace waits on the value, not a fence.
+        ((VulkanPartialFlush) encoder).fornax$flushPending();
 
         long pool = Objc.autoreleasePoolPush();
         try {
@@ -152,6 +155,10 @@ public final class RayQueryInterop implements AutoCloseable {
             }
         });
         encoder.signalSemaphore(timeline.vkSemaphore, value + 2, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+        // A full submit, unlike the two above. The pack reads these hits from a compute pass, and
+        // the compute queue is its own family here, so keeping the graphics queue in order is not
+        // enough to order the read behind this write. A partial flush leaves the reader seeing an
+        // untouched buffer, which reads back as no tier having answered.
         encoder.submit();
         lastValue = value + 2;
         return true;
@@ -179,7 +186,8 @@ public final class RayQueryInterop implements AutoCloseable {
                 barrier(cmd, stack, VK13.VK_ACCESS_TRANSFER_WRITE_BIT, VK13.VK_ACCESS_MEMORY_READ_BIT);
             }
         });
-        encoder.submit();
+        // The clear's own reader is the trace, later on the same queue.
+        ((VulkanPartialFlush) encoder).fornax$flushPending();
     }
 
     private void ensureBuffers(VulkanDevice device, long requestBytes, long hitBytes) {
