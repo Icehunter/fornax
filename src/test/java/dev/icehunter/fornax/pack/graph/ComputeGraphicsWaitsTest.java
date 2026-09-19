@@ -141,10 +141,14 @@ class ComputeGraphicsWaitsTest {
         int start = passes.indexOf(aerial), end = passes.indexOf(resolve);
         assertTrue(end > start);
         for (PassSpec intermediate : passes.subList(start + 1, end)) {
-            // A newly inserted compute stage keeps the existing conservative handoff boundary;
-            // only independent graphics filters can defer the aerial semaphore further.
-            assertEquals(intermediate.type() == PassType.COMPUTE,
-                    ComputeGraphicsWaits.conflicts(aerial, intermediate), intermediate.name());
+            // A newly inserted stage that does not draw keeps the existing conservative handoff
+            // boundary; only independent graphics filters can defer the aerial semaphore further.
+            // Ray query counts with compute here: both run off the graphics queue, so both hold the
+            // boundary where a filter would move it.
+            boolean offQueue = intermediate.type() == PassType.COMPUTE
+                    || intermediate.type() == PassType.RAY_QUERY;
+            assertEquals(offQueue, ComputeGraphicsWaits.conflicts(aerial, intermediate),
+                    intermediate.name());
         }
         assertTrue(ComputeGraphicsWaits.conflicts(aerial, resolve));
     }
