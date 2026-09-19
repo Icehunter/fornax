@@ -45,6 +45,11 @@ public final class VoxelFaceTexture {
 
     static SourceFaces resolveSources(BlockState state, VoxelShapeKind kind, int tint,
                                       MaterialSourceIndex index) {
+        // A fluid block has no model quad to read, so its own sprites answer instead.
+        var fluid = VoxelFluidFace.resolve(state);
+        if (fluid != null) {
+            return VoxelFluidFace.packSources(fluid, tint, index);
+        }
         var model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
         List<BlockStateModelPart> parts = new ArrayList<>();
         model.collectParts(RandomSource.create(0L), parts); // Match the existing palette model variant.
@@ -115,6 +120,8 @@ public final class VoxelFaceTexture {
     }
 
     static int[] resolve(BlockState state, VoxelShapeKind kind, int tint) {
+        var fluid = VoxelFluidFace.resolve(state);
+        if (fluid != null) return VoxelFluidFace.words(fluid, tint);
         if (kind != VoxelShapeKind.FULL) return new int[ENTRY_WORDS];
         var model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
         List<BlockStateModelPart> parts = new ArrayList<>();

@@ -8,8 +8,8 @@ import java.util.List;
  * face direction, never color, light amount, area, or whether a face shows. No per-cell objects
  * are kept. */
 public final class VoxelSourceEvidence {
-    public static final VoxelSourceEvidence UNAVAILABLE = new VoxelSourceEvidence(null, 0, 0, false, false);
-    public static final VoxelSourceEvidence EMPTY = new VoxelSourceEvidence(new int[]{0}, 0, 0, false, false);
+    public static final VoxelSourceEvidence UNAVAILABLE = new VoxelSourceEvidence(null, null, 0, 0, false, false);
+    public static final VoxelSourceEvidence EMPTY = new VoxelSourceEvidence(new int[]{0}, null, 0, 0, false, false);
     // Four raw vanilla emission bits, one non-empty bit, then four masks in direction-ID order.
     // Each mask needs six bits, one per direction. The direction layout fills 29 bits; bit 29
     // marks a known-zero source on its own.
@@ -20,12 +20,14 @@ public final class VoxelSourceEvidence {
     private static final int SUPPORTED_SHIFT = 5, AUTHORED_SHIFT = 11, MISSING_SHIFT = 17, UNKNOWN_SHIFT = 23;
     private static final int FACE_MASK = (1 << 6) - 1;
     private final int[] palette;
+    private final byte[] intrinsicOnly;
     private final int eligibleFaces, unsupportedFaces;
     private final boolean paletteOverflow, incompletePalette;
 
-    private VoxelSourceEvidence(int[] palette, int eligibleFaces, int unsupportedFaces,
-                                boolean paletteOverflow, boolean incompletePalette) {
+    private VoxelSourceEvidence(int[] palette, byte[] intrinsicOnly, int eligibleFaces,
+                                int unsupportedFaces, boolean paletteOverflow, boolean incompletePalette) {
         this.palette = palette;
+        this.intrinsicOnly = intrinsicOnly;
         this.eligibleFaces = eligibleFaces;
         this.unsupportedFaces = unsupportedFaces;
         this.paletteOverflow = paletteOverflow;
@@ -36,13 +38,23 @@ public final class VoxelSourceEvidence {
     public boolean paletteOverflow() { return this.paletteOverflow; }
     public boolean incompletePalette() { return this.incompletePalette; }
     public int paletteSize() { return available() ? this.palette.length : 0; }
-    public int paletteBytes() { return paletteSize() * Integer.BYTES; }
+    public int paletteBytes() {
+        return paletteSize() * Integer.BYTES + (this.intrinsicOnly == null ? 0 : this.intrinsicOnly.length);
+    }
     public boolean knownZeroSource(int entry) { return (word(entry) & NONEMPTY) == 0 || (word(entry) & KNOWN_ZERO_SOURCE) != 0; }
     public int intrinsicEmission(int entry) { return word(entry) & 15; }
     public int supportedMask(int entry) { return mask(word(entry), SUPPORTED_SHIFT); }
     public int authoredMask(int entry) { return mask(word(entry), AUTHORED_SHIFT); }
     public int missingMask(int entry) { return mask(word(entry), MISSING_SHIFT); }
     public int unknownMask(int entry) { return mask(word(entry), UNKNOWN_SHIFT); }
+    /** Full faces whose mapping is exact and whose only missing fact is that the sprite animates.
+     * Lava is the case: its texture plays frames, so the face reads as unknown, and a face that
+     * reads as unknown never becomes a source however brightly the block glows. Animation changes
+     * which frame shows, never how much of the face emits, so a proven cube's own light level still
+     * stands. */
+    public int intrinsicOnlyMask(int entry) {
+        return this.intrinsicOnly == null ? 0 : this.intrinsicOnly[entry] & FACE_MASK;
+    }
     public int eligibleFaces() { return this.eligibleFaces; }
     public int unsupportedFaces() { return this.unsupportedFaces; }
     int eligibleMask(int entry) { return eligibleMaskForWord(word(entry)); }
@@ -65,8 +77,10 @@ public final class VoxelSourceEvidence {
     /** Used only during diagnostic harvesting. Counts come from the harvester's own cell walk. */
     static final class Builder {
         private final int[] palette = new int[SectionHarvester.MAX_PALETTE_ENTRIES];
+        private final byte[] intrinsicOnly = new byte[SectionHarvester.MAX_PALETTE_ENTRIES];
         private int size, eligible, unsupported, nonemptyCells;
         private boolean missingEntry;
+        private boolean hasIntrinsicOnly;
 
         // Input comes from VoxelFaceTexture.packSources: invalid mappings carry UNSUPPORTED_GEOMETRY,
         // and cropped mappings carry CROPPED_UV; both are unknown.
@@ -86,6 +100,14 @@ public final class VoxelSourceEvidence {
                 if (summary.authoredCandidate()) word |= 1 << (AUTHORED_SHIFT + face);
                 if ((summary.flags() & MaterialSourceIndex.MISSING_MAP) != 0) word |= 1 << (MISSING_SHIFT + face);
                 if (summary.unknown()) word |= 1 << (UNKNOWN_SHIFT + face);
+                // packSources has already flagged unsupported geometry, crops and atlas pages, so
+                // a face left holding only ANIMATED is one whose mapping is otherwise proven.
+                if (intrinsic > 0 && (summary.flags() & MaterialSourceIndex.ANIMATED) != 0
+                        && (summary.flags() & ~(MaterialSourceIndex.ANIMATED
+                                | MaterialSourceIndex.MISSING_MAP)) == 0) {
+                    intrinsicOnly[size] |= (byte) (1 << face);
+                    hasIntrinsicOnly = true;
+                }
             }
             palette[size++] = word;
         }
@@ -101,6 +123,7 @@ public final class VoxelSourceEvidence {
         void copy(int entry) {
             if (entry < 0 || entry >= size) throw new IllegalArgumentException("missing source evidence entry");
             if (size == palette.length) throw new IllegalArgumentException("voxel source palette exceeds the index cap");
+            intrinsicOnly[size] = intrinsicOnly[entry];
             palette[size++] = palette[entry];
         }
 
@@ -121,8 +144,10 @@ public final class VoxelSourceEvidence {
 
         VoxelSourceEvidence finish(boolean overflow) {
             boolean rejected = overflow || missingEntry;
-            return new VoxelSourceEvidence(Arrays.copyOf(palette, size), rejected ? 0 : eligible,
-                    rejected ? nonemptyCells * 6 : unsupported, overflow, missingEntry);
+            return new VoxelSourceEvidence(Arrays.copyOf(palette, size),
+                    hasIntrinsicOnly ? Arrays.copyOf(intrinsicOnly, size) : null,
+                    rejected ? 0 : eligible, rejected ? nonemptyCells * 6 : unsupported,
+                    overflow, missingEntry);
         }
     }
 }
