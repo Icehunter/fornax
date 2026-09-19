@@ -41,7 +41,8 @@ class VoxelSourceWindowPublicationTest {
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
             // Explicit successful-transfer model; the empty registry performs no GPU upload.
             VoxelWindow.onSectionUploadCommitted(new BrickGridUpload.SlotUpload(slot,data,true,token));
-            assertEquals(1, VoxelSourceWindowTest.word(sourceWindow.preparePublication().bytes(),2));
+            // One cell, six runs: a row is one run of one face.
+            assertEquals(6, VoxelSourceWindowTest.word(sourceWindow.preparePublication().bytes(),2));
             assertEquals(slot*96+1, VoxelSourceWindowTest.word(sourceWindow.preparePublication().bytes(),VoxelSourceWindow.CELL_BASE + 3));
         }
         var replacement = VoxelEmitterPoolTest.result(7, 15);
@@ -55,7 +56,7 @@ class VoxelSourceWindowPublicationTest {
                     "an old successful-transfer callback cannot restore stale membership");
             VoxelWindow.onSectionUploadCommitted(new BrickGridUpload.SlotUpload(slot,replacement,true,replacementToken));
         }
-        assertEquals(1, VoxelSourceWindowTest.word(sourceWindow.preparePublication().bytes(), 2));
+        assertEquals(6, VoxelSourceWindowTest.word(sourceWindow.preparePublication().bytes(), 2));
         assertEquals(15, VoxelSourceWindowTest.word(sourceWindow.preparePublication().bytes(), VoxelSourceWindow.CELL_BASE));
         VoxelWindow.invalidateModelData();
         assertEquals(0, VoxelSourceWindowTest.word(sourceWindow.preparePublication().bytes(),2));

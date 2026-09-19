@@ -46,18 +46,20 @@ class VoxelSourceWindowTest {
         window.commit(9, VoxelEmitterPoolTest.result(7, 4095), token(40, -3, 15, 10, 12));
         window.commit(3, VoxelEmitterPoolTest.result(7, 0, 17), token(-30, 2, -4, 9, 11));
         var bytes = window.preparePublication().bytes();
-        assertEquals(3, word(bytes, 2));
-        assertEquals(0, word(bytes, 16 + 3 * 2)); assertEquals(2, word(bytes, 17 + 3 * 2));
-        assertEquals(2, word(bytes, 16 + 9 * 2)); assertEquals(1, word(bytes, 17 + 9 * 2));
+        // Six rows a cell, one run per face, and the cover walks faces before cells.
+        assertEquals(18, word(bytes, 2));
+        assertEquals(0, word(bytes, 16 + 3 * 2)); assertEquals(12, word(bytes, 17 + 3 * 2));
+        assertEquals(12, word(bytes, 16 + 9 * 2)); assertEquals(6, word(bytes, 17 + 9 * 2));
         assertEquals(-480, word(bytes, base(0))); assertEquals(32, word(bytes, base(0) + 1));
         assertEquals(-64, word(bytes, base(0) + 2));
         assertEquals(-479, word(bytes, base(1))); assertEquals(-63, word(bytes, base(1) + 2));
-        assertEquals(655, word(bytes, base(2))); assertEquals(-33, word(bytes, base(2) + 1));
-        assertEquals(255, word(bytes, base(2) + 2));
+        assertEquals(655, word(bytes, base(12))); assertEquals(-33, word(bytes, base(12) + 1));
+        assertEquals(255, word(bytes, base(12) + 2));
         assertEquals(3 * 96 + 1, word(bytes, base(0) + 3));
-        assertEquals(63 | (7 << 8) | (63 << 16), word(bytes, base(0) + 4));
+        // A row is one run, so its low bits hold that run's one face, not the entry's six.
+        assertEquals(1 | (7 << 8) | (63 << 16), word(bytes, base(0) + 4));
         assertEquals(9, word(bytes, base(0) + 5)); assertEquals(1, word(bytes, base(0) + 6));
-        assertEquals(0, word(bytes, base(0) + 7));
+        assertEquals(0, word(bytes, base(0) + 7), "face zero, one cell by one");
     }
 
     @Test void unchangedGeometryAndLightmapOnlyCommitsDoNotRescanOrRepublishMembership() {
@@ -74,43 +76,48 @@ class VoxelSourceWindowTest {
     }
 
     @Test void addingEarlierSortedSourcesAtCapacityNeverDisplacesAdmittedWorldIdentities() {
-        var window = new VoxelSourceWindow(2); window.reset(5, 7);
+        // Six, because two touching cells cover themselves in six runs and that fills it.
+        var window = new VoxelSourceWindow(6); window.reset(5, 7);
         window.commit(9, VoxelEmitterPoolTest.result(7, 1, 2), token(0, 0, 0, 9, 11));
         var first = window.preparePublication(); window.markPublished(first);
         window.commit(1, VoxelEmitterPoolTest.result(7, 0), token(-1, 0, 0, 10, 12));
         var full = window.preparePublication().bytes();
-        assertEquals(2, word(full, 2)); assertEquals(1, word(full, 8));
-        assertEquals(1, word(full, base(0))); assertEquals(2, word(full, base(1)));
+        // The two cells touch, so four of their faces pair into runs two cells wide and the two
+        // they press together are buried. Six runs, not twelve.
+        assertEquals(6, word(full, 2)); assertEquals(6, word(full, 8));
+        assertEquals(1, word(full, base(0))); assertEquals(2, word(full, base(5)));
         assertEquals(0, word(full, 17 + 1 * 2));
         window.invalidate(List.of(9));
         var refill = window.preparePublication().bytes();
-        assertEquals(1, word(refill, 2)); assertEquals(0, word(refill, 8));
+        assertEquals(6, word(refill, 2)); assertEquals(0, word(refill, 8));
         assertEquals(-16, word(refill, base(0)));
     }
 
     @Test void sourceAdditionsInsideOneSectionPreserveItsExistingAdmissions() {
+        // Cells with a gap between them, so each keeps its own runs and a third one added later
+        // cannot re-seat them. Touching cells merge, and a merged run is a different run.
         var window = new VoxelSourceWindow(2); window.reset(5, 7);
-        window.commit(3, VoxelEmitterPoolTest.result(7, 1, 2), token(0, 0, 0, 9, 11));
-        window.commit(3, VoxelEmitterPoolTest.result(7, 0, 1, 2), token(0, 0, 0, 10, 12));
+        window.commit(3, VoxelEmitterPoolTest.result(7, 1, 3), token(0, 0, 0, 9, 11));
+        window.commit(3, VoxelEmitterPoolTest.result(7, 1, 3, 5), token(0, 0, 0, 10, 12));
         var bytes = window.preparePublication().bytes();
-        assertEquals(1, word(bytes, 8));
-        assertEquals(1, word(bytes, base(0))); assertEquals(2, word(bytes, base(1)));
+        assertEquals(16, word(bytes, 8));
+        assertEquals(1, word(bytes, base(0))); assertEquals(3, word(bytes, base(1)));
     }
 
     @Test void pendingGeometryStopsPublishingOnlyThatSectionAndReservesItsAdmissions() {
-        var window = new VoxelSourceWindow(2); window.reset(5, 7);
+        var window = new VoxelSourceWindow(12); window.reset(5, 7);
         var original = VoxelEmitterPoolTest.result(7, 1);
         window.commit(3, original, token(0, 0, 0, 9, 11));
         window.commit(4, VoxelEmitterPoolTest.result(7, 2), token(1, 0, 0, 10, 12));
         window.pending(3);
         window.commit(1, VoxelEmitterPoolTest.result(7, 0), token(-1, 0, 0, 11, 13));
         var waiting = window.preparePublication().bytes();
-        assertEquals(1, word(waiting, 2)); assertEquals(1, word(waiting, 8));
+        assertEquals(6, word(waiting, 2)); assertEquals(6, word(waiting, 8));
         assertEquals(18, word(waiting, base(0)));
         window.commit(3, original, token(0, 0, 0, 12, 14));
         var restored = window.preparePublication().bytes();
-        assertEquals(2, word(restored, 2)); assertEquals(1, word(restored, 8));
-        assertEquals(1, word(restored, base(0))); assertEquals(18, word(restored, base(1)));
+        assertEquals(12, word(restored, 2)); assertEquals(6, word(restored, 8));
+        assertEquals(1, word(restored, base(0))); assertEquals(18, word(restored, base(6)));
     }
 
     @Test void unknownSectionDoesNotInvalidateAnIndependentKnownEmitter() {
@@ -120,7 +127,7 @@ class VoxelSourceWindowTest {
                 VoxelSourceEvidence.UNAVAILABLE);
         window.commit(4, unknown, token(1, 0, 0, 10, 12));
         var bytes = window.preparePublication().bytes();
-        assertEquals(2, word(bytes, 2)); assertEquals(4096, word(bytes, 9));
+        assertEquals(12, word(bytes, 2)); assertEquals(4096, word(bytes, 9));
         assertEquals(1, word(bytes, base(0) + 6));
         assertEquals(0, word(bytes, 17 + 4 * 2));
     }
@@ -149,7 +156,7 @@ class VoxelSourceWindowTest {
         }
         assertEquals(393216, chunks.getLast().offset()); assertEquals(25416, chunks.getLast().bytes().remaining());
         window.invalidate(List.of(3));
-        assertEquals(2, word(bytes, 2)); assertEquals(0, word(window.preparePublication().bytes(), 2));
+        assertEquals(12, word(bytes, 2)); assertEquals(0, word(window.preparePublication().bytes(), 2));
     }
 
     @Test void capacityAndSlotsRejectInvalidInputsBeforeWritingAnAbi() {

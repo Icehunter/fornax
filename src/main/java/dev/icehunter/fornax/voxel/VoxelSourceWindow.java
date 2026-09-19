@@ -2,8 +2,12 @@ package dev.icehunter.fornax.voxel;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.TreeMap;
 import org.jspecify.annotations.Nullable;
 
@@ -21,12 +25,21 @@ public final class VoxelSourceWindow {
     public static final int ABI_VERSION = 2, UNKNOWN_SOURCE = 1 << 6;
     public record Publication(long stateVersion, ByteBuffer bytes) { }
 
+    // Neighbour step per direction ID: down, up, north, south, west, east.
+    private static final int[] FACE_DX = {0, 0, 0, 0, -1, 1};
+    private static final int[] FACE_DY = {-1, 1, 0, 0, 0, 0};
+    private static final int[] FACE_DZ = {0, 0, -1, 1, 0, 0};
+
     private static final class Source {
         final SectionHarvester.Result result;
         final VoxelSectionState.Snapshot token;
-        final BitSet eligible = new BitSet();
+        /** One flat rectangle of touching faces each. A lone lamp face is a run of one cell. */
+        final List<VoxelFaceRuns.Run> runs;
         final BitSet admitted = new BitSet();
         final int[] facts;
+        /** Which of a cell's own six faces can reach the world. Per cell, not per palette entry:
+         * two blocks of the same kind sit in different places. */
+        final byte[] faces = new byte[CAPACITY];
         int unknown;
         boolean pending;
         Source(SectionHarvester.Result result, VoxelSectionState.Snapshot token) {
@@ -35,10 +48,61 @@ public final class VoxelSourceWindow {
             for (int cell = 0; cell < CAPACITY; cell++) {
                 int entry = result.paletteIndices()[cell] & 255;
                 int value = entry < facts.length ? facts[entry] : UNKNOWN_SOURCE;
+                int mask = value & 63;
+                if (mask != 0) mask &= exposedFaces(result, facts, cell);
+                faces[cell] = (byte) mask;
                 if ((value & UNKNOWN_SOURCE) != 0) unknown++;
-                else if ((value & 63) != 0) eligible.set(cell);
             }
+            runs = VoxelFaceRuns.cover(faces, result.paletteIndices(), fullFaces(result));
         }
+
+        /** Where a run sits and which way it faces, which is what names it across a recommit. */
+        int key(int run) {
+            VoxelFaceRuns.Run r = runs.get(run);
+            return r.cell() << 3 | r.face();
+        }
+    }
+
+    /** Per palette entry and face, whether that face fills its cell. A run that spans a cell
+     * before it reaches the next needs one: two torches side by side leave a gap, and a rectangle
+     * over both would light the gap. An entry with no box list fills its cell, which is what a
+     * cube and a fluid both do. */
+    private static boolean[][] fullFaces(SectionHarvester.Result result) {
+        var entries = result.palette().entries();
+        boolean[][] full = new boolean[entries.size()][6];
+        for (int entry = 0; entry < entries.size(); entry++) {
+            if (entries.get(entry).boxes().isEmpty()) Arrays.fill(full[entry], true);
+        }
+        return full;
+    }
+
+    /**
+     * The faces of one cell that are not buried.
+     *
+     * A face pressed against an opaque cube lights that cube's inside, which nothing can see. A
+     * face pressed against another face that emits back lights nothing either: the two shine into
+     * each other. Dropping both is what keeps a lava lake from being one light per cell, and it is
+     * what stops an ore in solid ground casting into the room next door.
+     *
+     * A neighbour outside this section is not read, so its face is kept. Sections are harvested on
+     * their own and reaching across one would make the answer depend on arrival order.
+     */
+    private static int exposedFaces(SectionHarvester.Result result, int[] facts, int cell) {
+        var entries = result.palette().entries();
+        int x = cell & 15, y = cell >> 8, z = (cell >> 4) & 15;
+        int mask = 63;
+        for (int face = 0; face < 6; face++) {
+            int nx = x + FACE_DX[face], ny = y + FACE_DY[face], nz = z + FACE_DZ[face];
+            if ((nx | ny | nz) < 0 || nx > 15 || ny > 15 || nz > 15) continue;
+            int neighbour = result.paletteIndices()[(ny << 8) | (nz << 4) | nx] & 255;
+            if (neighbour >= entries.size()) continue;
+            var entry = entries.get(neighbour);
+            // Glass is a full cube that light crosses, so a full shape alone does not bury a face.
+            boolean sealed = entry.shapeKind() == VoxelShapeKind.FULL && !entry.lightTransmissive();
+            boolean facing = neighbour < facts.length && (facts[neighbour] & 1 << (face ^ 1)) != 0;
+            if (sealed || facing) mask &= ~(1 << face);
+        }
+        return mask;
     }
     private final int capacity;
     private final TreeMap<Integer, Source> sources = new TreeMap<>();
@@ -72,8 +136,17 @@ public final class VoxelSourceWindow {
         if (previous != null) {
             admitted -= previous.admitted.cardinality();
             if (sameOwner(previous.token, token)) {
-                next.admitted.or(previous.admitted);
-                next.admitted.and(next.eligible);
+                // Run indices move when the cover changes, so a run is recognised by where it is
+                // and which way it faces. A lamp that was admitted stays admitted across a
+                // neighbouring block's edit rather than losing its place to another section.
+                Set<Integer> held = new HashSet<>();
+                for (int run = previous.admitted.nextSetBit(0); run >= 0;
+                        run = previous.admitted.nextSetBit(run + 1)) {
+                    held.add(previous.key(run));
+                }
+                for (int run = 0; run < next.runs.size(); run++) {
+                    if (held.contains(next.key(run))) next.admitted.set(run);
+                }
                 admitted += next.admitted.cardinality();
             }
         }
@@ -101,8 +174,8 @@ public final class VoxelSourceWindow {
         if (admitted == capacity) return;
         for (Source source : sources.values()) {
             if (source.pending) continue;
-            for (int cell = source.eligible.nextSetBit(0); cell >= 0; cell = source.eligible.nextSetBit(cell + 1)) {
-                if (!source.admitted.get(cell)) { source.admitted.set(cell); admitted++; }
+            for (int run = 0; run < source.runs.size(); run++) {
+                if (!source.admitted.get(run)) { source.admitted.set(run); admitted++; }
                 if (admitted == capacity) return;
             }
         }
@@ -120,10 +193,16 @@ public final class VoxelSourceWindow {
             int value = UNKNOWN_SOURCE;
             if (mappedPolicy && !policy.allows(entry)) value = 0;
             else if (mappedPolicy && available) {
-                value = evidence.eligibleMask(entry) | (evidence.intrinsicEmission(entry) << 8)
-                        | (evidence.missingMask(entry) << 16);
+                // A face whose only missing fact is animation counts as eligible, and stops
+                // counting as unknown. Bits 22 to 27 carry it on for a reader that wants to know
+                // which faces arrived that way; bits 16 to 21 are the missing-map mask below it.
+                int intrinsicOnly = evidence.intrinsicOnlyMask(entry);
+                int faces = evidence.eligibleMask(entry) | intrinsicOnly;
+                int unknown = evidence.unknownMask(entry) & ~intrinsicOnly;
+                value = faces | (evidence.intrinsicEmission(entry) << 8)
+                        | (evidence.missingMask(entry) << 16) | (intrinsicOnly << 22);
                 if (evidence.knownZeroSource(entry)) value = 0;
-                else if (evidence.unknownMask(entry) != 0) value |= UNKNOWN_SOURCE;
+                else if (unknown != 0) value |= UNKNOWN_SOURCE;
             }
             facts[entry] = value;
         }
@@ -131,10 +210,15 @@ public final class VoxelSourceWindow {
     }
 
     /** ABI2 header: version, capacity, count, storage, atlas low/high, publication low/high,
-     * deferred eligible cell count, unknown cell count, six reserved zeros. Section ranges start
-     * at word16 and contain (first row,count), indexed by the current toroidal slot. Cell rows
-     * start at CELL_BASE: absolute xyz, global palette entry, facts, geometry revision, valid, zero.
-     * Rows are grouped by slot; row indices can change while admitted world identities stay fixed. */
+     * deferred eligible run count, unknown cell count, six reserved zeros. Section ranges start
+     * at word16 and contain (first row,count), indexed by the current toroidal slot. Rows start at
+     * CELL_BASE: absolute origin xyz, global palette entry, facts, geometry revision, valid, and
+     * the run word. Rows are grouped by slot; row indices can change while admitted world
+     * identities stay fixed.
+     *
+     * <p>A row is one RUN, a flat rectangle of touching faces, not one cell. The run word holds the
+     * face direction in bits 0..2 and the two spans, each one less than the number of cells it
+     * covers, in bits 3..6 and 7..10. A lone lamp face is a run of one cell by one. */
     public @Nullable Publication preparePublication() {
         if (storageGeneration == 0) throw new IllegalStateException("source inventory has no storage generation");
         if (stateVersion == publishedVersion) return null;
@@ -148,27 +232,38 @@ public final class VoxelSourceWindow {
         for (var item : sources.entrySet()) {
             int slot = item.getKey(); Source source = item.getValue();
             if (source.pending) continue;
-            eligible += source.eligible.cardinality(); unknown += source.unknown;
+            eligible += source.runs.size(); unknown += source.unknown;
             int count = source.admitted.cardinality();
             if (count == 0) continue;
             put(bytes, HEADER_WORDS + slot * RANGE_WORDS, row);
             put(bytes, HEADER_WORDS + slot * RANGE_WORDS + 1, count);
-            for (int cell = source.admitted.nextSetBit(0); cell >= 0; cell = source.admitted.nextSetBit(cell + 1)) {
+            for (int index = source.admitted.nextSetBit(0); index >= 0;
+                    index = source.admitted.nextSetBit(index + 1)) {
+                VoxelFaceRuns.Run run = source.runs.get(index);
+                int cell = run.cell();
                 int base = CELL_BASE + row * CELL_WORDS;
                 int entry = source.result.paletteIndices()[cell] & 255;
                 put(bytes, base, source.token.x() * 16 + (cell & 15));
                 put(bytes, base + 1, source.token.y() * 16 + (cell >> 8));
                 put(bytes, base + 2, source.token.z() * 16 + ((cell >> 4) & 15));
                 put(bytes, base + 3, slot * SectionHarvester.MAX_PALETTE_ENTRIES + entry);
-                put(bytes, base + 4, source.facts[entry]);
+                // Only this run's own face survives in the low six bits; the facts above them,
+                // the block's light level and its missing-map mask, are the entry's and stay.
+                put(bytes, base + 4, source.facts[entry] & ~63 | 1 << run.face());
                 put(bytes, base + 5, source.token.geometryRevision());
                 put(bytes, base + 6, VoxelSectionState.COMMITTED);
+                put(bytes, base + 7, packRun(run));
                 row++;
             }
         }
         put(bytes, 2, row); put(bytes, 8, eligible - row); put(bytes, 9, unknown);
         pending = new Publication(stateVersion, bytes.asReadOnlyBuffer().order(ByteOrder.nativeOrder()));
         return pending;
+    }
+
+    /** Face in bits 0..2, then each span one less than its cell count, four bits each. */
+    public static int packRun(VoxelFaceRuns.Run run) {
+        return run.face() | (run.spanU() - 1) << 3 | (run.spanV() - 1) << 7;
     }
 
     public void markPublished(Publication publication) { publishedVersion = Math.max(publishedVersion, publication.stateVersion()); }

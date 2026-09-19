@@ -50,7 +50,8 @@ class VoxelSourcePolicyTest {
         assertNull(lookup.publish(window));
         lookup.data = withPolicy(lookup.data, new VoxelSourcePolicy(2, 0, 2, true));
         var selected = lookup.publish(window);
-        assertEquals(63 | (7 << 8) | (63 << 16), word(selected.bytes(), VoxelSourceWindow.CELL_BASE + 4));
+        // A row is one run, so its low bits hold that run's one face, not the entry's six.
+        assertEquals(1 | (7 << 8) | (63 << 16), word(selected.bytes(), VoxelSourceWindow.CELL_BASE + 4));
     }
 
     @Test void excludedUnsupportedGeometryIsKnownZeroButPaletteAliasingNeverClaimsExclusion() {
@@ -113,7 +114,8 @@ class VoxelSourcePolicyTest {
                 VoxelWindow.onSectionUploadCommitted(new BrickGridUpload.SlotUpload(slot, data, true, oldToken));
             }
             var oldWindow = (VoxelSourceWindow)windowField.get(null);
-            assertEquals(63 | (7 << 8) | (63 << 16), word(oldWindow.preparePublication().bytes(), VoxelSourceWindow.CELL_BASE + 4));
+            // A row is one run, so its low bits hold that run's one face, not the entry's six.
+        assertEquals(1 | (7 << 8) | (63 << 16), word(oldWindow.preparePublication().bytes(), VoxelSourceWindow.CELL_BASE + 4));
             // GraphRunner.closeCurrent() performs this detach before resolving the new manifest.
             VoxelWindow.attachRegistry(null);
             VoxelWindow.attachRegistry(newRegistry);

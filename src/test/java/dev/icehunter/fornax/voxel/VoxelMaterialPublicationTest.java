@@ -88,7 +88,8 @@ class VoxelMaterialPublicationTest {
         var original = VoxelEmitterPoolTest.result(7, 0);
         commit(original);
         var window = sourceWindow();
-        assertEquals(63 | (7 << 8) | (63 << 16), word(window.preparePublication().bytes(), VoxelSourceWindow.CELL_BASE + 4));
+        // A row is one run, so its low bits hold that run's one face, not the entry's six.
+        assertEquals(1 | (7 << 8) | (63 << 16), word(window.preparePublication().bytes(), VoxelSourceWindow.CELL_BASE + 4));
         VoxelHarvestLifecycle.publishMaterials(() -> {
             assertEquals(0, word(window.preparePublication().bytes(), 2));
         });
