@@ -37,7 +37,8 @@ class VoxelMeshUpdatesTest {
     private static VoxelMeshUpdates liveUpdates(ControlledExecutor executor,
                                                 BiFunction<Level, SectionPos, SectionHarvester.Result> reader) {
         return new VoxelMeshUpdates(executor,
-                (storage, harvest, level, section) -> VoxelWindow.harvestMeshRequest(storage, harvest, level, section, reader),
+                (storage, harvest, level, section, requestedAt) ->
+                        VoxelWindow.harvestMeshRequest(storage, harvest, level, section, reader, requestedAt),
                 (section, error) -> { throw new AssertionError("unexpected mesh reader failure", error); });
     }
 
@@ -50,10 +51,10 @@ class VoxelMeshUpdatesTest {
     void duplicateBurstBeforeTheReadRunsOnlyOnce() {
         var executor = new ControlledExecutor();
         var reads = new ArrayList<SectionPos>();
-        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section) -> reads.add(section),
+        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section, requestedAt) -> reads.add(section),
                 (section, error) -> { });
 
-        for (int i = 0; i < 1_000; i++) updates.request(1, 1, null, SECTION);
+        for (int i = 0; i < 1_000; i++) updates.request(1, 1, null, SECTION, 0L);
 
         assertEquals(1, executor.size(), "one queued request must represent a mesh burst for one section");
         executor.runAll();
@@ -64,12 +65,12 @@ class VoxelMeshUpdatesTest {
     void newestEditRunsBeforeAStartupBacklog() {
         var executor = new ControlledExecutor();
         var reads = new ArrayList<SectionPos>();
-        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section) -> reads.add(section),
+        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section, requestedAt) -> reads.add(section),
                 (section, error) -> { });
         SectionPos edited = SectionPos.of(0, 0, 0);
 
-        for (int x = 0; x < 15_000; x++) updates.request(1, 1, null, SectionPos.of(x, 0, 0));
-        updates.request(1, 1, null, edited);
+        for (int x = 0; x < 15_000; x++) updates.request(1, 1, null, SectionPos.of(x, 0, 0), 0L);
+        updates.request(1, 1, null, edited, 0L);
 
         assertEquals(1, executor.size(), "the entire backlog must be represented by one drain");
         executor.runNext();
@@ -81,14 +82,14 @@ class VoxelMeshUpdatesTest {
     void repeatingAPendingRequestPromotesItWithoutAddingADrain() {
         var executor = new ControlledExecutor();
         var reads = new ArrayList<SectionPos>();
-        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section) -> reads.add(section),
+        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section, requestedAt) -> reads.add(section),
                 (section, error) -> { });
         SectionPos first = SectionPos.of(1, 0, 0);
         SectionPos promoted = SectionPos.of(2, 0, 0);
 
-        updates.request(1, 1, null, first);
-        updates.request(1, 1, null, promoted);
-        updates.request(1, 1, null, promoted);
+        updates.request(1, 1, null, first, 0L);
+        updates.request(1, 1, null, promoted, 0L);
+        updates.request(1, 1, null, promoted, 0L);
 
         assertEquals(1, executor.size(), "repeating a pending section must not enqueue another drain");
         executor.runNext();
@@ -100,11 +101,11 @@ class VoxelMeshUpdatesTest {
         var resyncExecutor = new ControlledExecutor();
         var meshExecutor = new ControlledExecutor();
         var reads = new ArrayList<SectionPos>();
-        var updates = new VoxelMeshUpdates(meshExecutor, (storage, harvest, level, section) -> reads.add(section),
+        var updates = new VoxelMeshUpdates(meshExecutor, (storage, harvest, level, section, requestedAt) -> reads.add(section),
                 (section, error) -> { });
         resyncExecutor.execute(() -> { }); // a full-window tail is still waiting
 
-        updates.request(1, 1, null, SECTION);
+        updates.request(1, 1, null, SECTION, 0L);
         meshExecutor.runAll();
 
         assertEquals(List.of(SECTION), reads, "live edits need their own worker, not the backfill queue");
@@ -116,12 +117,12 @@ class VoxelMeshUpdatesTest {
         var executor = new ControlledExecutor();
         var reads = new ArrayList<SectionPos>();
         final VoxelMeshUpdates[] holder = new VoxelMeshUpdates[1];
-        holder[0] = new VoxelMeshUpdates(executor, (storage, harvest, level, section) -> {
+        holder[0] = new VoxelMeshUpdates(executor, (storage, harvest, level, section, requestedAt) -> {
             reads.add(section);
-            if (reads.size() == 1) holder[0].request(1, 1, null, section);
+            if (reads.size() == 1) holder[0].request(1, 1, null, section, 0L);
         }, (section, error) -> { });
 
-        holder[0].request(1, 1, null, SECTION);
+        holder[0].request(1, 1, null, SECTION, 0L);
         executor.runNext();
 
         assertEquals(List.of(SECTION, SECTION), reads,
@@ -136,15 +137,15 @@ class VoxelMeshUpdatesTest {
         SectionPos active = SectionPos.of(1, 0, 0);
         SectionPos older = SectionPos.of(2, 0, 0);
         final VoxelMeshUpdates[] holder = new VoxelMeshUpdates[1];
-        holder[0] = new VoxelMeshUpdates(executor, (storage, harvest, level, section) -> {
+        holder[0] = new VoxelMeshUpdates(executor, (storage, harvest, level, section, requestedAt) -> {
             reads.add(section);
             if (reads.size() == 1) {
-                holder[0].request(1, 1, null, older);
-                holder[0].request(1, 1, null, active);
+                holder[0].request(1, 1, null, older, 0L);
+                holder[0].request(1, 1, null, active, 0L);
             }
         }, (section, error) -> { });
 
-        holder[0].request(1, 1, null, active);
+        holder[0].request(1, 1, null, active, 0L);
         executor.runNext();
 
         assertEquals(List.of(active, active, older), reads,
@@ -155,11 +156,11 @@ class VoxelMeshUpdatesTest {
     void replacementGenerationForAPendingSectionSuppressesTheOldRequest() {
         var executor = new ControlledExecutor();
         var reads = new ArrayList<Long>();
-        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section) -> reads.add(storage),
+        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section, requestedAt) -> reads.add(storage),
                 (section, error) -> { });
 
-        updates.request(1, 1, null, SECTION);
-        updates.request(2, 2, null, SECTION);
+        updates.request(1, 1, null, SECTION, 0L);
+        updates.request(2, 2, null, SECTION, 0L);
         executor.runNext();
 
         assertEquals(List.of(2L), reads,
@@ -170,14 +171,14 @@ class VoxelMeshUpdatesTest {
     void resetOldJobCannotRemoveNewGenerationRequest() {
         var executor = new ControlledExecutor();
         var reads = new ArrayList<Long>();
-        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section) -> reads.add(storage),
+        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section, requestedAt) -> reads.add(storage),
                 (section, error) -> { });
 
-        updates.request(1, 1, null, SECTION);
+        updates.request(1, 1, null, SECTION, 0L);
         updates.reset();
-        updates.request(2, 2, null, SECTION);
+        updates.request(2, 2, null, SECTION, 0L);
         executor.runNext(); // the stale request completes after the reset
-        updates.request(2, 2, null, SECTION);
+        updates.request(2, 2, null, SECTION, 0L);
         assertEquals(1, executor.size(), "stale cleanup must not remove the replacement request");
         executor.runAll();
 
@@ -188,13 +189,13 @@ class VoxelMeshUpdatesTest {
     void failedReadReleasesTheSectionForLaterMeshUpdates() {
         var executor = new ControlledExecutor();
         var errors = new ArrayList<Throwable>();
-        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section) -> {
+        var updates = new VoxelMeshUpdates(executor, (storage, harvest, level, section, requestedAt) -> {
             throw new IllegalStateException("fixture failure");
         }, (section, error) -> errors.add(error));
 
-        updates.request(1, 1, null, SECTION);
+        updates.request(1, 1, null, SECTION, 0L);
         executor.runAll();
-        updates.request(1, 1, null, SECTION);
+        updates.request(1, 1, null, SECTION, 0L);
 
         assertEquals(1, errors.size(), "the error is reported rather than killing the only worker");
         assertEquals(1, executor.size(), "a later mesh update must not be poisoned by the failure");
@@ -292,6 +293,76 @@ class VoxelMeshUpdatesTest {
 
         assertFalse(VoxelWindow.hasValidData(SECTION.x(), SECTION.y(), SECTION.z()),
                 "a result from before a storage reset must not publish");
+    }
+
+    @Test
+    void aFoldedRequestKeepsTheWaitTheFirstOneStarted() {
+        VoxelMeshHarvestTelemetry.LIVE.reset();
+        var executor = new ControlledExecutor();
+        var seen = new ArrayList<Long>();
+        var updates = new VoxelMeshUpdates(executor,
+                (storage, harvest, level, section, requestedAt) -> seen.add(requestedAt),
+                (section, error) -> { });
+        updates.request(1, 1, null, SECTION, 100L);
+        updates.request(1, 1, null, SECTION, 500L);
+        updates.request(1, 1, null, SECTION, 900L);
+        executor.runAll();
+        assertEquals(List.of(100L), seen, "the wait belongs to the first request, not the last");
+        assertEquals(2, VoxelMeshHarvestTelemetry.LIVE.coalesced());
+        VoxelMeshHarvestTelemetry.LIVE.reset();
+    }
+
+    @Test
+    void aSpanIsOnlyCountedWhenItsSlotCommits() {
+        VoxelMeshHarvestTelemetry.LIVE.reset();
+        var telemetry = VoxelMeshHarvestTelemetry.LIVE;
+        telemetry.submitting(7, 0, 0, 0, System.nanoTime(), 0L, 0L);
+        telemetry.committed(9); // another slot's upload says nothing about this one
+        assertEquals(0, telemetry.jobs());
+        telemetry.committed(7);
+        assertEquals(1, telemetry.jobs());
+        telemetry.committed(7); // the span is spent, and a second fence cannot count it twice
+        assertEquals(1, telemetry.jobs());
+        telemetry.reset();
+    }
+
+    @Test
+    void aReplacedHarvestLeavesNoSpanBehind() {
+        VoxelMeshHarvestTelemetry.LIVE.reset();
+        var telemetry = VoxelMeshHarvestTelemetry.LIVE;
+        telemetry.submitting(3, 0, 0, 0, System.nanoTime(), 0L, 0L);
+        telemetry.dropped(3);
+        telemetry.committed(3);
+        assertEquals(0, telemetry.jobs());
+        assertEquals(0, telemetry.maxCommitNanos());
+        telemetry.reset();
+    }
+
+    @Test
+    void theWaitBeforeARebuildIsMeasuredFromTheFirstTimeTheSectionWasMarked() throws Exception {
+        var telemetry = VoxelMeshHarvestTelemetry.LIVE;
+        telemetry.reset();
+        telemetry.dirtied(4, 5, 6);
+        Thread.sleep(12);
+        telemetry.dirtied(4, 5, 6); // marked again before its rebuild; the first stamp stands
+        telemetry.requested(4, 5, 6);
+        telemetry.submitting(11, 4, 5, 6, System.nanoTime(), 0L, 0L);
+        telemetry.committed(11);
+        assertEquals(1, telemetry.jobs());
+        assertTrue(telemetry.maxDirtyNanos() >= 10_000_000L,
+                "the wait spans both marks, not just the last one");
+        telemetry.reset();
+    }
+
+    @Test
+    void aSectionNoRebuildEverReachesLeavesNoWaitBehind() {
+        var telemetry = VoxelMeshHarvestTelemetry.LIVE;
+        telemetry.reset();
+        telemetry.dirtied(1, 2, 3);
+        telemetry.submitting(12, 9, 9, 9, System.nanoTime(), 0L, 0L);
+        telemetry.committed(12);
+        assertEquals(0, telemetry.maxDirtyNanos(), "another section's mark is not this one's wait");
+        telemetry.reset();
     }
 
     private static final class ControlledExecutor implements Executor {

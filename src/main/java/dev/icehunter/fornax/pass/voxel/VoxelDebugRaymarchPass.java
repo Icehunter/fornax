@@ -312,6 +312,7 @@ public final class VoxelDebugRaymarchPass {
         profiler.recordValue("voxel_cleared", clearedTotal - prevClearedTotal);
         profiler.recordValue("voxel_pop", VoxelWindow.populationFraction() * 100.0);
         dev.icehunter.fornax.voxel.VoxelRefillTelemetry.LIVE.publish(profiler::recordValue);
+        dev.icehunter.fornax.voxel.VoxelMeshHarvestTelemetry.LIVE.publish(profiler::recordValue);
         if (VoxelSourceSummary.isEnabled()) {
             var sources = VoxelWindow.sourceInventoryStats();
             profiler.recordValue("source_slots", sources.committedSlots());

@@ -13,7 +13,8 @@ import java.util.function.BiConsumer;
 final class VoxelMeshUpdates {
     @FunctionalInterface
     interface Reader {
-        void read(long storageGeneration, long harvestGeneration, Level level, SectionPos section);
+        void read(long storageGeneration, long harvestGeneration, Level level, SectionPos section,
+                  long requestedAt);
     }
 
     private static final class Pending {
@@ -21,12 +22,17 @@ final class VoxelMeshUpdates {
         final long harvestGeneration;
         final Level level;
         final SectionPos section;
+        /** When the FIRST request for this section arrived. A later one folded into it keeps this,
+         * because the wait it measures is the wait the player sees. */
+        final long requestedAt;
 
-        Pending(long storageGeneration, long harvestGeneration, Level level, SectionPos section) {
+        Pending(long storageGeneration, long harvestGeneration, Level level, SectionPos section,
+                long requestedAt) {
             this.storageGeneration = storageGeneration;
             this.harvestGeneration = harvestGeneration;
             this.level = level;
             this.section = section;
+            this.requestedAt = requestedAt;
         }
     }
 
@@ -43,7 +49,8 @@ final class VoxelMeshUpdates {
         this.failures = failures;
     }
 
-    void request(long storageGeneration, long harvestGeneration, Level level, SectionPos section) {
+    void request(long storageGeneration, long harvestGeneration, Level level, SectionPos section,
+                 long requestedAt) {
         long scheduledGeneration;
         synchronized (this) {
             Pending existing = pending.get(section);
@@ -51,8 +58,10 @@ final class VoxelMeshUpdates {
                     && existing.harvestGeneration == harvestGeneration) {
                 pending.remove(section);
                 pending.put(section, existing);
+                VoxelMeshHarvestTelemetry.LIVE.folded();
             } else {
-                Pending next = new Pending(storageGeneration, harvestGeneration, level, section);
+                Pending next = new Pending(storageGeneration, harvestGeneration, level, section,
+                        requestedAt);
                 pending.put(section, next);
             }
             scheduledGeneration = scheduleDrain();
@@ -83,8 +92,10 @@ final class VoxelMeshUpdates {
                     pending.remove(newest.getKey());
                     item = newest.getValue();
                 }
+                VoxelMeshHarvestTelemetry.LIVE.dequeued(item.requestedAt);
                 try {
-                    reader.read(item.storageGeneration, item.harvestGeneration, item.level, item.section);
+                    reader.read(item.storageGeneration, item.harvestGeneration, item.level,
+                            item.section, item.requestedAt);
                 } catch (RuntimeException error) {
                     failures.accept(item.section, error);
                 }

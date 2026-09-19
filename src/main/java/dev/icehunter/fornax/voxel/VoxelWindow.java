@@ -250,6 +250,7 @@ public final class VoxelWindow {
             if (sourceWindow != null) sourceWindow.commit(item.slot(), item.result(), item.sectionState());
         }
         VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.COMMITTED);
+        VoxelMeshHarvestTelemetry.LIVE.committed(item.slot());
     }
 
     private static boolean needsLightClear(int slot, SectionPos owner) {
@@ -355,8 +356,9 @@ public final class VoxelWindow {
     });
 
     private static final VoxelMeshUpdates meshUpdates = new VoxelMeshUpdates(MESH_HARVEST_EXECUTOR,
-            (storageGeneration, harvestGeneration, level, position) ->
-                    harvestMeshRequest(storageGeneration, harvestGeneration, level, position, DirectSectionReader::read),
+            (storageGeneration, harvestGeneration, level, position, requestedAt) ->
+                    harvestMeshRequest(storageGeneration, harvestGeneration, level, position,
+                            DirectSectionReader::read, requestedAt),
             (position, error) ->
             dev.icehunter.fornax.FornaxMod.LOGGER.error("Voxel mesh harvest failed for {}", position, error));
 
@@ -606,14 +608,16 @@ public final class VoxelWindow {
             int slot = slotFor(position.x(), position.y(), position.z());
             meshChangeRevision = Math.incrementExact(meshChangeRevision);
             meshChanges.put(slot, new MeshChange(position, meshChangeRevision));
-            updates.request(storageGeneration, VoxelHarvestLifecycle.generation(), level, position);
+            updates.request(storageGeneration, VoxelHarvestLifecycle.generation(), level, position,
+                    VoxelMeshHarvestTelemetry.LIVE.requested(position.x(), position.y(), position.z()));
         }
     }
 
     /** Seam that keeps the real gates around a reader a queue test can supply. */
     static void harvestMeshRequest(long expectedStorageGeneration, long expectedHarvestGeneration,
                                    Level level, SectionPos position,
-                                   BiFunction<Level, SectionPos, SectionHarvester.Result> reader) {
+                                   BiFunction<Level, SectionPos, SectionHarvester.Result> reader,
+                                   long requestedAt) {
         final long revision;
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
             if (!isCurrentMeshRequest(expectedStorageGeneration, expectedHarvestGeneration, position)) return;
@@ -623,15 +627,32 @@ public final class VoxelWindow {
                     && Long.valueOf(revision).equals(slotCommittedReadRevision.get(slot))) return;
         }
         SectionHarvester.Result result;
+        long dequeuedAt = System.nanoTime();
+        long readStart = dequeuedAt;
         try (var lease = VoxelHarvestLifecycle.tryAcquire(expectedHarvestGeneration)) {
             if (lease == null || !isCurrentMeshRequest(expectedStorageGeneration, expectedHarvestGeneration, position)) return;
             result = reader.apply(level, position);
         }
+        VoxelMeshHarvestTelemetry.LIVE.read(System.nanoTime() - readStart);
         if (result == null) return;
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
             if (isCurrentMeshRequest(expectedStorageGeneration, expectedHarvestGeneration, position)
                     && meshRevisionAt(position) == revision) {
+                int slot = slotFor(position.x(), position.y(), position.z());
+                long uploadStart = System.nanoTime();
+                // Registered before the upload: it calls the commit back on this thread before it
+                // returns, and a span registered after that is never found by its own commit.
+                if (slot >= 0) {
+                    VoxelMeshHarvestTelemetry.LIVE.submitting(slot, position.x(), position.y(),
+                            position.z(), requestedAt, dequeuedAt - requestedAt,
+                            uploadStart - readStart);
+                }
                 onSectionHarvested(position, result);
+                // An upload the window turned away never commits, so its span is cleared rather
+                // than left for the next edit of this section to pick up.
+                if (slot >= 0) {
+                    VoxelMeshHarvestTelemetry.LIVE.dropped(slot);
+                }
             }
         }
     }

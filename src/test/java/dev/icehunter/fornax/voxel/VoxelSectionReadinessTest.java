@@ -73,7 +73,7 @@ class VoxelSectionReadinessTest {
         VoxelWindow.onSectionUploadCommitted(harvest(center));
         VoxelWindow.onSectionUploadCommitted(harvest(neighbor));
         var pending = new ArrayDeque<Runnable>();
-        var updates = new VoxelMeshUpdates(pending::add, (storage, generation, level, owner) -> {},
+        var updates = new VoxelMeshUpdates(pending::add, (storage, generation, level, owner, requestedAt) -> {},
                 (owner, failure) -> { throw new AssertionError(failure); });
         VoxelWindow.queueMeshTriggeredHarvest(null, neighbor, updates);
         assertTrue(ready(center), "a spatially unrelated edit must not affect this section");

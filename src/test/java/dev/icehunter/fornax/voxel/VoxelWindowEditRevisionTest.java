@@ -30,7 +30,8 @@ class VoxelWindowEditRevisionTest {
         return DirectSectionReader.emptyResultWithLight(new byte[4096]);
     };
     private final VoxelMeshUpdates updates = new VoxelMeshUpdates(work::add,
-            (storage, harvest, level, pos) -> VoxelWindow.harvestMeshRequest(storage, harvest, level, pos, reader),
+            (storage, harvest, level, pos, requestedAt) ->
+                    VoxelWindow.harvestMeshRequest(storage, harvest, level, pos, reader, requestedAt),
             (pos, error) -> { throw new AssertionError(error); });
 
     @BeforeEach void setup() {
