@@ -83,7 +83,7 @@ public final class ShadowMapManager {
      * with (see {@code FullscreenPassRunner#samplerKindFor}): {@link #TARGET} gets the hardware
      * comparison sampler {@code sunVisibility()}'s PCF path needs; {@link #RAW_TARGET} gets a plain
      * {@code sampler2D} for raw {@code texelFetch} reads (the shadow-wedge investigation's {@code
-     * SHADOW_QUERY_3} and the full-screen {@code SHADOW_MAP_VIEW} debug view both need the actual
+     * SHADOW_DEPTH_COMPARE} and the full-screen {@code SHADOW_MAP_VIEW} debug view both need the actual
      * stored depth, which a {@code sampler2DShadow} comparison sampler can only ever return
      * pass/fail for, never the value itself).
      *

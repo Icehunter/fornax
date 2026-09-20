@@ -183,20 +183,20 @@ class GBufferDebugViewTest {
         // explaining the symptom. This triple reads sunVisibility()'s own real internals at the
         // crosshair instead of a seventh guess: 31 = sunDir/ndotl, 32 = shadowUv/inRange/visibility,
         // 33 = rawDepth/refDepth/storedDepth. Appended last so nothing earlier shifts.
-        assertEquals(31, GBufferDebugView.SHADOW_QUERY_1.ordinal());
-        assertEquals(32, GBufferDebugView.SHADOW_QUERY_2.ordinal());
-        assertEquals(33, GBufferDebugView.SHADOW_QUERY_3.ordinal());
+        assertEquals(31, GBufferDebugView.SHADOW_SUN_AND_NDOTL.ordinal());
+        assertEquals(32, GBufferDebugView.SHADOW_MAP_UV_AND_VISIBILITY.ordinal());
+        assertEquals(33, GBufferDebugView.SHADOW_DEPTH_COMPARE.ordinal());
     }
 
     @Test
     void shadowQueryThreeIsOrdinalThirtyThree() {
-        // GLINT_QUERY_1-4 (ordinals 34-37) briefly lived after SHADOW_QUERY_3: a shadow-map-based
+        // GLINT_QUERY_1-4 (ordinals 34-37) briefly lived after SHADOW_DEPTH_COMPARE: a shadow-map-based
         // instrument for water_composite.fsh's glintShadowVis kill-switch. Removed 2026-08-10 once
         // the shader branches feeding them were deleted in favour of glint_occlusion.fsh's
         // screen-space raymarch -- the numbers this instrument surfaced (a real, valid shadow-map
         // depth recording the wrong surface) are what justified dropping the shadow map for the
         // glint entirely. Safe removal: they were the last four ordinals, nothing appended after.
-        assertEquals(33, GBufferDebugView.SHADOW_QUERY_3.ordinal());
+        assertEquals(33, GBufferDebugView.SHADOW_DEPTH_COMPARE.ordinal());
     }
 
     @Test
@@ -220,10 +220,10 @@ class GBufferDebugViewTest {
         // uwSunAlignment/uwSolarLobe/uwFresnel, 36 = uwEyeFilter, 37 = skyVis/uwGlint/
         // underwaterSunGlitterStrength, 38 = the actual uwGlintContribution added to the pixel.
         // Appended last so nothing earlier shifts.
-        assertEquals(35, GBufferDebugView.UW_GLINT_1.ordinal());
-        assertEquals(36, GBufferDebugView.UW_GLINT_2.ordinal());
-        assertEquals(37, GBufferDebugView.UW_GLINT_3.ordinal());
-        assertEquals(38, GBufferDebugView.UW_GLINT_4.ordinal());
+        assertEquals(35, GBufferDebugView.UW_GLINT_ALIGNMENT.ordinal());
+        assertEquals(36, GBufferDebugView.UW_GLINT_EYE_FILTER.ordinal());
+        assertEquals(37, GBufferDebugView.UW_GLINT_LOBES.ordinal());
+        assertEquals(38, GBufferDebugView.UW_GLINT_CONTRIBUTION.ordinal());
     }
 
     @Test
@@ -231,8 +231,8 @@ class GBufferDebugViewTest {
         // Celestial rework decision, Stage 0 (2026-08-11): the instrument the decision doc's own
         // §0 calls for. Reads the three raw inputs (uwCosIncident, worldPos.y, waveNormal.y) the
         // "dot(uwEyeRay, waveNormal) went negative" theory rests on, instead of a further inference
-        // from UW_GLINT_1-4's downstream values.
-        assertEquals(39, GBufferDebugView.UW_GLINT_5.ordinal());
+        // from UW_GLINT_ALIGNMENT-4's downstream values.
+        assertEquals(39, GBufferDebugView.UW_GLINT_ORIENTATION.ordinal());
     }
 
     @Test
@@ -362,14 +362,14 @@ class GBufferDebugViewTest {
         assertFalse(GBufferDebugView.ENV_SPEC_RATIO.isSelectable());
         assertFalse(GBufferDebugView.ENV_DECOMP_ALBEDO_IDENTITY_INPUTS.isSelectable());
         assertFalse(GBufferDebugView.UW_CLOSURE_DEBUG.isSelectable());
-        assertFalse(GBufferDebugView.SHADOW_QUERY_1.isSelectable());
-        assertFalse(GBufferDebugView.SHADOW_QUERY_3.isSelectable());
+        assertFalse(GBufferDebugView.SHADOW_SUN_AND_NDOTL.isSelectable());
+        assertFalse(GBufferDebugView.SHADOW_DEPTH_COMPARE.isSelectable());
         assertFalse(GBufferDebugView.GLINT_OCCLUSION_QUERY.isSelectable());
-        assertFalse(GBufferDebugView.UW_GLINT_1.isSelectable());
-        assertFalse(GBufferDebugView.UW_GLINT_5.isSelectable());
+        assertFalse(GBufferDebugView.UW_GLINT_ALIGNMENT.isSelectable());
+        assertFalse(GBufferDebugView.UW_GLINT_ORIENTATION.isSelectable());
 
         assertEquals(21, GBufferDebugView.ENV_SPEC_RATIO.shaderId());
-        assertEquals(39, GBufferDebugView.UW_GLINT_5.shaderId());
+        assertEquals(39, GBufferDebugView.UW_GLINT_ORIENTATION.shaderId());
         assertEquals(18, GBufferDebugView.CELESTIAL_SHADOW_VOXEL.shaderId());
     }
 

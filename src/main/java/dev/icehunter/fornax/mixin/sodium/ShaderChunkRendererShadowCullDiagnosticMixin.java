@@ -14,7 +14,7 @@ import org.spongepowered.asm.mixin.injection.ModifyArg;
  * shadow pipeline's {@code RenderPipeline.Builder.withCull(boolean)} argument to {@code false},
  * disabling GPU-level rasterizer backface culling for {@link FornaxRenderPasses#SHADOW}/{@link
  * FornaxRenderPasses#SHADOW_CUTOUT} only, to test one specific hypothesis for why a caster known (by
- * {@code SHADOW_QUERY_3}'s own min/max reading) to be write-side-absent from the shadow map is
+ * {@code SHADOW_DEPTH_COMPARE}'s own min/max reading) to be write-side-absent from the shadow map is
  * missing: {@code ShaderChunkRenderer.createShader} calls {@code .withCull(true)} unconditionally,
  * once, for every {@code TerrainRenderPass} -- {@link ShaderChunkRendererDeferredPipelineMixin}
  * (color targets, depth-stencil compare op), {@link ShaderChunkRendererShaderLocationMixin} (shader
@@ -33,7 +33,7 @@ import org.spongepowered.asm.mixin.injection.ModifyArg;
  * techniques intentionally cull FRONT faces instead of back faces, trading some peter-panning for
  * fewer acne artifacts) rather than simply shipping {@code withCull(false)} and eating the overdraw
  * -- do not treat a positive result here as the fix itself. See the investigation's own report for
- * the reasoning that motivated this test (matches the {@code SHADOW_QUERY_3} min/max reading: a
+ * the reasoning that motivated this test (matches the {@code SHADOW_DEPTH_COMPARE} min/max reading: a
  * culled-front-face map would contain only away-facing real surfaces, which by construction can
  * never occlude anything -- real content, zero occluders, exactly what was measured; also matches
  * the ORIGINAL "trees and grass cast shadows, blocks don't" symptom that motivated this whole

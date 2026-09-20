@@ -15,13 +15,13 @@ import static org.junit.jupiter.api.Assertions.fail;
  * Pins the channel-order CONTRACT between a Plague shader branch's real {@code vec4(...)} write and
  * the matching {@link EnvSpecularRatioReadback} formatter that reads it back. The two sides compile
  * independently, so a reorder produces no build error -- just confident, plausible, WRONG numbers.
- * {@link dev.icehunter.fornax.config.GBufferDebugView#UW_GLINT_5} shipped with exactly this defect
+ * {@link dev.icehunter.fornax.config.GBufferDebugView#UW_GLINT_ORIENTATION} shipped with exactly this defect
  * once: its formatter's R/G/B order silently stopped matching {@code water_composite.fsh:308} after
  * a pack-side restructure, caught only because the same measured value appeared under two different
  * labels in consecutive readings.
  *
  * <p>Scope: instruments where a pack repo authors the channel order a Fornax formatter names, not
- * which repo owns the underlying render target. {@code SHADOW_QUERY_1..3} read the shadow map
+ * which repo owns the underlying render target. {@code SHADOW_SUN_AND_NDOTL..3} read the shadow map
  * through a Fornax-owned target name ({@code sunShadowMap}/{@code sunShadowMapRaw}), but the
  * {@code vec4(...)} that fills R/G/B/A is written by the pack's resolve or shadow prepass. Query 3
  * travels through the shadow target unchanged before the resolve exposes it to readback. Ordinals where Fornax's own {@code gbuffer_resolve.fsh} (the
@@ -51,28 +51,28 @@ class CrossRepoChannelContractTest {
     }
 
     private static final List<Row> ROWS = List.of(
-            new Row("UW_GLINT_1", "shaders/post/water_composite.fsh",
+            new Row("UW_GLINT_ALIGNMENT", "shaders/post/water_composite.fsh",
                     "fragColor = vec4(uwSunAlignment, uwMoonAlignment, uwFresnel, 1.0);"),
-            new Row("UW_GLINT_2", "shaders/post/water_composite.fsh",
+            new Row("UW_GLINT_EYE_FILTER", "shaders/post/water_composite.fsh",
                     "fragColor = vec4(uwEyeFilter, 1.0);"),
-            new Row("UW_GLINT_3", "shaders/post/water_composite.fsh",
+            new Row("UW_GLINT_LOBES", "shaders/post/water_composite.fsh",
                     "fragColor = vec4(uwSunGlint, uwMoonGlint, u_UnderwaterSunGlitterStrength, 1.0);"),
-            new Row("UW_GLINT_4", "shaders/post/water_composite.fsh",
+            new Row("UW_GLINT_CONTRIBUTION", "shaders/post/water_composite.fsh",
                     "fragColor = vec4(uwGlintContribution, 1.0);"),
-            new Row("UW_GLINT_5", "shaders/post/water_composite.fsh",
+            new Row("UW_GLINT_ORIENTATION", "shaders/post/water_composite.fsh",
                     "fragColor = vec4(waveNormal.y, NdotV, worldPos.y, 1.0);"),
             new Row("GLINT_OCCLUSION_QUERY", "shaders/post/glint_occlusion.fsh",
                     "fragColor = vec4(activeVisibility, trueSunVisibility, moonVisibility, 1.0);"),
             // sunDir splats into xyz, ndotl into w -- a vec3-plus-scalar shape, not four independent
             // scalars, but still an exact substring once whitespace-normalized.
-            new Row("SHADOW_QUERY_1", "shaders/post/gbuffer_resolve.fsh",
+            new Row("SHADOW_SUN_AND_NDOTL", "shaders/post/gbuffer_resolve.fsh",
                     "fragColor = vec4(sunDir, ndotl);"),
             // Contains a ternary (dbgInRange ? 1.0 : 0.0) -- normalize() only strips whitespace, so
             // the '?'/':' characters pass through untouched and this still matches as a plain literal
             // substring; no special handling needed.
-            new Row("SHADOW_QUERY_2", "shaders/post/gbuffer_resolve.fsh",
+            new Row("SHADOW_MAP_UV_AND_VISIBILITY", "shaders/post/gbuffer_resolve.fsh",
                     "fragColor = vec4(dbgShadowUv, dbgInRange ? 1.0 : 0.0, visibility);"),
-            new Row("SHADOW_QUERY_3", "shaders/post/rt_shadow_composite.fsh",
+            new Row("SHADOW_DEPTH_COMPARE", "shaders/post/rt_shadow_composite.fsh",
                     "fragColor = vec4(coordinates.z, 0.0, storedDepth, 0.0);"));
 
     @Test
@@ -121,7 +121,7 @@ class CrossRepoChannelContractTest {
         // The pack names its inputs after the targets they bind, so this reads the name rather
         // than the position the engine binds it at.
         assertTrue(resolve.contains("#defineRT_SHADOW_COMPOSITEu_RtShadowComposite"));
-        int query = resolve.indexOf("if(debugView==DBG_SHADOW_QUERY_2||debugView==DBG_SHADOW_QUERY_3)");
+        int query = resolve.indexOf("if(debugView==DBG_SHADOW_MAP_UV_AND_VISIBILITY||debugView==DBG_SHADOW_DEPTH_COMPARE)");
         int lighting = resolve.indexOf("floatshadowDist=", query);
         assertTrue(query >= 0 && lighting > query, "query branch must precede ordinary lighting");
         assertTrue(resolve.substring(query, lighting).contains(normalize("""
@@ -132,7 +132,7 @@ class CrossRepoChannelContractTest {
                 #endif
                         return;
                 """)), "query 3 must expose the exact prepass texel under the debug compile arm");
-        assertTrue(prepass.contains("if(debugView==DBG_SHADOW_QUERY_3)"));
+        assertTrue(prepass.contains("if(debugView==DBG_SHADOW_DEPTH_COMPARE)"));
         assertTrue(prepass.contains(normalize("""
                 float storedDepth = texelFetch(SHADOW_RAW_MAP, mapTexel, 0).r;
                 fragColor = vec4(coordinates.z, 0.0, storedDepth, 0.0);

@@ -323,8 +323,8 @@ public enum GBufferDebugView {
      */
     UW_CLOSURE_DEBUG,
     /**
-     * Shadow-wedge instrument, part 1 of 3 (with {@link #SHADOW_QUERY_2}, {@link
-     * #SHADOW_QUERY_3}). Reads the REAL {@code sunVisibility()} call's own internals at the
+     * Shadow-wedge instrument, part 1 of 3 (with {@link #SHADOW_MAP_UV_AND_VISIBILITY}, {@link
+     * #SHADOW_DEPTH_COMPARE}). Reads the REAL {@code sunVisibility()} call's own internals at the
      * crosshair directly, rather than reasoning indirectly about a large, elevation-periodic
      * misshadowed region on solid terrain through player-relative face culling, caster-list frustum
      * margin, shadow bias, sun/moon direction, or texel density by distance or resolution -- none of
@@ -333,15 +333,15 @@ public enum GBufferDebugView {
      * in {@code gbuffer_resolve.fsh}, same deep-placement/number-carrier shape as {@link
      * #ENV_SPEC_RATIO}. Appended last per this enum's own lockstep rule.
      */
-    SHADOW_QUERY_1,
+    SHADOW_SUN_AND_NDOTL,
     /**
      * Shadow-wedge investigation, part 2 of 3. R = {@code shadowUv.x}, G = {@code shadowUv.y}, B =
      * whether both lie in {@code [0,1]} (1.0 = inside the shadow map's coverage window, 0.0 =
      * outside it), A = {@code sunVisibility()}'s own real return value for this fragment -- the
      * exact number the lit composite uses, not a re-derivation. Resolve-branch ordinal 32, same
-     * shape as {@link #SHADOW_QUERY_1}.
+     * shape as {@link #SHADOW_SUN_AND_NDOTL}.
      */
-    SHADOW_QUERY_2,
+    SHADOW_MAP_UV_AND_VISIBILITY,
     /**
      * Shadow-wedge investigation, part 3 of 3. R = {@code rawDepth} (the fragment's light-space Z
      * before the {@code *0.2} compression), G = {@code refDepth} ({@code rawDepth*0.2}, the actual
@@ -349,9 +349,9 @@ public enum GBufferDebugView {
      * the shadow map at {@code shadowUv} -- needs a second, plain-{@code sampler2D} binding of the
      * same {@code sunShadowMap} target, since the existing binding is a {@code sampler2DShadow}
      * comparison sampler and can only return pass/fail). A unused. Resolve-branch ordinal 33, same
-     * shape as {@link #SHADOW_QUERY_1}.
+     * shape as {@link #SHADOW_SUN_AND_NDOTL}.
      */
-    SHADOW_QUERY_3,
+    SHADOW_DEPTH_COMPARE,
     // ^ GLINT_QUERY_1-4 (ordinals 34-37) held a shadow-map-based instrument for
     // water_composite.fsh's glintShadowVis kill-switch, superseded by glint_occlusion.fsh's
     // screen-space raymarch. Removed rather than left dead: the shader branches that fed them no
@@ -372,8 +372,8 @@ public enum GBufferDebugView {
      */
     GLINT_OCCLUSION_QUERY,
     /**
-     * Underwater-glint instrument, part 1 of 4 (with {@link #UW_GLINT_2}, {@link #UW_GLINT_3},
-     * {@link #UW_GLINT_4}). R = {@code uwSunAlignment}, G = {@code uwMoonAlignment}, B =
+     * Underwater-glint instrument, part 1 of 4 (with {@link #UW_GLINT_EYE_FILTER}, {@link #UW_GLINT_LOBES},
+     * {@link #UW_GLINT_CONTRIBUTION}). R = {@code uwSunAlignment}, G = {@code uwMoonAlignment}, B =
      * {@code uwFresnel}: {@code water_composite.fsh} tracks the sun and moon as independent
      * alignment terms, each feeding its own lobe and glint downstream. Written by
      * {@code water_composite.fsh}'s TRANSLUCENT blend pass, so A is always exactly 1.0 by
@@ -381,28 +381,28 @@ public enum GBufferDebugView {
      * instrument. Reads {@code sceneHdrComposited}, not {@code sceneHdr}. See {@link
      * dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback#targetFor}.
      */
-    UW_GLINT_1,
+    UW_GLINT_ALIGNMENT,
     /**
      * Underwater-glint instrument, part 2 of 4. RGB = {@code uwEyeFilter.rgb}: the exponential
      * depth-absorption filter applied to both the sun- and moon-filtered glint colour. Same shape as
-     * {@link #UW_GLINT_1}.
+     * {@link #UW_GLINT_ALIGNMENT}.
      */
-    UW_GLINT_2,
+    UW_GLINT_EYE_FILTER,
     /**
      * Underwater-glint instrument, part 3 of 4. R = {@code uwSunGlint}, G = {@code uwMoonGlint}:
      * each celestial body's own lobe-times-horizon-fade-times-microcoverage-times-shadow term,
      * before either is filtered by eye colour or scaled by strength/skyVis. B =
      * {@code u_UnderwaterSunGlitterStrength}, the runtime slider (0.0-2.0, default 1.0), read here
      * for a direct cross-check against whatever the user finds in pack settings. Same shape as
-     * {@link #UW_GLINT_1}.
+     * {@link #UW_GLINT_ALIGNMENT}.
      */
-    UW_GLINT_3,
+    UW_GLINT_LOBES,
     /**
      * Underwater-glint instrument, part 4 of 4. RGB = {@code uwGlintContribution.rgb}: the actual
      * term added into {@code surface}, i.e. the final answer to "is anything real being added to
      * the pixel at all."
      */
-    UW_GLINT_4,
+    UW_GLINT_CONTRIBUTION,
     /**
      * Underwater-glint instrument, part 5 of 5 -- the instrument Stage 0 of the celestial rework
      * decision calls for. Reads three raw inputs behind one candidate cause instead of a further
@@ -420,12 +420,12 @@ public enum GBufferDebugView {
      * not the surface above it -- the prime suspect for Bug C being the water surface's top face
      * missing from the prepass when the camera is inside that water volume. Written by {@code
      * water_composite.fsh}'s TRANSLUCENT blend pass, so A is always exactly 1.0 by construction --
-     * three values, not four, same shape as {@link #UW_GLINT_1}. Reads {@code sceneHdrComposited},
+     * three values, not four, same shape as {@link #UW_GLINT_ALIGNMENT}. Reads {@code sceneHdrComposited},
      * same as the rest of this quintet -- see {@link
      * dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback#targetFor}. Appended last per this
      * enum's own lockstep rule.
      */
-    UW_GLINT_5,
+    UW_GLINT_ORIENTATION,
     /**
      * Full-screen linearized shadow-map visualization -- unlike every ordinal above, NOT a crosshair
      * readback: {@link dev.icehunter.fornax.pipeline.EnvSpecularRatioReadback} has no formatter case
@@ -434,7 +434,7 @@ public enum GBufferDebugView {
      * across the whole frame -- the highest-information instrument available for the Bug A
      * investigation (a captured-but-wrong-surface shadow map is either visibly present in this view
      * or it is not; that one look splits the investigation in half). Depends on the same raw,
-     * non-comparison sampler binding {@link #SHADOW_QUERY_3} needs -- see {@code
+     * non-comparison sampler binding {@link #SHADOW_DEPTH_COMPARE} needs -- see {@code
      * dev.icehunter.fornax.pass.shadow.ShadowMapManager#RAW_TARGET}. Appended last per this enum's
      * own lockstep rule.
      */
@@ -574,15 +574,15 @@ public enum GBufferDebugView {
             case ENV_DECOMP_ALBEDO_WRITE_VS_READ -> "Env Decomp: Albedo Write vs Read";
             case ENV_DECOMP_ALBEDO_IDENTITY_INPUTS -> "Albedo Identity Inputs";
             case UW_CLOSURE_DEBUG -> "Underwater Closure Debug";
-            case SHADOW_QUERY_1 -> "Shadow Query: Direction";
-            case SHADOW_QUERY_2 -> "Shadow Query: UV/Visibility";
-            case SHADOW_QUERY_3 -> "Shadow Query: Depth";
+            case SHADOW_SUN_AND_NDOTL -> "Shadow Query: Direction";
+            case SHADOW_MAP_UV_AND_VISIBILITY -> "Shadow Query: UV/Visibility";
+            case SHADOW_DEPTH_COMPARE -> "Shadow Query: Depth";
             case GLINT_OCCLUSION_QUERY -> "Glint Occlusion Query";
-            case UW_GLINT_1 -> "UW Glint: Alignment/Fresnel";
-            case UW_GLINT_2 -> "UW Glint: Eye Filter";
-            case UW_GLINT_3 -> "UW Glint: Sun+Moon/Strength";
-            case UW_GLINT_4 -> "UW Glint: Contribution";
-            case UW_GLINT_5 -> "UW Glint: Incidence/Position";
+            case UW_GLINT_ALIGNMENT -> "UW Glint: Alignment/Fresnel";
+            case UW_GLINT_EYE_FILTER -> "UW Glint: Eye Filter";
+            case UW_GLINT_LOBES -> "UW Glint: Sun+Moon/Strength";
+            case UW_GLINT_CONTRIBUTION -> "UW Glint: Contribution";
+            case UW_GLINT_ORIENTATION -> "UW Glint: Incidence/Position";
             case SHADOW_MAP_VIEW -> "Shadow Map (raw)";
             case WATER_SHAFT_INTERVAL -> "Water Shafts: Interval";
             case WATER_SHAFT_REFRACTIVE_FOCUS -> "Water Shafts: Refractive Focus";
@@ -629,9 +629,9 @@ public enum GBufferDebugView {
                     ENV_SPEC_RATIO, ENV_DECOMP_SKY, ENV_DECOMP_MIX, ENV_DECOMP_MAT,
                     ENV_DECOMP_LOCAL, ENV_DECOMP_AO, ENV_DECOMP_RESIDUAL,
                     ENV_DECOMP_ALBEDO_WRITE_VS_READ, ENV_DECOMP_ALBEDO_IDENTITY_INPUTS,
-                    UW_CLOSURE_DEBUG, SHADOW_QUERY_1, SHADOW_QUERY_2, SHADOW_QUERY_3,
-                    GLINT_OCCLUSION_QUERY, UW_GLINT_1, UW_GLINT_2, UW_GLINT_3,
-                    UW_GLINT_4, UW_GLINT_5 -> false;
+                    UW_CLOSURE_DEBUG, SHADOW_SUN_AND_NDOTL, SHADOW_MAP_UV_AND_VISIBILITY, SHADOW_DEPTH_COMPARE,
+                    GLINT_OCCLUSION_QUERY, UW_GLINT_ALIGNMENT, UW_GLINT_EYE_FILTER, UW_GLINT_LOBES,
+                    UW_GLINT_CONTRIBUTION, UW_GLINT_ORIENTATION -> false;
             default -> true;
         };
     }

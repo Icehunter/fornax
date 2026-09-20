@@ -25,11 +25,11 @@ import java.util.Locale;
  * GBufferDebugView#ENV_DECOMP_LOCAL}, {@link GBufferDebugView#ENV_DECOMP_AO}, {@link
  * GBufferDebugView#ENV_DECOMP_RESIDUAL}, {@link GBufferDebugView#ENV_DECOMP_ALBEDO_WRITE_VS_READ},
  * {@link GBufferDebugView#ENV_DECOMP_ALBEDO_IDENTITY_INPUTS}, {@link
- * GBufferDebugView#UW_CLOSURE_DEBUG}, {@link GBufferDebugView#SHADOW_QUERY_1}, {@link
- * GBufferDebugView#SHADOW_QUERY_2}, {@link GBufferDebugView#SHADOW_QUERY_3}, {@link
- * GBufferDebugView#GLINT_OCCLUSION_QUERY}, {@link GBufferDebugView#UW_GLINT_1}, {@link
- * GBufferDebugView#UW_GLINT_2}, {@link GBufferDebugView#UW_GLINT_3}, {@link
- * GBufferDebugView#UW_GLINT_4}, {@link GBufferDebugView#UW_GLINT_5} -- is the active debug view; see
+ * GBufferDebugView#UW_CLOSURE_DEBUG}, {@link GBufferDebugView#SHADOW_SUN_AND_NDOTL}, {@link
+ * GBufferDebugView#SHADOW_MAP_UV_AND_VISIBILITY}, {@link GBufferDebugView#SHADOW_DEPTH_COMPARE}, {@link
+ * GBufferDebugView#GLINT_OCCLUSION_QUERY}, {@link GBufferDebugView#UW_GLINT_ALIGNMENT}, {@link
+ * GBufferDebugView#UW_GLINT_EYE_FILTER}, {@link GBufferDebugView#UW_GLINT_LOBES}, {@link
+ * GBufferDebugView#UW_GLINT_CONTRIBUTION}, {@link GBufferDebugView#UW_GLINT_ORIENTATION} -- is the active debug view; see
  * each ordinal's own doc comment and its matching shader branch for exactly what it packs.
  * {@link GBufferDebugView#SHADOW_MAP_VIEW} is deliberately NOT in that list -- it is a full-screen
  * visualization, not a crosshair readback, so this class has no formatter for it and {@link
@@ -255,7 +255,7 @@ public final class EnvSpecularRatioReadback {
     private static String targetFor(GBufferDebugView view) {
         return switch (view) {
             case GLINT_OCCLUSION_QUERY -> GLINT_OCCLUSION_TARGET;
-            case UW_GLINT_1, UW_GLINT_2, UW_GLINT_3, UW_GLINT_4, UW_GLINT_5 -> SCENE_HDR_COMPOSITED_TARGET;
+            case UW_GLINT_ALIGNMENT, UW_GLINT_EYE_FILTER, UW_GLINT_LOBES, UW_GLINT_CONTRIBUTION, UW_GLINT_ORIENTATION -> SCENE_HDR_COMPOSITED_TARGET;
             default -> SCENE_HDR_TARGET;
         };
     }
@@ -320,18 +320,18 @@ public final class EnvSpecularRatioReadback {
                             + "\n(point crosshair at submerged seabed/terrain, camera underwater)"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, a, x, y, w, h);
-            case SHADOW_QUERY_1 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
+            case SHADOW_SUN_AND_NDOTL -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] sunDir.x=%s\nsunDir.y=%s\nsunDir.z=%s\nndotl=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, a, x, y, w, h);
-            case SHADOW_QUERY_2 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
+            case SHADOW_MAP_UV_AND_VISIBILITY -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] shadowUv.x=%s\nshadowUv.y=%s\ninRange=%s\nvisibility=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, a, x, y, w, h);
             // Pack prepass write: fragColor = vec4(coordinates.z, 0.0, storedDepth, 0.0);
             // The resolve forwards this exact shadow-target texel. Red is raw receiver light-clip
             // depth and blue is raw raster depth; green and alpha are intentionally empty.
-            case SHADOW_QUERY_3 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
+            case SHADOW_DEPTH_COMPARE -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] rawDepth(compared)=%s\nstoredDepth=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, b, x, y, w, h);
@@ -345,22 +345,22 @@ public final class EnvSpecularRatioReadback {
                     r, g, b, x, y, w, h);
             // Pack write: fragColor = vec4(uwSunAlignment, uwMoonAlignment, uwFresnel, 1.0).
             // water_composite.fsh tracks the sun and moon as independent alignment and lobe terms.
-            case UW_GLINT_1 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
+            case UW_GLINT_ALIGNMENT -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] uwSunAlignment=%s\nuwMoonAlignment=%s\nuwFresnel=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, x, y, w, h);
-            case UW_GLINT_2 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
+            case UW_GLINT_EYE_FILTER -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] uwEyeFilter=(%s, %s, %s)"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, x, y, w, h);
             // Pack write: fragColor = vec4(uwSunGlint, uwMoonGlint, u_UnderwaterSunGlitterStrength,
             // 1.0). Each celestial body has its own glint term; skyVis gates uwGlintContribution
             // upstream but is not read through this instrument.
-            case UW_GLINT_3 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
+            case UW_GLINT_LOBES -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] uwSunGlint=%s\nuwMoonGlint=%s\nunderwaterSunGlitterStrength=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, x, y, w, h);
-            case UW_GLINT_4 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
+            case UW_GLINT_CONTRIBUTION -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] uwGlintContribution=(%s, %s, %s)"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, x, y, w, h);
@@ -369,8 +369,8 @@ public final class EnvSpecularRatioReadback {
             // used the pre-restructure order and silently mislabelled every channel once Plague
             // changed the write; caught only because the same value (0.26782) appeared under two
             // different labels in consecutive readings. Keep this comment current if Plague's write
-            // order ever changes again -- see GBufferDebugView.UW_GLINT_5's own doc comment.
-            case UW_GLINT_5 -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
+            // order ever changes again -- see GBufferDebugView.UW_GLINT_ORIENTATION's own doc comment.
+            case UW_GLINT_ORIENTATION -> (r, g, b, a, x, y, w, h) -> String.format(Locale.ROOT,
                     "[Fornax] waveNormal.y=%s\nNdotV=%s\nworldPos.y=%s"
                             + "\n(crosshair px %d,%d, %dx%d window)",
                     r, g, b, x, y, w, h);
