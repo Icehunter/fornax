@@ -3277,9 +3277,19 @@ public final class GraphRunner {
         // zero in a GLSL #if, even when the engine selected a temporal AA method.
         String enginePreamble = EngineDefines.glslPreamble(aaMethod, computeAvailable);
 
+        // One name per declared input, so a shader can say which target it is reading instead of
+        // counting positions, and so an input inserted in the middle stops compiling rather than
+        // silently handing every later sampler a different texture.
+        Map<String, String> inputAliasesByShader =
+                PassInputAliases.byShader(pack.graph(), pack.options().keySet());
+
         Map<String, String> rewritten = new LinkedHashMap<>();
         for (Map.Entry<String, String> e : shaderSources.entrySet()) {
             String rewrittenSource = DefineRewriter.rewrite(e.getValue(), pack.options(), compileValuesAsStrings);
+            String inputAliases = inputAliasesByShader.get(e.getKey());
+            if (inputAliases != null) {
+                rewrittenSource = insertAfterFirstLine(rewrittenSource, inputAliases);
+            }
             // Source keys are pack-root-relative ("shaders/post/ssao.fsh" -- see
             // PackDiscovery.readShaderSources), matching PassSpec.shader() verbatim.
             String packOptionsBlock = packOptionsBlockByShader.get(e.getKey());

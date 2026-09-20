@@ -118,7 +118,9 @@ class CrossRepoChannelContractTest {
         if (!Files.isRegularFile(PLAGUE.resolve("pack.toml"))) return;
         String resolve = normalize(Files.readString(PLAGUE.resolve("shaders/post/gbuffer_resolve.fsh")));
         String prepass = normalize(Files.readString(PLAGUE.resolve("shaders/post/rt_shadow_composite.fsh")));
-        assertTrue(resolve.contains("#defineRT_SHADOW_COMPOSITEu_Input18"));
+        // The pack names its inputs after the targets they bind, so this reads the name rather
+        // than the position the engine binds it at.
+        assertTrue(resolve.contains("#defineRT_SHADOW_COMPOSITEu_RtShadowComposite"));
         int query = resolve.indexOf("if(debugView==DBG_SHADOW_QUERY_2||debugView==DBG_SHADOW_QUERY_3)");
         int lighting = resolve.indexOf("floatshadowDist=", query);
         assertTrue(query >= 0 && lighting > query, "query branch must precede ordinary lighting");
