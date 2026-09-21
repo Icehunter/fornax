@@ -1203,6 +1203,11 @@ matrix (see `ShadowCamera`'s class javadoc), so `ShadowCasterLists.aabbIntersect
 affine-map exactness argument is unaffected. `ShadowCasterLists`' caster-frustum fix (the coverage
 fix from the same investigation) was untouched throughout and stays.
 
+`ShadowCasterLists` moves a region's eight box corners through the light matrix once and reads
+both answers off the same numbers: whether the box touches the shadow area at all, and whether it
+sits wholly inside it. A region that sits wholly inside skips the check on each of its sections.
+The public touch test that mesh RT snapshots call reads those same numbers.
+
 ### `u_PackOptions`
 
 This block is not TOML-generated and not versioned by a hash. A pack's runtime (slider) options are

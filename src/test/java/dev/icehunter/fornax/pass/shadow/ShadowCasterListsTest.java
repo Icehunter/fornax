@@ -5,6 +5,7 @@ import org.joml.Vector3f;
 import org.joml.Vector4f;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -152,5 +153,42 @@ class ShadowCasterListsTest {
         // inside any well-formed shadow volume, is what actually catches that failure mode).
         assertTrue(intersects(viewProj, -8.0, -8.0, -8.0, 8.0, 8.0, 8.0),
                 "the section containing the camera itself must always be inside a well-formed shadow volume");
+    }
+
+    @Test
+    void classifiesTouchingAndWhollyInsideFromOneSetOfCorners() {
+        class CountingMatrix extends Matrix4f {
+            int transforms;
+            @Override public Vector4f transform(Vector4f vector) {
+                transforms++;
+                return super.transform(vector);
+            }
+        }
+        CountingMatrix matrix = new CountingMatrix();
+        assertEquals(ShadowCasterLists.ShadowVolumeRelation.INSIDE,
+                ShadowCasterLists.classifyShadowVolume(matrix, -.5, -.5, .2, .5, .5, .8, new Vector4f()));
+        assertEquals(8, matrix.transforms, "both answers come from the same eight moved corners");
+        matrix.transforms = 0;
+        assertEquals(ShadowCasterLists.ShadowVolumeRelation.INTERSECTING,
+                ShadowCasterLists.classifyShadowVolume(matrix, .5, -.5, .2, 1.5, .5, .8, new Vector4f()));
+        assertEquals(8, matrix.transforms);
+        matrix.transforms = 0;
+        assertEquals(ShadowCasterLists.ShadowVolumeRelation.OUTSIDE,
+                ShadowCasterLists.classifyShadowVolume(matrix, 2, -.5, .2, 3, .5, .8, new Vector4f()));
+        assertEquals(8, matrix.transforms);
+    }
+
+    @Test
+    void classifyKeepsTheDepthRangeAndTheEdgeRoundoffGuard() {
+        Matrix4f identity = new Matrix4f();
+        assertEquals(ShadowCasterLists.ShadowVolumeRelation.INSIDE,
+                ShadowCasterLists.classifyShadowVolume(identity, -1, -1, 0, 1, 1, 1, new Vector4f()));
+        assertEquals(ShadowCasterLists.ShadowVolumeRelation.INSIDE,
+                ShadowCasterLists.classifyShadowVolume(identity, -1.00005, -1, -.00005,
+                        1.00005, 1, 1.00005, new Vector4f()));
+        assertEquals(ShadowCasterLists.ShadowVolumeRelation.INTERSECTING,
+                ShadowCasterLists.classifyShadowVolume(identity, -.5, -.5, -.2, .5, .5, .2, new Vector4f()));
+        assertEquals(ShadowCasterLists.ShadowVolumeRelation.OUTSIDE,
+                ShadowCasterLists.classifyShadowVolume(identity, -.5, -.5, -.2, .5, .5, -.0002, new Vector4f()));
     }
 }
