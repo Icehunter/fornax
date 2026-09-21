@@ -339,4 +339,11 @@ layout(std140) uniform u_Globals {
     // enum does. A pack cannot derive any of these: sea level and height are per-dimension data
     // the shader never sees, and the dimension has no colour or angle that identifies it.
     vec4 u_WorldBounds;
+
+    // The biome at the camera block (bytes 832..848), read at the camera's own height.
+    //   x = the pack's ID for it from biomes.toml, 0 if the pack gave it none.
+    //   y = the biome's heat, z = its heat at this height, w = how much it rains.
+    // Heat and rain are sent even when the ID is 0. Nothing here is smoothed or styled.
+    // Whole numbers up to 2^24 fit this float exactly, and the file check holds IDs there.
+    vec4 u_CameraBiome;
 };

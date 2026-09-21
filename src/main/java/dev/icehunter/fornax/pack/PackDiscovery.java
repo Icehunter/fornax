@@ -120,6 +120,11 @@ public final class PackDiscovery {
                 ? read(blocksPath, "blocks.toml", PackTomlLoader::loadBlocks)
                 : BlocksSpec.empty();
 
+        Path biomesPath = root.resolve("biomes.toml");
+        BiomesSpec biomes = Files.exists(biomesPath)
+                ? read(biomesPath, "biomes.toml", PackTomlLoader::loadBiomes)
+                : BiomesSpec.empty();
+
         Map<String, String> shaderSources = readShaderSources(root.resolve("shaders"));
 
         MaterialCategories cats = MaterialCategories.from(blocks);
@@ -152,7 +157,7 @@ public final class PackDiscovery {
         ProfileValidator.warnUnknownProfileKeys(screens, options);
         MetaValidator.validate(screens, options);
 
-        return new PackModel(root, meta, graph, screens, options, blocks);
+        return new PackModel(root, meta, graph, screens, options, blocks, biomes);
     }
 
     /**

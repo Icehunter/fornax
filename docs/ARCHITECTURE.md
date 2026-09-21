@@ -309,12 +309,24 @@ draws at all.
    `FileSystems.newFileSystem`) contains `pack.toml`. This is a plain OS/zip scan, not the Fabric
    resource-pack mechanism.
 2. **TOML parsing.** Pack manifests are parsed with a real TOML library (night-config, shipped
-   jar-in-jar) into four typed specs: `pack.toml` (name/version/format), `graph.toml` (targets and
+   jar-in-jar) into five typed specs: `pack.toml` (name/version/format), `graph.toml` (targets and
    passes), `blocks.toml` (material categories, optional), `screens.toml` (settings-UI layout and
-   quality profiles). `pack.toml`'s `format` field is checked against the one format version this
+   quality profiles), and `biomes.toml` (exact biome IDs, optional). `pack.toml`'s `format` field is checked against the one format version this
    build understands; a mismatch fails load immediately. All TOML tables are parsed
    insertion-order-preserving, since category and option declaration order becomes dense-ID order
    and uniform-block layout order downstream.
+
+   `biomes.toml` holds one `[biomes]` table of biome names to whole numbers, such as
+   `"minecraft:plains" = 1`. `BiomesTomlLoader` reads it through `PackTomlLoader.loadBiomes`, and
+   `PackModel.biomes()` keeps the result as a `BiomesSpec` that cannot be changed. Each ID must be
+   used once and sit in `1..16777216`, the range a float still counts in whole steps. 0 is kept
+   for a biome the pack gave no ID. A missing or empty file gives an empty list. A bad name, a bad
+   type, a repeated ID or one out of range stops the load and names the file and the key. The
+   order lines are written in is kept, but it never sets an ID. A name this game does not have
+   does no harm. Lookup goes by the biome's name, never by the number the game hands out that
+   run, which moves. Every pack reload reads the file again. The table only adds, so pack format
+   stays 1 and no shader macro is written for it: the pack owns these numbers and what they
+   mean.
 
    An optional graph-level `[ray_traced_shadows]` table becomes
    `GraphSpec.rayTracedShadows()`, a nullable `RayTracedShadowSpec(enabledIf, distanceOption,
@@ -556,8 +568,10 @@ origin follows the player body in sixteen-block snaps. Each cell is four 32-bit 
 tile tags in the high sixteen bits. Word 1 stores the height-adjusted surface temperature that
 classification thresholded (signed 16-bit, 1/256 steps), downfall in 0..255, and a tag byte of biome
 categories (hot, cold, wet, dry from the shared convention tags; ocean, jungle, badlands, mountain
-from vanilla's). Word 2 stores the biome's nominal temperature; the rest is reserved and written
-zero. The temperature and downfall reads reach private game members through the access widener
+from vanilla's). Word 2 holds the biome's own heat in its low sixteen bits; the rest is kept back
+and written zero. Word 3 holds the pack's ID for the biome at the top block from `biomes.toml`, or
+zero when the pack gave it none. It looks the ID up the same way `u_CameraBiome.x` does, but at the
+top block rather than at the camera, so the two can differ. The heat and rain reads reach private game members through the access widener
 (§8). A zero word 0 is therefore explicitly unknown, including where a valid dry cell's tag would
 otherwise also be zero. Tags reject ordinary stale toroidal slots but repeat every 131,072 blocks on
 either axis, so they are a local validity check, not an unbounded world identity.
@@ -576,6 +590,11 @@ frames, and retain an already-valid same-cell record when its chunk is temporari
 `precipClipmap`, the per-block-column field, uploads the same way: eight 512-byte rows a frame.
 A level change or a whole-window jump queues a clear ahead of them, since the tag identifies a
 column, not a world.
+
+`GraphRunner.closeCurrent()` calls `PrecipCoarseClipmapUpload.reset()` before it drops a pack. The
+reset wipes the copy held in main memory, the plan of what to send next, and anything still waiting
+to be sent, so IDs from the old pack cannot live on in half the rows. The next reader gets a full
+wipe and refill. Losing the world or the player does the same reset.
 
 This is a raw world-data ABI, not a cloud policy. The engine does not smooth biome boundaries,
 extend the field, classify storm shapes, or darken the sky. The required compute preprocessor owns
@@ -1034,7 +1053,7 @@ no compiler between them.
 
 ## 6. Uniform contracts
 
-### `u_Globals` (std140, 832 bytes)
+### `u_Globals` (std140, 848 bytes)
 
 Written in two pieces sharing one physical buffer: Sodium's own uniform writer produces the first
 184 bytes unmodified, and `GlobalUniformsWriteMixin` appends the remaining fields to the same
@@ -1080,8 +1099,9 @@ buffer object. The backing ring buffer (`UniformBufferManagerMixin`) is widened 
 | `u_LocalActorFluid` | vec4 | 784 | 16 |
 | `u_WorldClock` | vec4 | 800 | 16 |
 | `u_WorldBounds` | vec4 | 816 | 16 |
+| `u_CameraBiome` | vec4 | 832 | 16 |
 
-Total: 832 bytes exactly, the size `UniformBufferManagerMixin` widens the ring storage to. Both
+Total: 848 bytes exactly, the size `UniformBufferManagerMixin` widens the ring storage to. Both
 sides apply the same std140 alignment rules (std140 is a fixed, standard packing convention that
 lets GPU shader code and CPU-side buffer-writing code agree on where each field sits in memory) to
 the same declared type sequence in the same order, so in
@@ -1094,6 +1114,15 @@ feature that mysteriously does nothing. A second test checks field order too, re
 `GlobalUniformsWriteMixin`'s `Std140Builder` call sequence off its source and comparing it to
 `globals.glsl`'s declared order, type for type. Size alone can match with two fields swapped;
 this catches that case.
+
+`u_CameraBiome` is one vec4 of world facts, always sent, read by `BiomeProbe` at the block the
+camera is in, at its own height: x is the pack's ID for that biome, y is the biome's heat, z is its
+heat at that height using the world's sea level, and w is how much it rains. Heat uses Minecraft's
+own scale, not degrees. Heat and rain are still sent when the pack gave the biome no ID (x = 0),
+and nothing here is smoothed or read as weather. With no world or no camera every number is 0, and
+the probe keeps nothing from the world before. Rain and snow at the camera stay in
+`u_CameraSkyLight.y`. Adding this at the end leaves every earlier offset where it was, and a shader
+that names only the first part of the block still reads the same buffer.
 
 That check also covers the vec3 trap: `Std140Builder.putVec3` pads a vec3 to a full 16 bytes, while
 GLSL lets a following member with smaller alignment sit at offset+12. Never place a scalar directly
@@ -2477,6 +2506,11 @@ Source and pure-data tests pin these contracts; only a client run verifies mixin
 readback content and driver behavior. The capture frame's timing includes readback overhead.
 
 ## 12. Known laws
+
+- **IDs from one pack must never show up under the next.**
+  The camera lookup reads the live list straight off the pack, and the coarse top-block field wipes
+  its copy and refills it whole every time a pack is dropped. The numbers the game hands out that
+  run are not safe to key files on, and a biome the pack left out still has known heat and rain.
 
 - **Validity and tier leave a provider in one store.** A ray result carries its answer in R, the
   answering `RayTier` ordinal in G and validity in A. Writing A without G gives a texel a pack reads

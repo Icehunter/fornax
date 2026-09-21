@@ -50,6 +50,11 @@ public final class PackTomlLoader {
                 TomlSupport.requireInt(pack, "format", file));
     }
 
+    /** Biome names to IDs. A name this game does not have does no harm. */
+    public static BiomesSpec loadBiomes(Reader reader, String file) {
+        return BiomesTomlLoader.load(reader, file);
+    }
+
     public static GraphSpec loadGraph(Reader reader, String file) {
         Config root = parse(reader, file);
         TomlSupport.rejectUnknownKeys(root, Set.of("targets", "textures", "pass", "ray_traced_shadows"), file);

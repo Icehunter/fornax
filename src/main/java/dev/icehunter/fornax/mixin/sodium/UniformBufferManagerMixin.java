@@ -100,9 +100,9 @@ public abstract class UniformBufferManagerMixin implements UniformBufferManagerE
     private int fornax$widenUniformBufferSize(int originalSize) {
         // The per-frame globals live in vanilla's DynamicUniformStorage ring (Sodium 0.9.1), so
         // this widens that storage's per-block size (arg index 1 of (String,II)) rather than a
-        // MappableRingBuffer size literal. 832 bytes: 184 official plus the 648-byte Fornax tail
-        // that globals.glsl declares and GlobalUniformsWriteMixin writes, ending at u_WorldBounds.
-        return 832;
+        // MappableRingBuffer size literal. 848 bytes: 184 official plus the 664-byte Fornax tail
+        // that globals.glsl declares and GlobalUniformsWriteMixin writes, ending at u_CameraBiome.
+        return 848;
     }
 
     @Inject(method = "<init>", at = @At("RETURN"))

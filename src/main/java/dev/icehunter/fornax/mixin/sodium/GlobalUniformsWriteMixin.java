@@ -9,6 +9,7 @@ import dev.icehunter.fornax.pass.taa.CameraJitter;
 import dev.icehunter.fornax.pipeline.CameraMotionState;
 import dev.icehunter.fornax.pipeline.FrameCameraState;
 import dev.icehunter.fornax.pipeline.FrameUniformValues;
+import dev.icehunter.fornax.pipeline.BiomeProbe;
 import dev.icehunter.fornax.pipeline.DayCrossfadeState;
 import dev.icehunter.fornax.pipeline.PreviousFrameCameraTransform;
 import dev.icehunter.fornax.pipeline.HeldLight;
@@ -38,7 +39,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import java.nio.ByteBuffer;
 
 /**
- * Appends Fornax's {@code u_Globals} tail fields (bytes 184..832: two previous-frame camera
+ * Appends Fornax's {@code u_Globals} tail fields (bytes 184..848: two previous-frame camera
  * matrices, current/previous jitter vec2s, {@code u_InvProjModelView}, {@code u_SunViewProj},
  * {@code u_VoxelWindow}, {@code u_CameraAbs}, then the sky tail -- {@code u_SkyColor}, {@code
  * u_SunriseColor}, {@code u_SkyCelestial}, {@code u_SkyState} -- then the one-vec4 water tail,
@@ -73,8 +74,9 @@ import java.nio.ByteBuffer;
  * round appends one further vec4, {@code u_CameraSkyLight}, at 592; past the jitter-immunity mat4,
  * {@code u_FrameState}, {@code u_HeldLight} and {@code u_WeatherAnchor}, the water-motion-vector
  * round appends {@code u_CameraDelta} at 720. The local-actor ABI then occupies four vec4s at
- * 736/752/768/784, {@code u_WorldClock} sits at 800 and {@code u_WorldBounds} at 816, ending the
- * block at 832. All are vec4-tail-safe for the same reason, matching both
+ * 736/752/768/784, {@code u_WorldClock} sits at 800 and {@code u_WorldBounds} at 816. The camera
+ * biome facts occupy the final vec4 at 832, ending the block at 848. All are vec4-tail-safe,
+ * matching both
  * {@code UniformBufferManagerMixin}'s widened {@code DynamicUniformStorage} block size and the
  * {@code globals.glsl} override's declared struct.
  */
@@ -539,6 +541,13 @@ public class GlobalUniformsWriteMixin {
         var world = Minecraft.getInstance().level;
         float dimension = dev.icehunter.fornax.util.DimensionId.of(world);
         builder.putVec4(world.getSeaLevel(), world.getMinY(), world.getMaxY(), dimension);
+
+        // The biome at the camera block (bytes 832..848), cave biomes included, since this
+        // uses the camera's own height. The pack picks the ID. Heat and rain are sent either
+        // way, whether or not the pack gave this biome an ID.
+        BiomeProbe.Values cameraBiome = BiomeProbe.read();
+        builder.putVec4(cameraBiome.id(), cameraBiome.baseTemperature(),
+                cameraBiome.localTemperature(), cameraBiome.downfall());
 
         return original.call(builder);
     }

@@ -49,7 +49,8 @@ class PrecipCoarseClipmapUploadContractTest {
         assertTrue(source.contains("biome.getBaseTemperature()"));
         assertTrue(source.contains("ConventionalBiomeTags.IS_HOT") && source.contains("BiomeTags.IS_MOUNTAIN"),
                 "tags come from the biome's own declarations, not from a Fornax classification");
-        assertTrue(source.contains("WORD_RESERVED] = 0"), "reserved words are written zero, never left");
+        assertTrue(source.contains("WORD_BIOME_ID] = BiomeProbe.id(holder)"),
+                "the surface ID uses the same pack mapping as the camera ID");
     }
 
     @Test

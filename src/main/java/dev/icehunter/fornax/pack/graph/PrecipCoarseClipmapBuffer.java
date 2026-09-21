@@ -16,7 +16,8 @@ package dev.icehunter.fornax.pack.graph;
  * <tr><td>1</td><td>16..23</td><td>downfall, 0..255</td></tr>
  * <tr><td>1</td><td>24..31</td><td>category tags, {@link #TAG_HOT} .. {@link #TAG_MOUNTAIN}</td></tr>
  * <tr><td>2</td><td>0..15</td><td>base biome temperature, signed, same scale</td></tr>
- * <tr><td>2, 3</td><td>rest</td><td>reserved, written zero</td></tr>
+ * <tr><td>2</td><td>16..31</td><td>reserved, written zero</td></tr>
+ * <tr><td>3</td><td>0..31</td><td>the pack's ID for the biome at the top block, 0 if it has none</td></tr>
  * </table>
  *
  * <p>Word 0 alone is a complete precipitation record. The validity bit
@@ -56,7 +57,7 @@ public final class PrecipCoarseClipmapBuffer {
     public static final int WORD_PRECIPITATION = 0;
     public static final int WORD_CLIMATE = 1;
     public static final int WORD_BASE = 2;
-    public static final int WORD_RESERVED = 3;
+    public static final int WORD_BIOME_ID = 3;
 
     /**
      * The accepted nearby-weather design moves coverage in 16-block steps, avoiding per-block

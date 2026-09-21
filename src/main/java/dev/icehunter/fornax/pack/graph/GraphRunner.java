@@ -3049,6 +3049,7 @@ public final class GraphRunner {
     }
 
     private static void closeCurrent() {
+        PrecipCoarseClipmapUpload.reset();
         computeAtlasTextures.clear();
         // Detach the voxel window from this soon-to-be-closed registry BEFORE freeing its buffers, so a
         // late Sodium-worker onSectionHarvested can't pick up a registry whose buffers are being torn

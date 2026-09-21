@@ -12,9 +12,20 @@ import java.util.Map;
  * constructor below) so {@code categories()} never re-runs the ID assignment.
  */
 public record PackModel(Path root, PackMeta meta, GraphSpec graph, ScreensSpec screens,
-                        Map<String, PackOption> options, BlocksSpec blocks, MaterialCategories categories) {
+                        Map<String, PackOption> options, BlocksSpec blocks, MaterialCategories categories,
+                        BiomesSpec biomes) {
     public PackModel(Path root, PackMeta meta, GraphSpec graph, ScreensSpec screens,
                      Map<String, PackOption> options, BlocksSpec blocks) {
-        this(root, meta, graph, screens, options, blocks, MaterialCategories.from(blocks));
+        this(root, meta, graph, screens, options, blocks, MaterialCategories.from(blocks), BiomesSpec.empty());
+    }
+
+    public PackModel(Path root, PackMeta meta, GraphSpec graph, ScreensSpec screens,
+                     Map<String, PackOption> options, BlocksSpec blocks, MaterialCategories categories) {
+        this(root, meta, graph, screens, options, blocks, categories, BiomesSpec.empty());
+    }
+
+    public PackModel(Path root, PackMeta meta, GraphSpec graph, ScreensSpec screens,
+                     Map<String, PackOption> options, BlocksSpec blocks, BiomesSpec biomes) {
+        this(root, meta, graph, screens, options, blocks, MaterialCategories.from(blocks), biomes);
     }
 }

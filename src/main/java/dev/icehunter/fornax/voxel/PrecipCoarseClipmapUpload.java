@@ -3,6 +3,7 @@ package dev.icehunter.fornax.voxel;
 import dev.icehunter.fornax.pack.graph.EngineBufferUploadQueue;
 import dev.icehunter.fornax.pack.graph.PrecipCoarseClipmapBuffer;
 import dev.icehunter.fornax.pack.graph.TargetRegistry;
+import dev.icehunter.fornax.pipeline.BiomeProbe;
 import net.fabricmc.fabric.api.tag.convention.v2.ConventionalBiomeTags;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -56,6 +57,13 @@ public final class PrecipCoarseClipmapUpload {
 
     private PrecipCoarseClipmapUpload() {}
 
+    /** Drops held IDs and waiting uploads when the pack or its biome list changes. Render thread only. */
+    public static void reset() {
+        PLAN.clear();
+        clearMirror();
+        EngineBufferUploadQueue.discard(PrecipCoarseClipmapBuffer.TARGET);
+    }
+
     /**
      * Refreshes eight rows during steady state, or fully clears and refills the current field before
      * returning after a level change or discontinuous recenter. The latter ordering prevents a
@@ -68,7 +76,7 @@ public final class PrecipCoarseClipmapUpload {
         Minecraft client = Minecraft.getInstance();
         ClientLevel level = client.level;
         if (level == null || client.player == null) {
-            PLAN.clear();
+            reset();
             return false;
         }
 
@@ -189,7 +197,7 @@ public final class PrecipCoarseClipmapUpload {
         out[PrecipCoarseClipmapBuffer.WORD_CLIMATE] = PrecipCoarseClipmapBuffer.encodeClimate(
                 biome.getTemperature(pos, seaLevel), biome.climateSettings.downfall(), tagsOf(holder));
         out[PrecipCoarseClipmapBuffer.WORD_BASE] = PrecipCoarseClipmapBuffer.encodeBase(biome.getBaseTemperature());
-        out[PrecipCoarseClipmapBuffer.WORD_RESERVED] = 0;
+        out[PrecipCoarseClipmapBuffer.WORD_BIOME_ID] = BiomeProbe.id(holder);
         System.arraycopy(out, 0, MIRROR, offset, WORDS);
     }
 
