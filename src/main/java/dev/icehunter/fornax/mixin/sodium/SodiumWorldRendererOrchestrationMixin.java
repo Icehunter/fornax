@@ -264,22 +264,30 @@ public class SodiumWorldRendererOrchestrationMixin {
                         options.get("u_ShadowDistance", FALLBACK_SHADOW_DISTANCE_BLOCKS))
                 : FALLBACK_SHADOW_DISTANCE_BLOCKS;
 
-        // The raster texture only needs full size while something actually draws into it; the
-        // traced tier's own target is sized off this same resolution regardless, so a trace
-        // started with the raster map off still fills a full-size target.
-        ShadowMapManager.ensureSize(rasterShadowsOn ? resolution : 64, resolution);
+        // Both targets take the SAME size, even with nothing drawing into the raster one.
+        //
+        // The pack's shadow handoff works out one texel coordinate from the raster map's size and
+        // reads both maps at it. Sizing them apart sends every traced read into whatever corner of
+        // the traced map the smaller grid can reach, which carries no coverage, so the handoff
+        // falls back to a raster map that holds no occluder and the world comes out unshadowed.
+        ShadowMapManager.ensureSize(resolution, resolution);
         ShadowMapManager.clearEntity();
 
         // The pack gated its shadow-caster pass off here (dimension-conditioned, say), so skip the
         // clear, the camera build and every draw and trace below. After ensureSize, never instead
         // of it: the map keeps the size it had. Sizing it down would resize a live map on every
         // dimension change, and the next draw carries a scissor from the old size and throws.
-        if (!GraphRunner.shadowsEnabledThisFrame()) {
+        // Whether the pack's own shadow-caster passes run at all this frame, which a pack may
+        // condition on the dimension. It says nothing about the trace: the trace has its own
+        // option and its own subscription, and reads no caster pass.
+        boolean rasterPassesThisFrame = GraphRunner.shadowsEnabledThisFrame();
+        boolean rasterThisFrame = rasterShadowsOn && rasterPassesThisFrame;
+        if (!rasterThisFrame && !rayTracedShadowsOn) {
             dev.icehunter.fornax.pass.shadow.TerrainShadowResult.invalidate();
             return;
         }
 
-        if (rasterShadowsOn) {
+        if (rasterThisFrame) {
             ShadowMapManager.clear();
         }
 
@@ -312,7 +320,7 @@ public class SodiumWorldRendererOrchestrationMixin {
                 x, y, z, resolution, rtRadius, shadowMapBias,
                 GraphRunner.rayTracedShadowFilterGuardUv(resolution)));
 
-        if (!rasterShadowsOn) {
+        if (!rasterThisFrame) {
             // The trace above is this frame's only shadow work: there is no raster map to draw
             // into and no reason to touch the caster list or the uniform buffer for it here.
             return;

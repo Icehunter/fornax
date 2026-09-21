@@ -55,15 +55,22 @@ public class FeatureSolidFeaturesGraphMixin {
         //
         // Must happen BEFORE the graph runs: the resolve samples the shadow map, so a caster added
         // afterwards would not appear until the following frame.
+        //
+        // Either shadow tier wants this replay: the traced tier only ever reaches terrain (see
+        // RayRouter's caster capture), so an entity occluder can only ever reach the independent
+        // entity depth target through this same raster replay, whether or not the raster map's own
+        // terrain draws are also running this frame.
         boolean wantShadowCasters = FornaxRenderState.isActive()
-                && GraphRunner.isCompileOptionEnabled("SHADOWS")
+                && (GraphRunner.isCompileOptionEnabled("SHADOWS")
+                        || GraphRunner.isCompileOptionEnabled("RT_SHADOWS"))
                 && GraphRunner.shadowsEnabledThisFrame()
                 && ShadowMapManager.getView() != null;
         if (!wantShadowCasters && !fornax$reportedShadowSkip) {
             fornax$reportedShadowSkip = true;
             dev.icehunter.fornax.FornaxMod.LOGGER.info(
-                    "[Fornax][diag] entity shadow casting inactive: packActive={} SHADOWS={} map={}",
+                    "[Fornax][diag] entity shadow casting inactive: packActive={} SHADOWS={} RT_SHADOWS={} map={}",
                     FornaxRenderState.isActive(), GraphRunner.isCompileOptionEnabled("SHADOWS"),
+                    GraphRunner.isCompileOptionEnabled("RT_SHADOWS"),
                     ShadowMapManager.getView() != null);
         }
         if (wantShadowCasters) {
