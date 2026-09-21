@@ -66,7 +66,8 @@ class EntityShadowMapContractTest {
     @Test
     void disabledFramesClearEntityDepthBeforeReturning() throws Exception {
         String source = Files.readString(Path.of(ROOT + "mixin/sodium/SodiumWorldRendererOrchestrationMixin.java"));
-        assertTrue(source.contains("ShadowMapManager.ensureSize(64);\n            ShadowMapManager.clearEntity();"));
-        assertTrue(source.contains("ShadowMapManager.ensureSize(resolution);\n        ShadowMapManager.clearEntity();"));
+        assertTrue(source.contains("ShadowMapManager.ensureSize(64, 64);\n            ShadowMapManager.clearEntity();"));
+        assertTrue(source.contains(
+                "ShadowMapManager.ensureSize(rasterShadowsOn ? resolution : 64, resolution);\n        ShadowMapManager.clearEntity();"));
     }
 }

@@ -140,15 +140,20 @@ public final class ShadowMapManager {
     }
 
     /**
-     * Ensures a {@code resolution x resolution} D32_FLOAT depth texture+view is installed as the
-     * current instance, (re)building it if {@code resolution} differs from whatever is currently
-     * allocated (or nothing is allocated yet). Safe to call every frame; a no-op once the
-     * requested resolution matches the current instance.
+     * Ensures a {@code rasterResolution x rasterResolution} D32_FLOAT depth texture+view is
+     * installed as the current instance, (re)building it if {@code rasterResolution} differs from
+     * whatever is currently allocated (or nothing is allocated yet). Safe to call every frame; a
+     * no-op once the requested resolution matches the current instance.
+     *
+     * <p>{@code rtResolution} sizes the separate traced-tier target ({@link TerrainShadowResult})
+     * on its own. The two can differ: a trace still needs its full-size target in a frame where
+     * the raster map itself sits at a minimal placeholder because nothing draws into it.
      */
-    public static void ensureSize(int resolution) {
+    public static void ensureSize(int rasterResolution, int rtResolution) {
         // A declared consumer still needs its descriptor with RT off or unsupported hardware.
         // Packs without that input must not reserve a full float32 RT map.
-        TerrainShadowResult.ensureSize(resolution);
+        TerrainShadowResult.ensureSize(rtResolution);
+        int resolution = rasterResolution;
         if (texture != null && ShadowMapManager.resolution == resolution
                 && (entityTexture != null) == entityMapRequested) {
             return;
@@ -236,7 +241,7 @@ public final class ShadowMapManager {
 
         if (oldView != null || oldTexture != null || oldDummyColorView != null
                 || oldDummyColorTexture != null || oldEntityTexture != null) {
-            // Live per-frame resize path (SHADOW_RESOLUTION change, or the shadows-off 64x64
+            // Live per-frame resize path (SHADOW_RESOLUTION change, or the raster-off 64x64
             // fallback), reached every frame this pack is active from a mixin HEAD inject
             // (SodiumWorldRendererOrchestrationMixin#fornax$renderShadowPass) on the SAME live
             // instance -- identical crash-class hazard to OpaqueDepth.ensureSize()/

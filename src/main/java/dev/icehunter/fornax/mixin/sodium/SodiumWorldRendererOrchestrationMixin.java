@@ -147,17 +147,23 @@ public class SodiumWorldRendererOrchestrationMixin {
      * renderSectionManager.getChunkRenderer().render(...)} directly against it, bypassing {@code
      * renderLayer} (and therefore {@code getRenderLists()}) entirely.
      *
-     * <p>Gated on {@link GraphRunner#isActive()} AND the pack's {@code SHADOWS} compile option
-     * ({@link GraphRunner#isCompileOptionEnabled}, which returns {@code false} whenever the active
-     * pack declares no such option -- today's deployed pack, pending Task 6). With the option off,
-     * this method skips the clear/camera/draw work below entirely, but still calls {@link
+     * <p>Gated on {@link GraphRunner#isActive()} AND at least one of the pack's two shadow compile
+     * options being on: {@code SHADOWS} (the raster map) or {@code RT_SHADOWS} (the traced tier).
+     * The two are read independently ({@link GraphRunner#isCompileOptionEnabled}, {@code false}
+     * whenever the active pack declares no such option), so a pack can run the trace with the
+     * raster map off, or the raster map with the trace off, or both together. Only the raster
+     * side needs {@code SHADOWS}: the map clear, the light-frustum caster scan and the two
+     * {@code render(...)} calls below all sit behind it. The trace dispatch needs only
+     * {@code RT_SHADOWS} and runs even when {@code SHADOWS} is off, though it still shares the
+     * light matrices and distance option computed once below for whichever side needs them.
+     * With both options off, this method skips all of that work, but still calls {@link
      * ShadowMapManager#ensureSize} with a minimal fallback resolution: a resolve pass can declare
      * {@code sunShadowMap} as an unconditional graph input regardless of {@code SHADOWS} (only
      * the shader-side sampling is behind {@code #ifdef SHADOWS}, not the descriptor binding), so
      * leaving {@link ShadowMapManager} entirely unallocated makes {@code GraphInputResolver.resolveView}
      * throw on the very first frame. See {@link #fornax$renderShadowPass}'s own doc comment for the
      * fallback's sizing/clear rationale. {@link ShadowFrameState} still stays at its identity-matrix
-     * default whenever this gate is closed, which {@code UniformBufferManagerMixin}'s unconditional
+     * default whenever both gates are closed, which {@code UniformBufferManagerMixin}'s unconditional
      * per-frame append still safely uploads as an unused value (see that mixin's own doc comment).
      *
      * <p><b>Matrix delivery (the true {@code update()} model):</b>
@@ -227,18 +233,20 @@ public class SodiumWorldRendererOrchestrationMixin {
         if (!GraphRunner.isActive()) {
             return;
         }
-        if (!GraphRunner.isCompileOptionEnabled("SHADOWS")) {
-            // SHADOWS off: skip the clear/camera/draw work below, but a resolve pass can still
-            // unconditionally declare "sunShadowMap" as a graph input -- the #ifdef SHADOWS in
-            // the resolve shader only compiles out the SAMPLING, not the descriptor binding, so
-            // GraphInputResolver.resolveView still runs against it every frame regardless of this
-            // option. Leaving ShadowMapManager entirely unallocated therefore throws "Fornax graph:
-            // input 'sunShadowMap' resolved to no allocated target" (GraphInputResolver.resolveView)
-            // on the very first frame. A minimal 64x64 (~16KB) fallback keeps the descriptor valid;
-            // ensureSize's allocation-time clear-to-1.0 makes it permanently read as "no occluder
-            // anywhere", which is semantically correct for shadows-off and is never actually sampled
-            // since the shader-side #ifdef compiles that read out.
-            ShadowMapManager.ensureSize(64);
+        boolean rasterShadowsOn = GraphRunner.isCompileOptionEnabled("SHADOWS");
+        boolean rayTracedShadowsOn = GraphRunner.isCompileOptionEnabled("RT_SHADOWS");
+        if (!rasterShadowsOn && !rayTracedShadowsOn) {
+            // Neither the raster map nor the trace wants anything this frame, but a resolve pass
+            // can still unconditionally declare "sunShadowMap" as a graph input, since the #ifdef
+            // SHADOWS in the resolve shader only compiles out the SAMPLING, not the descriptor
+            // binding, so GraphInputResolver.resolveView still runs against it every frame
+            // regardless of this option. Leaving ShadowMapManager entirely unallocated therefore
+            // throws "Fornax graph: input 'sunShadowMap' resolved to no allocated target"
+            // (GraphInputResolver.resolveView) on the very first frame. A minimal 64x64 (~16KB)
+            // fallback keeps the descriptor valid; ensureSize's allocation-time clear-to-1.0 makes
+            // it permanently read as "no occluder anywhere", which is semantically correct here
+            // and is never actually sampled since the shader-side #ifdef compiles that read out.
+            ShadowMapManager.ensureSize(64, 64);
             ShadowMapManager.clearEntity();
             dev.icehunter.fornax.pass.shadow.TerrainShadowResult.invalidate();
             return;
@@ -256,18 +264,24 @@ public class SodiumWorldRendererOrchestrationMixin {
                         options.get("u_ShadowDistance", FALLBACK_SHADOW_DISTANCE_BLOCKS))
                 : FALLBACK_SHADOW_DISTANCE_BLOCKS;
 
-        ShadowMapManager.ensureSize(resolution);
+        // The raster texture only needs full size while something actually draws into it; the
+        // traced tier's own target is sized off this same resolution regardless, so a trace
+        // started with the raster map off still fills a full-size target.
+        ShadowMapManager.ensureSize(rasterShadowsOn ? resolution : 64, resolution);
         ShadowMapManager.clearEntity();
 
-        // The pack gated its shadow-caster pass off here, so skip the clear, the camera and the
-        // draws. After ensureSize, never instead of it: the map keeps the size it had. Sizing it
-        // down would resize a live map on every dimension change, and the next draw carries a
-        // scissor from the old size and throws.
+        // The pack gated its shadow-caster pass off here (dimension-conditioned, say), so skip the
+        // clear, the camera build and every draw and trace below. After ensureSize, never instead
+        // of it: the map keeps the size it had. Sizing it down would resize a live map on every
+        // dimension change, and the next draw carries a scissor from the old size and throws.
         if (!GraphRunner.shadowsEnabledThisFrame()) {
             dev.icehunter.fornax.pass.shadow.TerrainShadowResult.invalidate();
             return;
         }
-        ShadowMapManager.clear();
+
+        if (rasterShadowsOn) {
+            ShadowMapManager.clear();
+        }
 
         Vector3f lightDir = SunDirection.computeSunDirection();
         ShadowCamera.LightMatrices lightMatrices = ShadowCamera.compute(lightDir, x, y, z, shadowDistance, resolution);
@@ -279,9 +293,12 @@ public class SodiumWorldRendererOrchestrationMixin {
         ShadowFrameState.commit(lightMatrices.view(), lightMatrices.proj(),
                 lightMatrices.viewProj(), shadowMapBias);
         // Phase one of the celestial cascade: the exact-geometry tier, here rather than later so
-        // its trace overlaps the terrain draw below. Clamped at zero because a pack that declared
-        // no receiving distance is a pack that did not subscribe, which the tier reads as "do not
-        // trace" rather than as a negative extent.
+        // its trace overlaps the terrain draw below when that draw runs at all. Clamped at zero
+        // because a pack that declared no receiving distance is a pack that did not subscribe,
+        // which the tier reads as "do not trace" rather than as a negative extent. This dispatch
+        // must not be skipped when the raster map is off: it is the only thing that fills the
+        // traced-tier target this frame, and skipping it here would leave that target holding
+        // last frame's content with nothing marking it stale.
         float rtRadius = Math.max(0f, Math.min(GraphRunner.rayTracedShadowDistanceBlocks(), shadowDistance));
         org.joml.Matrix4f lightViewProj = lightMatrices.viewProj();
         dev.icehunter.fornax.rt.RayRouter.provider(dev.icehunter.fornax.metalfx.rt.MeshMetalProvider.class)
@@ -294,6 +311,12 @@ public class SodiumWorldRendererOrchestrationMixin {
                 lightViewProj.get(new float[16]),
                 x, y, z, resolution, rtRadius, shadowMapBias,
                 GraphRunner.rayTracedShadowFilterGuardUv(resolution)));
+
+        if (!rasterShadowsOn) {
+            // The trace above is this frame's only shadow work: there is no raster map to draw
+            // into and no reason to touch the caster list or the uniform buffer for it here.
+            return;
+        }
 
         // MAIN camera matrices and MAIN fog, not the light's -- see "Matrix delivery" and
         // "Fog delivery" above for why: both land in the frame's single guarded update() write.
