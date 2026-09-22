@@ -50,15 +50,17 @@ class MeshMetalProviderContractTest {
     }
 
     /**
-     * Six, not five. The deleted pass had five: unavailable, no device or atlas, an empty caster
-     * snapshot, the pack's shadow pass gated off, and the catch. The sixth is new with the split:
-     * a frame where nothing handed over a caster source before the fill, which cannot happen in the
-     * shipping call order but is reachable by any future caller of the interface.
+     * Seven, not five. The deleted pass had five: unavailable, no device or atlas, an empty caster
+     * snapshot, the pack's shadow pass gated off, and the catch. The sixth is a frame where nothing
+     * handed over a caster source before the fill, which cannot happen in the shipping call order
+     * but is reachable by any future caller of the interface. The seventh is a frame where a build
+     * is under way but nothing is promoted yet (the first frame after load, or after a
+     * teleport), which has meshes to trace but no structure ready to trace them against.
      */
     @Test
     void everyDeclinePathInvalidatesTheCelestialTarget() throws IOException {
         String provider = read("metalfx/rt/MeshMetalProvider.java");
-        assertEquals(6, provider.split("TerrainShadowResult\\.invalidate\\(\\)", -1).length - 1,
+        assertEquals(7, provider.split("TerrainShadowResult\\.invalidate\\(\\)", -1).length - 1,
                 "a decline that leaves the target valid hands the pack last frame's shadows");
         assertTrue(provider.contains("""
                         if (casters == null) {"""),
@@ -112,5 +114,26 @@ class MeshMetalProviderContractTest {
         String runner = read("pack/graph/GraphRunner.java");
         assertTrue(runner.indexOf("closeCurrent();") < runner.indexOf("RayRouter.install(rayProviders);"),
                 "installing before the teardown would close the providers just constructed");
+    }
+
+    /**
+     * Guards against starvation: a build must never start while one is already outstanding, so the
+     * diff (and the build it gates) is skipped whenever pendingBuilt is not null. The only place a
+     * pending build is ever discarded is close()/teardown, never a fresh mesh change.
+     */
+    @Test
+    void theBuildPathIsGuardedByPendingBuiltAndDiscardPendingRunsOnlyFromClose() throws IOException {
+        String provider = read("metalfx/rt/MeshMetalProvider.java");
+        assertTrue(provider.contains("if (pendingBuilt == null) {"),
+                "a build must never start while one is already outstanding, or a mesh change "
+                        + "mid-build discards and restarts it every frame: starvation");
+        assertEquals(1, provider.split("discardPending\\(\\);", -1).length - 1,
+                "discardPending() must have exactly one call site");
+        int close = provider.indexOf("public void close() {");
+        assertTrue(close > 0, "close() must exist");
+        int call = provider.indexOf("discardPending();");
+        assertTrue(call > close,
+                "its one call site must be inside close(): a fresh mesh change must never discard "
+                        + "a build in flight, only teardown does");
     }
 }

@@ -90,16 +90,19 @@ class FrameGenPresentationContractTest {
     }
 
     @Test
-    void cpuMeasurementsCoverInteropCallsAndMeshChangeWaitsWithoutNewGpuWaits() throws Exception {
+    void cpuMeasurementsCoverInteropCallsAndThePerFrameMeshPathNeverHostWaits() throws Exception {
         assertTimed(read("metalfx/FrameGenPass.java"), "public static void runIfEnabled(", "frame generation CPU");
         assertTimed(read("metalfx/MetalFxUpscalePass.java"), "public static boolean runIfEnabled(", "MetalFX upscale CPU");
         String terrain = read("metalfx/rt/MeshMetalProvider.java");
         assertTimed(terrain, "public void fillCelestialVisibility(", "RT shadows CPU");
-        assertTimed(terrain, "private void awaitMeshChange(", "RT mesh wait CPU");
         assertTrue(terrain.contains("recordValue(\"rt_shadow_dirty_meshes\", dirty.size())"));
-        String wait = method(terrain, "private void awaitMeshChange(");
-        assertEquals(1, wait.split("await\\(device\\)", -1).length - 1,
-                "timing must call the existing wait exactly once");
+        // The per-frame path never host-waits on a mesh change: a build is traced only once its
+        // own command buffer status confirms it is complete, a fact checked without waiting. The
+        // host wait survives only outside the frame path: a format/resolution resize in
+        // ensureImages, and teardown in close.
+        assertFalse(terrain.contains("awaitMeshChange"), "the per-frame path must not host-wait on a mesh change");
+        assertEquals(3, terrain.split("await\\(device\\)", -1).length - 1,
+                "await(device) must appear only in ensureImages (resize, twice) and close (teardown)");
     }
 
     private static void assertTimed(String source, String signature, String label) {

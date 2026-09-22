@@ -29,7 +29,7 @@ class CascadeHandoverContractTest {
     @Test
     void theMeshTierHandsOverItsImageInsteadOfCopyingItBack() throws IOException {
         String mesh = read("metalfx/rt/MeshMetalProvider.java");
-        assertTrue(mesh.contains("cascade = new CascadeImage(depth, timeline.mtlSharedEvent, value + 1, resolution);"),
+        assertTrue(mesh.contains("cascade = new CascadeImage(depth, timeline.mtlSharedEvent, traceValue, resolution);"),
                 "the traced image, the event that says it is done and its resolution travel together");
         assertTrue(mesh.contains("public boolean publishCelestialVisibility()"),
                 "the tier above delivers its own image only when no lower tier did, which is the "

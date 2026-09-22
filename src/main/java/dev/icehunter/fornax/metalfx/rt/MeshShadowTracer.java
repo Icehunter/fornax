@@ -83,7 +83,8 @@ public final class MeshShadowTracer implements AutoCloseable {
 
     public MeshShadowTracer() {}
 
-    /** The instance structure this tracer last built, or 0 before the first successful build. */
+    /** The instance structure this tracer last built, or 0 before the first successful build.
+     * No production caller: device tests still use it, written against {@link #trace}. */
     public synchronized long instanceStructure() { return tlas; }
 
     /**
@@ -100,6 +101,9 @@ public final class MeshShadowTracer implements AutoCloseable {
         }
     }
 
+    /** No production caller: {@link MeshMetalProvider} builds and traces through {@link
+     * #encodeBuild} and {@link #encodeVisibilityTrace} instead. Device tests below still use
+     * this combined form; port a test before changing this method. */
     public synchronized void trace(long commandQueue,List<Mesh> meshes,long atlasTexture,long outputTexture,
             int resolution,float[] inverseLightVp,float[] lightVp,float cameraX,float cameraY,float cameraZ,
             float radiusBlocks,float bias,float filterGuardUv,long waitEvent,long waitValue,long signalValue) {
@@ -153,6 +157,152 @@ public final class MeshShadowTracer implements AutoCloseable {
             if(!committed) { for(Cached item:created)item.release();if(newTlas)release(nextTlas); }
             Objc.autoreleasePoolPop(pool);
         }
+    }
+
+    /**
+     * A structure that is built but not yet live. Holds its handle and the Metal objects (BLAS,
+     * vertex and primitive buffers) its instances need. The caller only passes it to {@link
+     * #promote}, {@link #discardBuild} or {@link #encodeVisibilityTrace}.
+     */
+    public record Built(long structure, Map<Key,Cached> residency, List<Instance> instances, long buildCommandBuffer) {}
+
+    /**
+     * Compares meshes against the live structure only, never against a build still pending.
+     * Calling this again before {@link #promote} replaces whatever the first call built; discard
+     * that one with {@link #discardBuild}. Records the decode and the acceleration structure
+     * build into one command buffer. That buffer waits for {@code event}/{@code waitValue}, this
+     * frame's mesh upload. It signals {@code event} at {@code signalValue} when the build
+     * finishes, not when a trace does. An unchanged mesh keeps its cached BLAS shared with live.
+     * This call adds one reference, so releasing live does not free memory the returned
+     * {@link Built} still needs.
+     */
+    public synchronized Built encodeBuild(long commandQueue,List<Mesh> meshes,
+            long event,long waitValue,long signalValue) {
+        if(closed || failed)throw new IllegalStateException("mesh shadow tracer is closed or failed");
+        if(commandQueue==0)throw new IllegalArgumentException("mesh build requires a command queue");
+        if(event!=0 && (waitValue<0 || signalValue<=waitValue))
+            throw new IllegalArgumentException("build signal value must follow its wait value");
+        List<Mesh> ordered=new ArrayList<>(List.copyOf(meshes));ordered.sort(ORDER);
+        for(int i=1;i<ordered.size();i++) if(ordered.get(i-1).key().equals(ordered.get(i).key()))
+            throw new IllegalArgumentException("duplicate mesh key "+ordered.get(i).key());
+        long pool=Objc.autoreleasePoolPush();
+        List<Cached> created=new ArrayList<>();
+        // Reused entries got an extra reference here (see retainCached). On failure that
+        // reference must be released too, or each reused mesh leaks one reference.
+        List<Cached> reused=new ArrayList<>();
+        List<Long> temporary=new ArrayList<>();
+        long nextTlas=0; boolean newTlas=false, ownsTlas=false, committed=false;
+        try {
+            initialize(commandQueue);retireCompleted();
+            long cb=require(Objc.msgSendId(queue,Objc.selector("commandBuffer")),"build command buffer");
+            if(event!=0)Objc.msgSendVoidIdLong(cb,Objc.selector("encodeWaitForEvent:value:"),event,waitValue);
+            Map<Key,Cached> next=new LinkedHashMap<>();
+            List<Instance> nextInstances=new ArrayList<>();
+            for(Mesh mesh:ordered) {
+                if(mesh.vertexCount()==0)continue;
+                Cached item=cache.get(mesh.key());
+                if(item!=null && item.matches(mesh)) {
+                    retainCached(item);reused.add(item);
+                } else {
+                    item=decodeAndBuild(cb,mesh,temporary);created.add(item);
+                }
+                next.put(mesh.key(),item);
+                nextInstances.add(new Instance(item.blas(),mesh.originX(),mesh.originY(),mesh.originZ()));
+            }
+            newTlas=!nextInstances.equals(instances);
+            if(newTlas) { nextTlas=buildInstances(cb,nextInstances,temporary);ownsTlas=true; }
+            else if((nextTlas=tlas)!=0) { Objc.msgSendId(nextTlas,Objc.selector("retain"));ownsTlas=true; }
+            if(event!=0)Objc.msgSendVoidIdLong(cb,Objc.selector("encodeSignalEvent:value:"),event,signalValue);
+            Objc.msgSendVoid(cb,Objc.selector("commit"));committed=true;
+            pending.addLast(Objc.msgSendId(cb,Objc.selector("retain")));
+            // A second, independent reference. The one above is this tracer's own bookkeeping;
+            // retireCompleted() releases it. This one belongs to the caller, released by
+            // promote() or discardBuild() once isBuildComplete() stops needing it.
+            long handle=Objc.msgSendId(cb,Objc.selector("retain"));
+            return new Built(nextTlas,Map.copyOf(next),List.copyOf(nextInstances),handle);
+        } finally {
+            for(long resource:temporary)release(resource);
+            if(!committed) {
+                for(Cached item:created)item.release();
+                for(Cached item:reused)item.release();
+                if(ownsTlas)release(nextTlas);
+            }
+            Objc.autoreleasePoolPop(pool);
+        }
+    }
+
+    /**
+     * Makes {@code built} the live structure. Releases every entry the old live structure held,
+     * even ones {@code built} reuses. {@link #encodeBuild} already took an extra reference on
+     * anything reused, so this drops only live's own reference, leaving {@code built}'s intact.
+     * Safe immediately, with no wait needed. Every command buffer that could still read the old
+     * structure was already committed before this call. Metal keeps an object alive for any
+     * command buffer that used it, no matter this object's own release count.
+     */
+    public synchronized void promote(Built built) {
+        for(Cached item:cache.values())item.release();
+        release(tlas);
+        release(built.buildCommandBuffer());
+        cache=built.residency();
+        instances=built.instances();
+        tlas=built.structure();
+    }
+
+    /** Releases a built structure that will never go live. A newer build replaced it, or the
+     * caller chose not to use it. Safe immediately, for the same reason {@link #promote} is. */
+    public synchronized void discardBuild(Built built) {
+        for(Cached item:built.residency().values())item.release();
+        release(built.structure());
+        release(built.buildCommandBuffer());
+    }
+
+    /**
+     * Whether the build command buffer behind {@code built} has finished. This checks that one
+     * specific command buffer, never a value on a shared event. The caller's Vulkan encoder
+     * signals that same event every frame from another queue. Nothing keeps its signal behind
+     * this command buffer. This never waits; it reads Metal's own status. If the build failed,
+     * this marks the tracer failed and throws; {@link #retireCompleted} does the same for any
+     * other command.
+     */
+    public synchronized boolean isBuildComplete(Built built) {
+        if(closed || failed)throw new IllegalStateException("mesh shadow tracer is closed or failed");
+        long status=Objc.msgSendLong(built.buildCommandBuffer(),Objc.selector("status"));
+        if(status==5) { failed=true;throw new IllegalStateException("mesh shadow build command failed"); }
+        return status>=4;
+    }
+
+    /**
+     * Traces the light-space visibility image against {@code built}, normally the live
+     * structure. Never diffs or rebuilds anything. Records its own command buffer, waiting for
+     * {@code event}/{@code waitValue}, the copy of this frame's atlas and depth target. It
+     * signals {@code event} at {@code signalValue} when the trace is done. {@code
+     * built.structure() == 0}, an empty scene, still writes the clear image, the same as
+     * {@link #trace}.
+     */
+    public synchronized void encodeVisibilityTrace(long commandQueue,Built built,long atlasTexture,long outputTexture,
+            int resolution,float[] inverseLightVp,float[] lightVp,float cameraX,float cameraY,float cameraZ,
+            float radiusBlocks,float bias,float filterGuardUv,long event,long waitValue,long signalValue) {
+        if(closed || failed)throw new IllegalStateException("mesh shadow tracer is closed or failed");
+        if(commandQueue==0 || atlasTexture==0 || outputTexture==0 || resolution<=0)
+            throw new IllegalArgumentException("mesh trace requires queue, atlas, output and positive resolution");
+        validateMatrix(inverseLightVp);validateMatrix(lightVp);
+        if(!Float.isFinite(cameraX)||!Float.isFinite(cameraY)||!Float.isFinite(cameraZ)
+                ||!Float.isFinite(radiusBlocks)||radiusBlocks<0||!Float.isFinite(bias)||bias<0||bias>=1
+                ||!Float.isFinite(filterGuardUv)||filterGuardUv<0)
+            throw new IllegalArgumentException("mesh trace camera/radius/bias/guard must be finite; radius and guard >= 0; bias in [0,1)");
+        if(event!=0 && (waitValue<0 || signalValue<=waitValue))
+            throw new IllegalArgumentException("output event value must follow input event value");
+        long pool=Objc.autoreleasePoolPush();
+        try {
+            initialize(commandQueue);retireCompleted();
+            long cb=require(Objc.msgSendId(queue,Objc.selector("commandBuffer")),"trace command buffer");
+            if(event!=0)Objc.msgSendVoidIdLong(cb,Objc.selector("encodeWaitForEvent:value:"),event,waitValue);
+            encodeTrace(cb,built.residency().values().stream().toList(),built.structure(),atlasTexture,outputTexture,
+                    resolution,inverseLightVp,lightVp,cameraX,cameraY,cameraZ,radiusBlocks,bias,filterGuardUv);
+            if(event!=0)Objc.msgSendVoidIdLong(cb,Objc.selector("encodeSignalEvent:value:"),event,signalValue);
+            Objc.msgSendVoid(cb,Objc.selector("commit"));
+            pending.addLast(Objc.msgSendId(cb,Objc.selector("retain")));
+        } finally { Objc.autoreleasePoolPop(pool); }
     }
 
     private void initialize(long requestedQueue) {
@@ -314,7 +464,10 @@ public final class MeshShadowTracer implements AutoCloseable {
             if(!pending.isEmpty())Objc.msgSendVoid(pending.peekLast(),Objc.selector("waitUntilCompleted"));
         } finally {
             while(!pending.isEmpty())release(pending.removeFirst());
-            for(Cached item:cache.values())item.release();cache.clear();
+            // Reassigned here, not cleared with cache.clear(). promote() may have set cache to
+            // the immutable map Map.copyOf() returns inside a Built. clear() throws on an
+            // immutable map.
+            for(Cached item:cache.values())item.release();cache=Map.of();
             release(tlas);tlas=0;instances=List.of();
             release(decodePipeline);release(tracePipeline);release(clearPipeline);release(queue);
             decodePipeline=tracePipeline=clearPipeline=queue=device=0;
@@ -328,4 +481,12 @@ public final class MeshShadowTracer implements AutoCloseable {
     private static void buffer(long encoder,long value,long index) { Objc.msgSendVoidIdLongLong(encoder,Objc.selector("setBuffer:offset:atIndex:"),value,0,index); }
     private static void resident(long encoder,long value) { Objc.msgSendVoidIdLong(encoder,Objc.selector("useResource:usage:"),value,READ_USAGE); }
     private static void release(long value) { if(value!=0)Objc.msgSendVoid(value,Objc.selector("release")); }
+    /** Takes an extra Obj-C reference on a Cached entry a new structure reuses unchanged. Live's
+     * own map keeps its reference, so the entry needs one more owner. Otherwise promote()'s
+     * release of live's whole map would free memory the new structure still needs. */
+    private static void retainCached(Cached item) {
+        Objc.msgSendId(item.blas(),Objc.selector("retain"));
+        Objc.msgSendId(item.vertices(),Objc.selector("retain"));
+        Objc.msgSendId(item.primitives(),Objc.selector("retain"));
+    }
 }

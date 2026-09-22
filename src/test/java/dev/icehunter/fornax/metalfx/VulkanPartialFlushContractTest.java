@@ -138,7 +138,34 @@ class VulkanPartialFlushContractTest {
         assertFalse(trace.contains("encoder.submit();"),
                 "a full submit host-waits an earlier frame batch for a signal Metal already has");
         assertOrdered(trace, "VulkanMetalInterop.recordIntoStream(encoder,", "encoder.signalSemaphore(",
-                FLUSH, "tracer.trace(");
+                FLUSH, "tracer.encodeBuild(");
+        assertOrdered(trace, FLUSH, "tracer.encodeVisibilityTrace(");
+    }
+
+    /**
+     * Vulkan forbids re-signalling a timeline semaphore with a value that collides with another
+     * pending or future signal, so every value this class signals on the shared Vulkan-Metal
+     * timeline must be drawn from the one nextValue counter, never computed by arithmetic on an
+     * earlier value. Arithmetic on readyValue() can equal whatever nextValue itself reaches by a
+     * later frame, since nothing advances nextValue past that value, letting the same value be
+     * signalled twice.
+     */
+    @Test
+    void everySignalledValueIsReservedFromNextValueNeverComputedByArithmetic() throws IOException {
+        String provider = read("metalfx/rt/MeshMetalProvider.java");
+        assertEquals(4, occurrences(provider, "nextValue++"),
+                "one reservation per signal this class ever makes: the Vulkan copy, the build, "
+                        + "the trace, and the publish copy-back");
+        assertTrue(provider.contains("long copyValue = nextValue++;"));
+        assertTrue(provider.contains("buildValue = nextValue++;"));
+        assertTrue(provider.contains("traceValue = nextValue++;"));
+        assertTrue(provider.contains("long published = nextValue++;"),
+                "the publish copy-back must reserve its own value, not compute readyValue() + 1: "
+                        + "that arithmetic can collide with whatever nextValue itself reaches by a "
+                        + "later frame, since nothing advances nextValue past it");
+        assertFalse(provider.contains("readyValue() + 1"),
+                "a value on the shared timeline computed by arithmetic instead of reserved from "
+                        + "nextValue can be signalled twice");
     }
 
     /**

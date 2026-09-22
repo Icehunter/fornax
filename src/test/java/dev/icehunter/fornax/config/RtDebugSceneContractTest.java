@@ -112,9 +112,10 @@ class RtDebugSceneContractTest {
                 "the wait must be encoded into the command buffer before the dispatch that reads");
 
         String provider = read("metalfx/rt/MeshMetalProvider.java");
-        assertTrue(provider.contains("debugEventValue = value + 1;"),
-                "the value handed over must be the one the mesh tier's Metal work signals, which "
-                        + "is value + 1: value is the Vulkan input and value + 2 the copy-back");
+        assertTrue(provider.contains("debugEventValue = traceValue;"),
+                "the value handed over must be the one the mesh tier's own trace against live "
+                        + "signals: a build's own signal value says its structure is ready, not "
+                        + "that any trace against it has happened yet");
     }
 
     /**

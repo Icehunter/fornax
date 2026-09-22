@@ -8,6 +8,7 @@ import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.atlas.BlockAtlasView;
 import dev.icehunter.fornax.metalfx.VulkanMetalInterop;
+import dev.icehunter.fornax.metalfx.objc.Objc;
 import dev.icehunter.fornax.mixin.sodium.RenderSectionManagerAccessor;
 import dev.icehunter.fornax.pack.graph.GraphRunner;
 import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
@@ -54,7 +55,9 @@ public final class MeshMetalProvider implements RayProvider {
     private record Source(MeshShadowTracer.Key key, long revision, VulkanGpuBuffer buffer,
                           TerrainMeshSelection.VertexRange range) {}
     private record Copy(Source source, MetalRtGeometry.ExportedBuffer buffer) {}
-    private final Map<MeshShadowTracer.Key, Copy> copies = new HashMap<>();
+    /** Input buffers of the live structure. Replaced as a whole when a new structure takes
+     * over; a build in progress keeps its own map, pendingCopies. */
+    private Map<MeshShadowTracer.Key, Copy> copies = new HashMap<>();
     private MeshShadowTracer tracer;
     private VulkanMetalInterop.SharedTimeline timeline;
     private VulkanMetalInterop.InteropImage atlas, depth;
@@ -70,9 +73,9 @@ public final class MeshMetalProvider implements RayProvider {
     private RenderSectionManager casters;
 
     /**
-     * The coarse grid origin this tier's instances are positioned against, and the structure they
-     * live in, as of the last successful trace. The scene debug needs both: its rays are built in
-     * whichever frame the scene it traces uses, and this one is not the voxel window's.
+     * The grid origin and structure this tier's debug view traces against, set at the last
+     * promotion. The debug view can lag a frame behind this tier's own trace, and it is not
+     * the voxel window's.
      */
     private long debugTlas;
     private float debugOriginX, debugOriginY, debugOriginZ;
@@ -95,6 +98,32 @@ public final class MeshMetalProvider implements RayProvider {
 
     /** Buffer-form queries, lazily built: a pack that declares none never allocates any of this. */
     private RayQueryInterop rayQueries;
+
+    /** Tracks which structure is live and when the next one takes over. Tested on its own in
+     * {@code StructureSwapTest}. Every handle it returns is freed through this class. */
+    private StructureSwap swap = new StructureSwap();
+    /** The Metal objects behind the structure swap.live() names: its BLAS, vertex and primitive
+     * buffers, and its TLAS. Null until the first promotion. */
+    private MeshShadowTracer.Built liveBuilt;
+    /** The grid origin live's instances are placed against. It can differ from this frame's own
+     * origin until the next structure takes over. */
+    private float liveOriginX, liveOriginY, liveOriginZ;
+    /** The highest timeline value any trace against live has used. Live's buffers free only once
+     * a newer structure passes this value. Metal frees a buffer once the GPU finishes with it,
+     * but Vulkan does not. Freeing one here while a read is still running crashes the process. */
+    private long liveTraceValue;
+    /** A structure that is built but not yet live, with the buffers and grid origin it was
+     * built against. Null when nothing is mid-build. A new build never starts while one is
+     * already outstanding (see traceFrame's diff gate). This clears only at promotion or at
+     * close()/teardown. */
+    private MeshShadowTracer.Built pendingBuilt;
+    private Map<MeshShadowTracer.Key, Copy> pendingCopies;
+    private float pendingOriginX, pendingOriginY, pendingOriginZ;
+    private long pendingBuildValue;
+    /** Buffers swap.retire() is tracking, keyed by the vkBuffer handle swap hands back on drain.
+     * StructureSwap only knows opaque numbers; this map turns one back into the object
+     * destroyOne needs. */
+    private final Map<Long, Copy> retiringCopies = new HashMap<>();
 
     public MeshMetalProvider() {
     }
@@ -175,10 +204,9 @@ public final class MeshMetalProvider implements RayProvider {
     @Override
     public void beginFrame() {
         casters = null;
-        // The scene, its structure and the event that says when it is ready describe ONE frame. A
-        // teleport empties the caster set, close() destroys the timeline, and a handle held past
-        // that point is a released Metal object: encodeWaitForEvent on one crashes the process
-        // inside objc_msgSend, with no Java frame to name the cause.
+        // Clears only this frame's output (debugTlas, the debug event, the cascade handoff). It
+        // frees nothing and leaves liveBuilt and swap alone. Without it a frame that stops early
+        // would publish last frame's image and camera.
         forgetDebugScene();
         resetFrame();
     }
@@ -226,40 +254,100 @@ public final class MeshMetalProvider implements RayProvider {
             if (timeline == null) timeline = VulkanMetalInterop.createSharedTimeline(device);
             if (tracer == null) tracer = new MeshShadowTracer();
 
-            Set<MeshShadowTracer.Key> retained = new HashSet<>();
-            List<Copy> dirty = new ArrayList<>();
-            boolean retired = false;
-            for (Source source : sources) {
-                retained.add(source.key);
-                Copy old = copies.get(source.key);
-                if (old == null || !sameSource(old.source, source)) {
-                    if (!retired) { awaitMeshChange(device); retired = true; }
-                    // Native BLAS only reads decoded data after its construction; input buffers can
-                    // retire once the previous Metal dispatch and Vulkan copy-back have completed.
-                    Copy copy = new Copy(source, MetalRtGeometry.createExportedBuffer(device, source.range.byteLength()));
-                    copies.put(source.key, copy);
-                    if (old != null) MetalRtGeometry.destroyOne(device, old.buffer);
-                    dirty.add(copy);
+            // Swap point. Promote the pending build only when its own command buffer reports
+            // done. The shared event value cannot say that: the Vulkan side signals the same
+            // event every frame from another queue, so the counter can pass a build that is
+            // still running.
+            boolean ready;
+            try {
+                ready = pendingBuilt != null && tracer.isBuildComplete(pendingBuilt);
+            } catch (RuntimeException e) {
+                // isBuildComplete throws only when the build failed. Nothing will read
+                // pendingBuilt's or pendingCopies' buffers again, so both free here instead of
+                // waiting for close().
+                if (pendingBuilt != null) {
+                    tracer.discardBuild(pendingBuilt);
+                    for (Copy copy : pendingCopies.values()) MetalRtGeometry.destroyOne(device, copy.buffer);
+                    pendingBuilt = null;
+                    pendingCopies = null;
                 }
+                throw e;
             }
-            if (!retained.containsAll(copies.keySet())) {
-                if (!retired) awaitMeshChange(device);
-                var it = copies.entrySet().iterator();
-                while (it.hasNext()) {
-                    var entry = it.next();
-                    if (!retained.contains(entry.getKey())) {
-                        MetalRtGeometry.destroyOne(device, entry.getValue().buffer);
-                        it.remove();
-                    }
+            swap.promoteIfReady(ready);
+            // ready already means pendingBuilt is not null, so it also says whether this call
+            // promoted. Comparing handles instead would miss a promotion when the rebuilt TLAS
+            // reuses the same native pointer.
+            boolean promoted = ready;
+            if (promoted) {
+                tracer.promote(pendingBuilt);
+                List<Copy> orphaned = new ArrayList<>();
+                for (var entry : copies.entrySet()) {
+                    if (pendingCopies.get(entry.getKey()) != entry.getValue()) orphaned.add(entry.getValue());
                 }
+                // liveTraceValue still holds the old structure's last trace value here. That is
+                // the value any reader of its buffers must pass before they are safe to free.
+                queueRetireCopies(orphaned, liveTraceValue);
+                copies = pendingCopies;
+                liveBuilt = pendingBuilt;
+                liveOriginX = pendingOriginX; liveOriginY = pendingOriginY; liveOriginZ = pendingOriginZ;
+                liveTraceValue = pendingBuildValue;
+                pendingBuilt = null;
+                pendingCopies = null;
             }
+            // signaledValue reads the shared event's counter without waiting. Only the retire
+            // queue below uses it. Promotion above depends on the build command buffer's own
+            // status, not on this event.
+            long signalled = Objc.msgSendLong(timeline.mtlSharedEvent, Objc.selector("signaledValue"));
+            drainRetiredCopies(device, signalled);
+            GraphRunner.frameProfiler().recordValue("rt_shadow_structure_swaps", promoted ? 1 : 0);
 
+            // This picks a new grid origin near the camera so nearby float coordinates stay small
+            // and precise. Grid cells are sixteen sections wide; the size does not depend on the
+            // pack's visible radius.
+            int ox = ((int) Math.floor(x / 256)) * 256;
+            int oy = ((int) Math.floor(y / 256)) * 256;
+            int oz = ((int) Math.floor(z / 256)) * 256;
+
+            // A build never starts while one is already outstanding. Otherwise, diffing against
+            // a stale live would flag the same sources dirty every frame. Each build would be
+            // discarded before it is ever promoted, starving under steady camera motion. The
+            // next diff waits for that build to promote, then runs against live as it then stands.
+            boolean needsBuild = false;
+            Set<MeshShadowTracer.Key> retained = new HashSet<>();
+            if (pendingBuilt == null) {
+                boolean contentDirty = false;
+                for (Source source : sources) {
+                    retained.add(source.key);
+                    Copy existing = copies.get(source.key);
+                    if (existing == null || !sameSource(existing.source, source)) contentDirty = true;
+                }
+                needsBuild = contentDirty || !retained.equals(copies.keySet())
+                        || (liveBuilt != null && (ox != liveOriginX || oy != liveOriginY || oz != liveOriginZ));
+            }
             phase = record("RT mesh diff CPU", phase);
 
+            List<Copy> dirty;
+            Map<MeshShadowTracer.Key, Copy> candidateCopies = null;
+            if (needsBuild) {
+                candidateCopies = new HashMap<>(copies);
+                List<Copy> created = new ArrayList<>();
+                for (Source source : sources) {
+                    Copy old = copies.get(source.key);
+                    if (old == null || !sameSource(old.source, source)) {
+                        Copy copy = new Copy(source, MetalRtGeometry.createExportedBuffer(device, source.range.byteLength()));
+                        candidateCopies.put(source.key, copy);
+                        created.add(copy);
+                    }
+                }
+                candidateCopies.keySet().retainAll(retained);
+                dirty = created;
+            } else {
+                dirty = List.of();
+            }
             GraphRunner.frameProfiler().recordValue("rt_shadow_dirty_meshes", dirty.size());
+
             var encoder = device.createCommandEncoder();
-            long value = nextValue;
-            nextValue += 3; // Vulkan input / Metal output / Vulkan copy-back on one timeline.
+            long copyValue = nextValue++;
             VulkanMetalInterop.recordIntoStream(encoder, cmd -> {
                 try (MemoryStack stack = MemoryStack.stackPush()) {
                     // Includes prior accepted arena transfer writes before raw copies. No renderer
@@ -285,64 +373,103 @@ public final class MeshMetalProvider implements RayProvider {
                 }
             });
             phase = record("RT mesh record CPU", phase);
-            encoder.signalSemaphore(timeline.vkSemaphore, value, VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+            encoder.signalSemaphore(timeline.vkSemaphore, copyValue, VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
             // The handoff is the timeline signal reaching Metal. A full submit also waits for
-            // resource retirement, which this path does not need: the wait before a mesh buffer is
-            // freed is on the shared timeline, not on an encoder fence.
+            // resource retirement, which this path does not need: nothing below host-waits on it.
             ((VulkanPartialFlush) encoder).fornax$flushPending();
             phase = record("RT mesh submit CPU", phase);
-            lastValue = value;
-            // Arena relocation/free does not know about the raw vkCmdCopyBuffer. Complete copies
-            // before returning to the owning renderer, only on mesh-change frames, not every frame.
-            if (!dirty.isEmpty()) awaitMeshChange(device);
+            // This updates after each stage commits, not only at the end. An exception in a later
+            // stage must not leave it short of what close() has to wait for.
+            lastValue = copyValue;
 
-            // Stable nearby grid origin preserves float precision without rebasing TLAS each step.
-            // Sixteen-section grid cells keep near coordinates small; an arithmetic precision
-            // choice only, independent of the pack's visible radius.
-            int ox = ((int) Math.floor(x / 256)) * 256;
-            int oy = ((int) Math.floor(y / 256)) * 256;
-            int oz = ((int) Math.floor(z / 256)) * 256;
-            List<MeshShadowTracer.Mesh> meshes = new ArrayList<>(sources.size());
-            for (Source source : sources) {
-                var key = source.key;
-                Copy copy = copies.get(key);
-                meshes.add(new MeshShadowTracer.Mesh(key, source.revision, copy.buffer.mtlBuffer(),
-                        Math.toIntExact(source.range.vertexCount()), (float) ((long) key.x() * 16 - ox), (float) ((long) key.y() * 16 - oy), (float) ((long) key.z() * 16 - oz)));
+            long buildValue = 0;
+            if (needsBuild) {
+                List<MeshShadowTracer.Mesh> meshes = new ArrayList<>(sources.size());
+                for (Source source : sources) {
+                    Copy copy = candidateCopies.get(source.key);
+                    meshes.add(new MeshShadowTracer.Mesh(source.key, source.revision, copy.buffer.mtlBuffer(),
+                            Math.toIntExact(source.range.vertexCount()),
+                            (float) ((long) source.key.x() * 16 - ox), (float) ((long) source.key.y() * 16 - oy),
+                            (float) ((long) source.key.z() * 16 - oz)));
+                }
+                phase = record("RT mesh instances CPU", phase);
+                buildValue = nextValue++;
+                try {
+                    pendingBuilt = tracer.encodeBuild(VulkanMetalInterop.metalCommandQueue(), meshes,
+                            timeline.mtlSharedEvent, copyValue, buildValue);
+                } catch (RuntimeException e) {
+                    // The floor here is buildValue, not copyValue. encodeBuild can throw after its
+                    // own command buffer is already committed, since Map.copyOf, List.copyOf or
+                    // retain can still fail there. When that happens, the decode reading these
+                    // buffers needs buildValue signaled, not only copyValue, before they are safe
+                    // to free. buildValue is always at least copyValue, so it is correct even when
+                    // nothing was submitted.
+                    queueRetireCopies(dirty, buildValue);
+                    throw e;
+                }
+                // Set together with pendingBuilt, before the check below can throw. If it throws,
+                // pendingBuilt is already set, and close()'s discardPending() must find these
+                // fields consistent. Otherwise it crashes partway through teardown and leaks the
+                // tracer, atlas, depth and timeline.
+                pendingCopies = candidateCopies;
+                pendingOriginX = ox; pendingOriginY = oy; pendingOriginZ = oz;
+                pendingBuildValue = buildValue;
+                // needsBuild is only true when pendingBuilt is null (see the diff gate above). So
+                // nothing was offered since the last promotion or teardown, and this call must
+                // return 0. A nonzero return would mean a pending build was silently discarded
+                // here instead of through discardPending(). That is the stale-handle hazard this
+                // gate exists to rule out.
+                long discardedByOffer = swap.offer(pendingBuilt.structure());
+                if (discardedByOffer != 0) throw new IllegalStateException(
+                        "offer() discarded a live pending structure " + discardedByOffer
+                                + "; a build started while one was already outstanding");
+                lastValue = buildValue;
+                phase = record("RT mesh build CPU", phase);
             }
-            phase = record("RT mesh instances CPU", phase);
-            structureCameraX = (float) (x - ox);
-            structureCameraY = (float) (y - oy);
-            structureCameraZ = (float) (z - oz);
-            debugOriginX = (float) ox;
-            debugOriginY = (float) oy;
-            debugOriginZ = (float) oz;
-            tracer.trace(VulkanMetalInterop.metalCommandQueue(), meshes, atlas.mtlTexture, depth.mtlTexture,
-                    resolution, request.inverseLightVp(), request.lightVp(),
-                    (float) (x - ox), (float) (y - oy), (float) (z - oz), radius,
-                    request.bias(), request.filterGuardUv(), timeline.mtlSharedEvent, value, value + 1);
-            record("RT mesh trace CPU", phase);
-            // The Metal dispatch. Every other timer here measures the CPU that encodes it.
-            double traceGpu = tracer.lastGpuMillis();
-            if (!Double.isNaN(traceGpu)) GraphRunner.frameProfiler().record("RT mesh trace GPU", traceGpu);
-            // No copy-back here. This image IS the cascade's image: the tier below fills the
-            // texels this one left and publishes it once, so the frame pays one Vulkan submit for
-            // both tiers instead of two each. Copying to TerrainShadowResult here and reading it
-            // straight back out cost two submits and an image round trip, which measured at more
-            // than the ray tracing it was carrying.
-            lastValue = value + 1;
-            debugTlas = tracerStructure();
-            debugEvent = timeline.mtlSharedEvent;
-            debugEventValue = value + 1;
-            cascade = new CascadeImage(depth, timeline.mtlSharedEvent, value + 1, resolution);
-            dev.icehunter.fornax.pass.shadow.ShadowFrameState.raiseRtDistance(radius);
-            GraphRunner.frameProfiler().recordValue("rt_shadow_distance_blocks", radius);
-            GraphRunner.frameProfiler().recordValue("rt_shadow_meshes", meshes.size());
-            if (!reportedActive || radius != reportedRadius) {
-                FornaxMod.LOGGER.info(
-                        "[Fornax] Mesh RT shadows active: {} blocks receiving distance, {} terrain meshes; "
-                                + "separate sun/moon depth", radius, meshes.size());
-                reportedActive = true;
-                reportedRadius = radius;
+            GraphRunner.frameProfiler().recordValue("rt_shadow_structure_pending", pendingBuilt != null ? 1 : 0);
+
+            long traceValue = 0;
+            if (liveBuilt != null) {
+                structureCameraX = (float) (x - liveOriginX);
+                structureCameraY = (float) (y - liveOriginY);
+                structureCameraZ = (float) (z - liveOriginZ);
+                traceValue = nextValue++;
+                tracer.encodeVisibilityTrace(VulkanMetalInterop.metalCommandQueue(), liveBuilt,
+                        atlas.mtlTexture, depth.mtlTexture, resolution, request.inverseLightVp(), request.lightVp(),
+                        structureCameraX, structureCameraY, structureCameraZ, radius,
+                        request.bias(), request.filterGuardUv(), timeline.mtlSharedEvent, copyValue, traceValue);
+                record("RT mesh trace CPU", phase);
+                // The Metal dispatch. Every other timer here measures the CPU that records it.
+                double traceGpu = tracer.lastGpuMillis();
+                if (!Double.isNaN(traceGpu)) GraphRunner.frameProfiler().record("RT mesh trace GPU", traceGpu);
+                lastValue = traceValue;
+                liveTraceValue = traceValue;
+                debugTlas = liveBuilt.structure();
+                debugOriginX = liveOriginX; debugOriginY = liveOriginY; debugOriginZ = liveOriginZ;
+                debugEvent = timeline.mtlSharedEvent;
+                debugEventValue = traceValue;
+                // No copy-back here: this image becomes the cascade's image, and the tier below
+                // fills the rest and publishes once. That costs one Vulkan submit for both tiers
+                // instead of two. Copying to TerrainShadowResult and reading it back cost more
+                // than the ray tracing itself.
+                cascade = new CascadeImage(depth, timeline.mtlSharedEvent, traceValue, resolution);
+                dev.icehunter.fornax.pass.shadow.ShadowFrameState.raiseRtDistance(radius);
+                GraphRunner.frameProfiler().recordValue("rt_shadow_distance_blocks", radius);
+                GraphRunner.frameProfiler().recordValue("rt_shadow_meshes", sources.size());
+                if (!reportedActive || radius != reportedRadius) {
+                    FornaxMod.LOGGER.info(
+                            "[Fornax] Mesh RT shadows active: {} blocks receiving distance, {} terrain meshes; "
+                                    + "separate sun/moon depth", radius, sources.size());
+                    reportedActive = true;
+                    reportedRadius = radius;
+                }
+            } else {
+                // A build may be under way, but nothing is ready to trace yet. This happens on the
+                // first frame after load, or right after a teleport repopulates the caster set.
+                // Raster owns this frame; the test view shows magenta instead of a partial
+                // structure.
+                cascade = null;
+                TerrainShadowResult.invalidate();
             }
         } catch (com.mojang.blaze3d.GpuDeviceLossException | dev.icehunter.fornax.util.GpuFatalException e) {
             throw e;
@@ -351,6 +478,50 @@ public final class MeshMetalProvider implements RayProvider {
             failed = true;
             FornaxMod.LOGGER.error("[Fornax] Mesh RT shadows disabled until pack reload; using full raster shadows", e);
             TerrainShadowResult.invalidate();
+            // A throw after debugTlas and cascade were set this frame must not leave them
+            // describing a failed frame.
+            forgetDebugScene();
+        }
+    }
+
+    /**
+     * Discards a structure that is built but not live, only from {@link #close()}. Its build
+     * command buffer already committed, so its Metal objects are safe to free right away (see
+     * {@link MeshShadowTracer#discardBuild}). Buffers not shared with live are queued for freeing
+     * the same way as any other retirement (see {@link #queueRetireCopies}).
+     */
+    private void discardPending() {
+        tracer.discardBuild(pendingBuilt);
+        // pendingBuilt and pendingCopies are always set together, so this is never null in
+        // practice. The check is defensive: cheap insurance against a bug leaving one null.
+        if (pendingCopies != null) {
+            List<Copy> orphaned = new ArrayList<>();
+            for (var entry : pendingCopies.entrySet()) {
+                if (copies.get(entry.getKey()) != entry.getValue()) orphaned.add(entry.getValue());
+            }
+            queueRetireCopies(orphaned, pendingBuildValue);
+        }
+        pendingBuilt = null;
+        pendingCopies = null;
+    }
+
+    /** Queues buffers for {@link #drainRetiredCopies}, keyed by vkBuffer handle. This lets a later
+     * drain turn swap's plain number back into the object destroyOne needs. */
+    private void queueRetireCopies(List<Copy> retired, long afterValue) {
+        if (retired.isEmpty()) return;
+        List<Long> handles = new ArrayList<>(retired.size());
+        for (Copy copy : retired) {
+            handles.add(copy.buffer.vkBuffer());
+            retiringCopies.put(copy.buffer.vkBuffer(), copy);
+        }
+        swap.retire(handles, afterValue);
+    }
+
+    /** Frees every Vulkan-exported buffer whose queued retirement value is reached. */
+    private void drainRetiredCopies(VulkanDevice device, long signalledValue) {
+        for (long handle : swap.drainRetired(signalledValue)) {
+            Copy copy = retiringCopies.remove(handle);
+            if (copy != null) MetalRtGeometry.destroyOne(device, copy.buffer);
         }
     }
 
@@ -406,7 +577,11 @@ public final class MeshMetalProvider implements RayProvider {
                 VulkanMetalInterop.finishGeneralTransferWrite(cmd, stack, destination, VK13.VK_IMAGE_ASPECT_COLOR_BIT);
             }
         });
-        long published = image.readyValue() + 1;
+        // This value comes from nextValue, not from readyValue() + 1. Every value signaled on this
+        // timeline must come from that one counter. A later frame's nextValue could otherwise
+        // reuse the same number. Vulkan forbids signaling the same timeline value twice. A wait
+        // keyed to that value could then return for the wrong work.
+        long published = nextValue++;
         encoder.signalSemaphore(timeline.vkSemaphore, published, VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT);
         // Same handoff as the trace above, same reason: the reader is later on the graphics queue,
         // which a partial flush keeps in order, and the retirement wait is not part of the handoff.
@@ -434,10 +609,6 @@ public final class MeshMetalProvider implements RayProvider {
         }
         tracer.appendResidentResources(out);
         return out;
-    }
-
-    private long tracerStructure() {
-        return tracer == null ? 0 : tracer.instanceStructure();
     }
 
     private static boolean sameSource(Source a, Source b) {
@@ -532,17 +703,6 @@ public final class MeshMetalProvider implements RayProvider {
         return at;
     }
 
-    /** Measures only mesh-change waits; teardown and resize waits keep their existing path. */
-    private void awaitMeshChange(VulkanDevice device) {
-        long started = System.nanoTime();
-        try {
-            await(device);
-        } finally {
-            // System.nanoTime reports nanoseconds; convert elapsed CPU time to milliseconds.
-            GraphRunner.frameProfiler().record("RT mesh wait CPU", (System.nanoTime() - started) * 1e-6);
-        }
-    }
-
     private void await(VulkanDevice device) {
         if (timeline != null && lastValue > 0) VulkanMetalInterop.waitTimeline(device, timeline, lastValue);
     }
@@ -558,16 +718,26 @@ public final class MeshMetalProvider implements RayProvider {
         VulkanDevice device = VulkanMetalInterop.vulkanDevice();
         if (device != null) {
             await(device);
+            // The wait above means every buffer here, live, pending, or already queued for
+            // freeing, is safe to free right away. discardPending() only queues its orphaned buffers.
+            // The retiringCopies loop below frees them, the same as any other queued retirement
+            // once the wait makes it safe.
+            if (pendingBuilt != null) discardPending();
             if (tracer != null) tracer.close();
             tracer = null;
             for (Copy copy : copies.values()) MetalRtGeometry.destroyOne(device, copy.buffer);
+            for (Copy copy : retiringCopies.values()) MetalRtGeometry.destroyOne(device, copy.buffer);
             copies.clear();
+            retiringCopies.clear();
             VulkanMetalInterop.destroyImage(device, atlas);
             VulkanMetalInterop.destroyImage(device, depth);
             if (timeline != null) VK13.vkDestroySemaphore(device.vkDevice(), timeline.vkSemaphore, null);
         }
         TerrainShadowResult.invalidate();
         atlas = depth = null; timeline = null;
+        swap = new StructureSwap();
+        liveBuilt = null; liveOriginX = liveOriginY = liveOriginZ = 0; liveTraceValue = 0;
+        pendingBuilt = null; pendingCopies = null; pendingOriginX = pendingOriginY = pendingOriginZ = 0; pendingBuildValue = 0;
         lastValue = 0; nextValue = 1; failed = reportedActive = false; reportedRadius = Float.NaN;
     }
 }

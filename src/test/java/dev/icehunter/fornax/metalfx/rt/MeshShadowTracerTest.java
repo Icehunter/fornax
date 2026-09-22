@@ -14,6 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Real Metal output checks. They do not establish Vulkan upload lifetime or client frame time. */
 class MeshShadowTracerTest {
@@ -38,6 +39,80 @@ class MeshShadowTracerTest {
             f.trace(List.of(reverse));
             f.assertPixel(3, 3, 0.125f);
         }
+    }
+
+    /**
+     * The shipping path is encodeBuild + promote + encodeVisibilityTrace, not trace(): this ports
+     * the winding/nearest-depth case above onto it, so that path keeps device coverage even though
+     * trace() (kept only for the remaining device tests below) has no production caller.
+     */
+    @Test
+    void encodeBuildPromoteAndEncodeVisibilityTraceReproduceUploadedWindingAndNearestDepth() throws Exception {
+        try (Fixture f = new Fixture(); MeshShadowTracer tracer = new MeshShadowTracer()) {
+            long event = f.own(Objc.msgSendId(f.device, Objc.selector("newSharedEvent")));
+            long front = f.quad(0.25f, false);
+            long back = f.quad(0.125f, true);
+            MeshShadowTracer.Mesh first = new MeshShadowTracer.Mesh(new MeshShadowTracer.Key(0, 0, 0, false), 1, front, 4, 0, 0, 0);
+            MeshShadowTracer.Mesh reverse = new MeshShadowTracer.Mesh(new MeshShadowTracer.Key(1, 0, 0, false), 1, back, 4, 0, 0, 0);
+
+            MeshShadowTracer.Built built = tracer.encodeBuild(f.queue, List.of(first, reverse), event, 0, 1);
+            f.waitForQueue();
+            assertTrue(tracer.isBuildComplete(built), "the build command buffer has already completed");
+            tracer.promote(built);
+
+            tracer.encodeVisibilityTrace(f.queue, built, f.atlas, f.output, 8, IDENTITY, IDENTITY, 0, 0, 0, 2f, 0f, 0f, event, 1, 2);
+            f.readOutput();
+            f.assertPixel(1, 1, 0.125f); // Nearest opaque face wins regardless of its winding.
+            f.assertPixel(0, 0, 1f); // Quad spans [-.75,.75], corner ray at -.875 misses.
+        }
+    }
+
+    /**
+     * Ports the moved-instance case from changedRevisionsMovedInstancesDeletedMeshesAndEmptyFrames
+     * ReplacePriorDepth onto the shipping path: unchanged content (same revision, same packed
+     * buffer) reuses the BLAS across a build; a moved origin still rebuilds the TLAS, and promote()
+     * is what makes the new position the one encodeVisibilityTrace traces.
+     */
+    @Test
+    void encodeBuildReusesTheUnchangedBlasAcrossAnInstanceMoveAndPromoteMakesTheNewPositionLive() throws Exception {
+        try (Fixture f = new Fixture(); MeshShadowTracer tracer = new MeshShadowTracer()) {
+            long event = f.own(Objc.msgSendId(f.device, Objc.selector("newSharedEvent")));
+            long packed = f.quad(0.25f, false);
+            MeshShadowTracer.Key key = new MeshShadowTracer.Key(0, 0, 0, false);
+            MeshShadowTracer.Mesh atOrigin = new MeshShadowTracer.Mesh(key, 1, packed, 4, 0, 0, 0);
+
+            MeshShadowTracer.Built firstBuilt = tracer.encodeBuild(f.queue, List.of(atOrigin), event, 0, 1);
+            f.waitForQueue();
+            tracer.promote(firstBuilt);
+            long originalBlas = blasHandle(tracer);
+            tracer.encodeVisibilityTrace(f.queue, firstBuilt, f.atlas, f.output, 8, IDENTITY, IDENTITY, 0, 0, 0, 2f, 0f, 0f, event, 1, 2);
+            f.readOutput();
+            f.assertPixel(3, 3, 0.25f);
+
+            // Same content, same revision and packed buffer: the BLAS is reused. Origin differs, so
+            // the TLAS rebuilds even though nothing was decoded again.
+            MeshShadowTracer.Mesh moved = new MeshShadowTracer.Mesh(key, 1, packed, 4, 0, 0, 0.25f);
+            MeshShadowTracer.Built secondBuilt = tracer.encodeBuild(f.queue, List.of(moved), event, 2, 3);
+            f.waitForQueue();
+            assertNotEquals(firstBuilt.structure(), secondBuilt.structure(), "moving an instance rebuilds the TLAS");
+            tracer.promote(secondBuilt);
+            assertEquals(originalBlas, blasHandle(tracer), "moving an origin must not decode/rebuild geometry");
+
+            tracer.encodeVisibilityTrace(f.queue, secondBuilt, f.atlas, f.output, 8, IDENTITY, IDENTITY, 0, 0, 0, 2f, 0f, 0f, event, 3, 4);
+            f.readOutput();
+            f.assertPixel(3, 3, 0.5f); // Moved .25 further along z; IDENTITY light means world z is depth.
+        }
+    }
+
+    /** The native BLAS handle of tracer's single cached entry, read the same way Fixture.cachedBlas()
+     * reads it for the reflective tracer, since this test uses a directly-typed one instead. */
+    private static long blasHandle(MeshShadowTracer tracer) throws Exception {
+        var field = MeshShadowTracer.class.getDeclaredField("cache");
+        field.setAccessible(true);
+        Object entry = ((java.util.Map<?, ?>) field.get(tracer)).values().iterator().next();
+        var blas = entry.getClass().getDeclaredField("blas");
+        blas.setAccessible(true);
+        return blas.getLong(entry);
     }
 
     @Test
@@ -491,6 +566,16 @@ class MeshShadowTracerTest {
                     float.class,float.class,float.class,float.class,float.class,float.class,long.class,long.class,long.class)
                     .invoke(tracer,queue,meshes,atlas,target,8,inverse,light,x,y,z,radius,bias,guard,event,waitValue,signalValue);
             } catch(InvocationTargetException e) { throw new RuntimeException(e.getCause()); }
+        }
+        /** Host-side wait for a build or trace command buffer the split API committed: the same wait
+         * readOutput() uses for its own trailing read, available on its own so a test can force a
+         * wait (e.g. before promote()) without also reading pixels yet. Commits a trivial command
+         * buffer and blocks on it; command buffers on one queue complete in the order they were
+         * committed, so everything encoded before this one is done too. Only a test waits like this;
+         * production code never does. */
+        void waitForQueue() {
+            long cb=Objc.msgSendId(queue,Objc.selector("commandBuffer"));
+            Objc.msgSendVoid(cb,Objc.selector("commit"));Objc.msgSendVoid(cb,Objc.selector("waitUntilCompleted"));
         }
         void readOutput() { readOutput(output); }
         void readOutput(long target) {
