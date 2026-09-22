@@ -83,8 +83,10 @@ public final class RayQueryInterop implements AutoCloseable {
         VulkanCommandEncoder encoder = device.createCommandEncoder();
         VulkanMetalInterop.recordIntoStream(encoder, cmd -> {
             try (MemoryStack stack = MemoryStack.stackPush()) {
-                // The pass that wrote the requests ran on another queue; make its writes visible
-                // before reading them, the same barrier the mesh geometry copies take.
+                // Orders the read behind clearHits's same-queue fill of the hit buffer.
+                // vkCmdPipelineBarrier only orders work within one queue. It does not cover the compute
+                // pass's write to the request buffer on another queue. That cross-queue edge is the
+                // semaphore GraphRunner.computeGraphicsWaitStages signals at TRANSFER stage.
                 barrier(cmd, stack, VK13.VK_ACCESS_MEMORY_WRITE_BIT, VK13.VK_ACCESS_TRANSFER_READ_BIT);
                 copy(cmd, stack, query.requestBuffer(), requests.vkBuffer(), requestBytes);
                 copy(cmd, stack, query.hitBuffer(), hits.vkBuffer(), hitBytes);

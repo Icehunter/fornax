@@ -3,6 +3,7 @@ package dev.icehunter.fornax.pack.graph;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.debug.ComputeCapture;
 import dev.icehunter.fornax.debug.FullscreenCapture;
+import dev.icehunter.fornax.metalfx.VulkanMetalInterop;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import dev.icehunter.fornax.voxel.VoxelSourceWindow;
 import dev.icehunter.fornax.voxel.VoxelWindow;
@@ -172,6 +173,12 @@ public final class ComputePassRunner implements AutoCloseable {
      * caller-supplied {@code extra} bytes after the base 32, matching what {@link #build} reserved in
      * the pipeline layout. */
     private final int extraPushConstantBytes;
+    /** Graphics-owned inputs (G-buffer, shadow map, traced-shadow result) come from draws already
+     * sent in an earlier Blaze3D command buffer. A MoltenVK 1.4.2 timeline signal covers only the
+     * buffer it was recorded in. A compute-queue wait on it races those draws instead of following
+     * them. Same-queue clash tracking in Metal does not have that gap. {@link #run} runs such a pass
+     * in the graphics stream instead of the compute queue when this is true. */
+    private final boolean graphicsStream;
     @Nullable
     private final CrossQueueImageReuseSequence imageReuseSequence;
     private long imageReuseTimelineSemaphore;
@@ -234,8 +241,10 @@ public final class ComputePassRunner implements AutoCloseable {
         this.extraPushConstantBytes = extraPushConstantBytes;
         this.imageReuseSequence = graphicsCompletionBeforeStorageWrite
                 ? new CrossQueueImageReuseSequence() : null;
-        this.graphicsInputDependency = GraphicsInputDependency.requiredBy(spec.inputs())
-                ? new GraphicsInputDependency() : null;
+        this.graphicsStream = GraphicsInputDependency.requiredBy(spec.inputs());
+        // A pass with graphics-owned inputs runs in the graphics stream instead (see run()), so
+        // this dependency is never constructed. See docs/ARCHITECTURE.md.
+        this.graphicsInputDependency = null;
         this.timestampQueries = RawTimestampQueries.tryCreate(backend, spec.name());
         float timestampPeriodNs = backend.device().getDeviceInfo().timestampPeriod();
         int timestampValidBits = timestampQueries != null ? timestampQueries.validBits() : 0;
@@ -354,13 +363,18 @@ public final class ComputePassRunner implements AutoCloseable {
                 }
                 throw e;
             }
-            // Queue-topology fact, once per runner build (assert-don't-assume): VulkanComputeBackend
-            // already logs this once per session at tryCreate(), but this line ties it explicitly to
-            // the sync model used by this runner, per compute pass, so it is visible next to the
-            // passes that depend on cross-queue handoff.
-            FornaxMod.LOGGER.info("[Fornax] ComputePassRunner('{}'): compute queue {} the graphics queue family"
-                            + " -- semaphore handoff is available for same-frame graphics consumers",
-                    spec.name(), backend.sharesQueueFamilyWithGraphics() ? "SHARES" : "does NOT share");
+            if (runner.graphicsStream()) {
+                FornaxMod.LOGGER.info("[Fornax] ComputePassRunner('{}'): reads graphics-written inputs and runs "
+                        + "in the graphics stream", spec.name());
+            } else {
+                // Queue-topology fact, logged once per runner build instead of assumed.
+                // VulkanComputeBackend already logs this once per session at tryCreate(). This line repeats
+                // it to connect it with how this runner waits on graphics work, for this compute pass.
+                // That keeps it visible next to the passes that depend on cross-queue handoff.
+                FornaxMod.LOGGER.info("[Fornax] ComputePassRunner('{}'): compute queue {} the graphics queue family"
+                                + ": semaphore handoff is available for same-frame graphics readers",
+                        spec.name(), backend.sharesQueueFamilyWithGraphics() ? "SHARES" : "does NOT share");
+            }
             return runner;
         } finally {
             MemoryUtil.memFree(spirv);
@@ -577,6 +591,10 @@ public final class ComputePassRunner implements AutoCloseable {
                     + "' built with extraPushConstantBytes=" + extraPushConstantBytes
                     + " but run() received extra push constants of " + extraBytesThisCall + " bytes");
         }
+        if (graphicsStream) {
+            return runInGraphicsStream(registry, params, options, globals, extra, dispatchOverride,
+                    extraBytesThisCall);
+        }
         int slotIndex = (int) (frameIndex % FRAMES_IN_FLIGHT);
         RingSlot slot = ring[slotIndex];
         frameIndex++;
@@ -623,62 +641,14 @@ public final class ComputePassRunner implements AutoCloseable {
                 VK13.vkCmdBindPipeline(cmd, VK13.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline());
                 updateAndBindDescriptorSet(registry, cmd, descriptorSets[slotIndex], options, globals, capture);
 
-                // PassParams delivered as a push constant (a compute pass has no reserved uniform-buffer
-                // slot for it), matching PassParams' own 32-byte std140 layout: vec2 texel size at 0, two
-                // scalars at 8/12, vec3 sun direction at 16 (bytes 28-31 padding). A pass built with
-                // extraPushConstantBytes > 0 (see ExtraPushConstants) gets those extra bytes appended
-                // right after, sized to match the pipeline layout's range built in build(). Deliberately
-                // PassParams.PUSH_CONSTANT_BASE_SIZE (32), not PassParams.BUFFER_SIZE (64) -- the new
-                // sun/moon sprite rects are a uniform-buffer-only (FULLSCREEN resolve) concern; a compute
-                // pass's push-constant byte layout, and therefore any ExtraPushConstants offset a pack's
-                // own compute shader hardcodes, must stay exactly where it always was.
                 ByteBuffer push = stack.malloc(PassParams.PUSH_CONSTANT_BASE_SIZE + extraBytesThisCall);
-                push.putFloat(0, params.texelSizeX());
-                push.putFloat(4, params.texelSizeY());
-                push.putFloat(8, params.param2());
-                push.putFloat(12, params.param3());
-                push.putFloat(16, params.sunDirX());
-                push.putFloat(20, params.sunDirY());
-                push.putFloat(24, params.sunDirZ());
-                if (extra != null) {
-                    extra.writeInto(push, PassParams.PUSH_CONSTANT_BASE_SIZE);
-                }
+                writePushConstants(push, params, extra);
                 VK13.vkCmdPushConstants(cmd, pipeline.pipelineLayout(), VK13.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
 
-                List<Integer> d = spec.dispatch();
-                int groupsX = d.get(0);
-                int groupsY = d.get(1);
-                int groupsZ = d.get(2);
-                if (dispatchOverride != null) {
-                    // Engine-computed group counts for passes whose domain is a runtime-sized 3D
-                    // volume (the voxel window scales with render distance -- TOML's static literal
-                    // cannot express it, and localSize derivation only understands 2D texture
-                    // outputs). See GraphRunner.computeDispatchOverride.
-                    groupsX = dispatchOverride[0];
-                    groupsY = dispatchOverride[1];
-                    groupsZ = dispatchOverride[2];
-                } else {
-                    List<Integer> localSize = spec.localSize();
-                    if (localSize != null) {
-                        // Derived from the pass's first output's REAL resolved pixel size every dispatch
-                        // (not TOML's literal x/y, which are unused placeholders in this mode) --
-                        // required for any compute pass whose output scales with render resolution,
-                        // mirroring the exact ceil(width/LOCAL_SIZE) pattern VoxelDebugRaymarchPass
-                        // already proved correct for its own (non-TOML) dispatch.
-                        TargetInstance out = registry.get(spec.outputs().get(0));
-                        if (out == null) {
-                            // registry.get() is the TEXTURE map -- a buffer-only-output pass has no
-                            // pixel size to derive groups from, so fail loudly instead of dispatching
-                            // against a null target.
-                            throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
-                                    + "' declares local_size but its first output '" + spec.outputs().get(0)
-                                    + "' is not a texture target -- buffer-only passes need a literal"
-                                    + " dispatch or an engine dispatch override (GraphRunner.computeDispatchOverride)");
-                        }
-                        groupsX = (out.width() + localSize.get(0) - 1) / localSize.get(0);
-                        groupsY = (out.height() + localSize.get(1) - 1) / localSize.get(1);
-                    }
-                }
+                int[] groups = resolveDispatchGroups(dispatchOverride, registry);
+                int groupsX = groups[0];
+                int groupsY = groups[1];
+                int groupsZ = groups[2];
                 boolean dispatchKernel = true;
                 if (reuseState != null) {
                     if (!captureReuseInputs(registry, options, params, groupsX, groupsY, groupsZ)) {
@@ -707,7 +677,8 @@ public final class ComputePassRunner implements AutoCloseable {
                     }
                 }
                 if (capture != null) capture.afterDispatch(cmd);
-                recordComputeWriteReleaseBarrier(cmd, stack);
+                recordComputeWriteReleaseBarrier(cmd, stack,
+                        VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK13.VK_ACCESS_SHADER_READ_BIT);
                 VK13.vkEndCommandBuffer(cmd);
 
                 // Blaze3D's Submission.close() hardcodes a null fence -- bypass it, exactly like
@@ -816,6 +787,108 @@ public final class ComputePassRunner implements AutoCloseable {
         return -1L;
     }
 
+    boolean graphicsStream() {
+        return graphicsStream;
+    }
+
+    /** PassParams travels as a push constant here. A compute pass has no reserved uniform-buffer slot
+     * for it. The layout matches PassParams' own 32-byte std140 layout: vec2 texel size sits at
+     * offset 0. Two scalars follow at offsets 8 and 12. vec3 sun direction sits at offset 16. Bytes
+     * 28 through 31 are padding. A pass built with extraPushConstantBytes > 0 (see
+     * ExtraPushConstants) gets those extra bytes appended right after. Their size matches the
+     * pipeline layout's range built in build(). This uses PassParams.PUSH_CONSTANT_BASE_SIZE (32) on
+     * purpose, not PassParams.BUFFER_SIZE (64). The sun/moon sprite rects make up the rest of
+     * BUFFER_SIZE. They belong only to the uniform buffer (FULLSCREEN resolve), not to a compute
+     * pass's push constants. A compute pass's push-constant byte layout must stay exactly where it
+     * always was. Any ExtraPushConstants offset a pack's own compute shader hardcodes depends on
+     * that layout staying fixed too. */
+    private static void writePushConstants(ByteBuffer push, PassParams params, @Nullable ExtraPushConstants extra) {
+        push.putFloat(0, params.texelSizeX());
+        push.putFloat(4, params.texelSizeY());
+        push.putFloat(8, params.param2());
+        push.putFloat(12, params.param3());
+        push.putFloat(16, params.sunDirX());
+        push.putFloat(20, params.sunDirY());
+        push.putFloat(24, params.sunDirZ());
+        if (extra != null) {
+            extra.writeInto(push, PassParams.PUSH_CONSTANT_BASE_SIZE);
+        }
+    }
+
+    /** A literal TOML dispatch, an engine-computed override, or output-resolution-derived groups, in
+     * that priority order. dispatchOverride carries engine-computed group counts for passes whose
+     * domain is a runtime-sized 3D volume. The voxel window scales with render distance, so TOML's
+     * static literal cannot express it. localSize derivation only understands 2D texture outputs
+     * too. See GraphRunner.computeDispatchOverride. A declared localSize derives groups from the
+     * pass's first output's REAL resolved pixel size, every time it runs. TOML's literal x/y go
+     * unused in this mode. This mirrors the exact ceil(width/LOCAL_SIZE) pattern
+     * VoxelDebugRaymarchPass already proved correct for its own (non-TOML) dispatch. */
+    private int[] resolveDispatchGroups(@Nullable int[] dispatchOverride, TargetRegistry registry) {
+        List<Integer> d = spec.dispatch();
+        int groupsX = d.get(0);
+        int groupsY = d.get(1);
+        int groupsZ = d.get(2);
+        if (dispatchOverride != null) {
+            groupsX = dispatchOverride[0];
+            groupsY = dispatchOverride[1];
+            groupsZ = dispatchOverride[2];
+        } else {
+            List<Integer> localSize = spec.localSize();
+            if (localSize != null) {
+                TargetInstance out = registry.get(spec.outputs().get(0));
+                if (out == null) {
+                    // registry.get() is the TEXTURE map: a buffer-only-output pass has no
+                    // pixel size to derive groups from. This fails loudly here instead of
+                    // running the dispatch against a target that is not set.
+                    throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
+                            + "' declares local_size but its first output '" + spec.outputs().get(0)
+                            + "' is not a texture target: buffer-only passes need a literal"
+                            + " dispatch or an engine dispatch override (GraphRunner.computeDispatchOverride)");
+                }
+                groupsX = (out.width() + localSize.get(0) - 1) / localSize.get(0);
+                groupsY = (out.height() + localSize.get(1) - 1) / localSize.get(1);
+            }
+        }
+        return new int[] { groupsX, groupsY, groupsZ };
+    }
+
+    /** Records the dispatch directly into Blaze3D's persistent graphics command encoder instead of
+     * sending it to the compute queue. Recording order in that single encoder is what puts this
+     * dispatch after the draws that produced its graphics-owned inputs. Metal catches that kind of
+     * clash on its own within one queue. A cross-queue timeline wait does not give the same order on
+     * this MoltenVK version. No fence, no timestamp query, no capture, no reuse ticket, no
+     * graphics-wait semaphore signal. This dispatch needs none of the cross-queue code the
+     * compute-queue path below still uses. */
+    private long runInGraphicsStream(TargetRegistry registry, PassParams params,
+                                      @Nullable PackOptionsBuffer options, @Nullable GpuBufferSlice globals,
+                                      @Nullable ExtraPushConstants extra, @Nullable int[] dispatchOverride,
+                                      int extraBytesThisCall) {
+        int slotIndex = (int) (frameIndex % FRAMES_IN_FLIGHT);
+        frameIndex++;
+        int[] groups = resolveDispatchGroups(dispatchOverride, registry);
+        VulkanMetalInterop.recordIntoStream(backend.device().createCommandEncoder(), cmd -> {
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                if (bindingOrder.contains(VoxelSourceWindow.TARGET)) VoxelWindow.refreshSourceWindow(registry);
+                EngineBufferUploadQueue.recordForBindings(cmd, stack, registry, bindingOrder,
+                        VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+                VK13.vkCmdBindPipeline(cmd, VK13.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline());
+                updateAndBindDescriptorSet(registry, cmd, descriptorSets[slotIndex], options, globals, null);
+                ByteBuffer push = stack.malloc(PassParams.PUSH_CONSTANT_BASE_SIZE + extraBytesThisCall);
+                writePushConstants(push, params, extra);
+                VK13.vkCmdPushConstants(cmd, pipeline.pipelineLayout(), VK13.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
+                VK13.vkCmdDispatch(cmd, groups[0], groups[1], groups[2]);
+                // Same-queue readers here are a fragment sampler (atmo_aerial -> resolve/resolve_hdr) and
+                // a RAY_QUERY transfer copy (sun_shadow_seed -> sun_shadow_trace). Same-queue compute can
+                // also read it.
+                recordComputeWriteReleaseBarrier(cmd, stack,
+                        VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK13.VK_PIPELINE_STAGE_TRANSFER_BIT
+                                | VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK13.VK_ACCESS_SHADER_READ_BIT | VK13.VK_ACCESS_TRANSFER_READ_BIT);
+            }
+        });
+        return -1L;
+    }
+
     /** Submit all current graphics work, including shadow raster writes and RT copy-back, and
      * signal a timeline value for it. A partial flush sends the work out without moving encoder
      * retirement forward or waiting on the host. The graph only calls compute between render
@@ -887,13 +960,17 @@ public final class ComputePassRunner implements AutoCloseable {
      * {@code synchronizeWithGraphics}: the compute submit signals a semaphore and the persistent
      * VulkanCommandEncoder inserts its wait before subsequently recorded fullscreen work. Buffer
      * targets use CONCURRENT sharing across the two families, so no ownership transfer is required.
+     * {@link #runInGraphicsStream} has no cross-queue reader to signal for. Every reader is already
+     * on the same queue. So it passes this same barrier a wider dstStageMask/dstAccessMask instead
+     * of relying on that semaphore.
      */
-    private static void recordComputeWriteReleaseBarrier(VkCommandBuffer cmd, MemoryStack stack) {
+    private static void recordComputeWriteReleaseBarrier(VkCommandBuffer cmd, MemoryStack stack,
+                                                          int dstStageMask, int dstAccessMask) {
         VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack).sType$Default()
                 .srcAccessMask(VK13.VK_ACCESS_SHADER_WRITE_BIT)
-                .dstAccessMask(VK13.VK_ACCESS_SHADER_READ_BIT);
+                .dstAccessMask(dstAccessMask);
         VK13.vkCmdPipelineBarrier(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                dstStageMask,
                 0, barrier, null, null);
     }
 

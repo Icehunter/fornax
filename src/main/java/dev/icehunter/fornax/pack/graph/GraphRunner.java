@@ -1484,7 +1484,8 @@ public final class GraphRunner {
                                 long dependencyWaitNanos = runner.run(r, computeParams(p, width, height), options, globals,
                                         computeExtraPushConstants(p, matrices, x, y, z),
                                         computeDispatchOverride(p), synchronousWait,
-                                        graphicsWaitStagesFor(p, pack.graph()), graphicsWaits);
+                                        runner.graphicsStream() ? 0L : graphicsWaitStagesFor(p, pack.graph()),
+                                        runner.graphicsStream() ? null : graphicsWaits);
                                 if (dependencyWaitNanos >= 0L) {
                                     frameProfiler.recordValue("compute wait " + p.name(),
                                             dependencyWaitNanos / 1_000_000.0);
@@ -2190,7 +2191,10 @@ public final class GraphRunner {
      * persistent graphics encoder this method's semaphore wait is recorded into -- executing at
      * transfer stage with {@code TRANSFER_READ} access, not fragment. Folding it into the fragment
      * group would wait at the wrong stage and, depending on driver ordering, might not cover the
-     * copy at all.
+     * copy at all. A {@code RAY_QUERY} reader lands in the same group. {@code RayQueryInterop.answer}
+     * reads a compute output by copying it with {@code vkCmdCopyBuffer} on that same graphics
+     * encoder. That copy runs ahead of the Metal trace, so it needs the identical transfer-stage
+     * wait.
      *
      * <p>Matches readers by base target name, collapsing a {@code .history} suffix, the same way
      * {@link #computeStorageWriteNeedsGraphicsCompletion} already does for the reverse direction: after the
@@ -2222,9 +2226,12 @@ public final class GraphRunner {
                     } else if (reader.type() == PassType.FULLSCREEN || reader.type() == PassType.GEOMETRY
                             || reader.type() == PassType.TEMPORAL || reader.type() == PassType.MIPCHAIN) {
                         stages |= VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-                    } else if (reader.type() == PassType.COPY || reader.type() == PassType.CONSOLIDATE) {
+                    } else if (reader.type() == PassType.COPY || reader.type() == PassType.CONSOLIDATE
+                            || reader.type() == PassType.RAY_QUERY) {
                         // CONSOLIDATE's copy is ArrayTextures.copyLayer's own vkCmdCopyImage, same
-                        // transfer stage COPY's copyTextureToTexture runs at.
+                        // transfer stage COPY's copyTextureToTexture runs at. RAY_QUERY's is
+                        // RayQueryInterop.answer's vkCmdCopyBuffer of the request buffer, on the
+                        // graphics encoder ahead of the Metal trace.
                         stages |= VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
                     }
                 }

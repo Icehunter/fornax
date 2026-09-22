@@ -24,7 +24,18 @@ class GraphicsInputDependencyTest {
     void unrelatedInputsDoNotRequestAGraphicsFlush() {
         assertFalse(GraphicsInputDependency.requiredBy(List.of()));
         assertFalse(GraphicsInputDependency.requiredBy(List.of(
-                "globals", "packOptions", "arbitraryLut", "builtin.gNormal", "sunShadowMap.history")));
+                "globals", "packOptions", "arbitraryLut", "builtin.blockAtlas", "sunShadowMap.history")));
+    }
+
+    @Test
+    void aComputePassReadingGBufferAttachmentsRequiresTheProducerBoundary() {
+        assertTrue(GraphicsInputDependency.requiredBy(
+                List.of("globals", "packOptions", "builtin.depth", "builtin.gNormal")));
+    }
+
+    @Test
+    void nonGBufferBuiltinsDoNotRequestAGraphicsFlush() {
+        assertFalse(GraphicsInputDependency.requiredBy(List.of("builtin.blockAtlas", "builtin.noise")));
     }
 
     @Test

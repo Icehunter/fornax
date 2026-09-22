@@ -5,20 +5,28 @@ import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.function.LongConsumer;
 import java.util.function.LongPredicate;
 
-/** Graphics-owned external shadow inputs need a current-frame producer edge before raw compute
- * submission. This state is independent of the previous-frame storage-reuse edge. */
+/** Shadow maps and G-buffer attachments are inputs the graphics side writes. This pass's compute
+ * work is sent straight to the GPU. Before that, it needs a writer edge for the current frame.
+ * This state is independent of the previous-frame storage-reuse edge. */
 final class GraphicsInputDependency {
     record Wait(long semaphore, long value) { }
+
+    /** The refs GraphInputResolver.resolveBuiltinView serves from GBufferManager and the main
+     * render target. The geometry passes write these on the graphics queue in the same frame. A
+     * compute reader of any of them needs the same writer edge the shadow map already gets. */
+    private static final Set<String> GBUFFER_REFS = Set.of("builtin.depth", "builtin.gNormal",
+            "builtin.gAlbedo", "builtin.gMaterial", "builtin.gAo", "builtin.gMotion", "builtin.output");
 
     private long value;
     private boolean uncertainSubmission;
 
     static boolean requiredBy(List<String> inputs) {
         return inputs.stream().anyMatch(ref -> ShadowMapManager.isShadowMapRef(ref)
-                || TerrainShadowResult.isRef(ref));
+                || TerrainShadowResult.isRef(ref) || GBUFFER_REFS.contains(ref));
     }
 
     /** Signal and dispatch the producer before publishing a value for the compute wait. A failed

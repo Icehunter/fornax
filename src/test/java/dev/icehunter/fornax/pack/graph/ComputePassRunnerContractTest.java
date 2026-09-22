@@ -177,6 +177,34 @@ class ComputePassRunnerContractTest {
                 "recording the release must neither submit nor host-wait a queue");
     }
 
+    @Test
+    void graphicsStreamBranchPrecedesTheComputeQueueFenceSubmitChain() throws IOException {
+        String source = Files.readString(SOURCE);
+        String run = methodBody(source, "public long run(TargetRegistry registry");
+
+        int branch = run.indexOf("if (graphicsStream) {");
+        int returnCall = run.indexOf("return runInGraphicsStream(", branch);
+        int submit = run.indexOf("VK13.vkQueueSubmit(backend.computeQueue().vkQueue(),");
+        assertTrue(branch >= 0 && returnCall > branch && submit > returnCall,
+                "a graphics-stream pass must return out of run() before it ever reaches the "
+                        + "compute-queue fence/submit chain");
+    }
+
+    @Test
+    void runInGraphicsStreamRecordsIntoTheGraphicsEncoderWithAWidenedReleaseBarrier() throws IOException {
+        String source = Files.readString(SOURCE);
+        String method = methodBody(source, "private long runInGraphicsStream(TargetRegistry registry");
+
+        assertTrue(method.contains("VulkanMetalInterop.recordIntoStream("),
+                "must record into Blaze3D's graphics encoder, not submit to the compute queue");
+        assertTrue(method.contains("VK13.vkCmdDispatch("));
+        assertTrue(method.contains("VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT")
+                        && method.contains("VK13.VK_PIPELINE_STAGE_TRANSFER_BIT")
+                        && method.contains("VK13.VK_ACCESS_TRANSFER_READ_BIT"),
+                "the release barrier must widen past COMPUTE_SHADER: same-queue readers here "
+                        + "include a fragment sampler and a RAY_QUERY transfer copy");
+    }
+
     private static boolean hasConnectedTimelineSubmitContract(String run) {
         String compact = run.replaceAll("(?s)/\\*.*?\\*/", "")
                 .replaceAll("(?m)//.*$", "")

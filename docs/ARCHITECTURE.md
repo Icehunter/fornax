@@ -3432,32 +3432,34 @@ and debug PassParams as `resolve`: real sun/moon direction, true sun height, and
 terrain render distance in blocks. This anchors their lighting and fog to the same world state.
 
 
-### Graphics-owned shadow inputs in raw compute submissions
+### Graphics-owned inputs in raw compute submissions
 
-`GraphicsInputDependency` looks at a compute pass's declared inputs and picks out the raster
-shadow, raw raster, entity, and RT shadow builtin names. It does not care about pass names, which
-pack is active, or whether RT is on. Right before a compute submit that reads one of these,
-`ComputePassRunner` signals an `ALL_COMMANDS` timeline value after the current graphics work and
-sends that work through `VulkanPartialFlush`. This covers raster depth writes, target clears, and
-RT copy-back (after its own Metal wait). Compute passes with none of these inputs skip the flush.
+`GraphicsInputDependency.requiredBy` looks at a compute pass's inputs. It says yes for the shadow
+map names, the traced shadow result, and the G-buffer images: `builtin.depth`, `builtin.gNormal`,
+`builtin.gAlbedo`, `builtin.gMaterial`, `builtin.gAo`, `builtin.gMotion` and `builtin.output`. It
+says no for `builtin.waterDepth` and `builtin.waterNormal`. Pass names and packs do not matter to
+it.
 
-The compute submit waits on the new value at `COMPUTE_SHADER` (or `ALL_COMMANDS` while capturing),
-on top of any previous-frame reuse wait already in place. Wait handles and values stay lined up by
-position; the outgoing compute-to-graphics binary signal still needs its required zero value entry.
-The order is fixed: signal graphics work, flush it, submit compute, then queue the outgoing
-graphics wait. Flipping that order would make the graphics side wait on the thing it just fed.
-None of this blocks the host each frame, and it does not move graphics resources any closer to
-being freed.
+A compute pass with such an input does not go to the compute queue. `ComputePassRunner` records it
+into the graphics stream, in the same order as the draws around it. With Plague's settings that is
+`sun_shadow_seed` and `atmo_aerial`.
 
-On shutdown, the runner drains submitted compute work and also waits on the last graphics signal
-it flushed: a compute submit that fails can leave that signal outside every compute fence. If a
-signal or flush call throws, whether it reached the GPU is unknown. In that case the dependency
-will not reuse it, will not wait on a value that might not exist, and keeps the semaphore alive
-(logging an error) until the device itself is torn down. A failed producer signal or a failed wait
-on compute completion also blocks destroying the semaphore.
+The reason is how MoltenVK works. A timeline signal only covers the command buffer it sits in. The
+draws that made the images were sent earlier, in another command buffer. So a wait on the compute
+queue does not put the read after those draws. Recording on the same queue does, because Metal
+keeps one queue in order.
 
-Tests here pin which aliases trigger this, the wait list, the signal/flush order, cleanup of an
-orphaned signal, and holding on to an uncertain one; other tests check the native wiring by
-reading the source. None of them run the Vulkan driver, check real image contents, or reproduce a
-visual bug seen in game. This only covers the shadow inputs the engine already knows about; it is
-not a general scheduler for any graphics-written pack target.
+A graphics-stream pass takes no fence, no timestamp, no capture and no reuse ticket, and it signals
+nothing. F10 capture and GPU timing do not run for it, so the profiler shows no GPU time for it.
+
+`GraphicsInputDependency` itself is never built: the same check that would build it picks the
+graphics stream first. Its old wait path (signal at `ALL_COMMANDS`, flush with
+`VulkanPartialFlush`, wait at `COMPUTE_SHADER`) cannot run. It stays in the file only until it is
+removed.
+
+Two other cross-queue waits are separate and stay. `computeStorageWriteNeedsGraphicsCompletion`
+makes a compute pass wait for last frame's graphics readers before it writes over a buffer.
+`ComputeGraphicsWaits` makes a later graphics pass wait for a compute pass's output.
+
+Tests pin which input names pick the graphics stream, and the compute queue path's wait list and
+signal order.

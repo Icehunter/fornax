@@ -5,6 +5,9 @@ import dev.icehunter.fornax.pack.GeometrySlot;
 import dev.icehunter.fornax.pack.ParticleSpec;
 import dev.icehunter.fornax.pack.PassSpec;
 import dev.icehunter.fornax.pack.PassType;
+import dev.icehunter.fornax.pack.RayQuerySpec;
+import dev.icehunter.fornax.rt.RayQueryKind;
+import dev.icehunter.fornax.rt.RayTier;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -106,6 +109,21 @@ class ParticlePassBindingTest {
         PassSpec copy = new PassSpec("water_copy", PassType.COPY, null, null, null,
                 List.of("waveState"), List.of("waveStateStable"), null, null, List.of(), null, null, null);
         GraphSpec graph = new GraphSpec(Map.of(), List.of(compute, copy));
+        assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                GraphRunner.computeGraphicsWaitStages(compute, graph, Map.of()));
+    }
+
+    @Test
+    void computeBufferFeedingARayQueryWaitsAtTransferStage() {
+        // RayQueryInterop.answer reads a compute output by copying it with vkCmdCopyBuffer on the
+        // graphics encoder before the Metal trace runs, the same TRANSFER stage a COPY reader waits
+        // at. A RAY_QUERY reader with no branch here contributes 0, leaving the trace unsynchronized
+        // against the compute write and reading last frame's requests.
+        PassSpec compute = computePass("shadow_rays", List.of("sunShadowRequests"), null);
+        PassSpec rayQuery = new PassSpec("trace_sun", PassType.RAY_QUERY, null, null, null,
+                List.of("sunShadowRequests"), List.of("sunShadowHits"), null, null, List.of(), null, null,
+                null, null, null, new RayQuerySpec(RayQueryKind.CLOSEST_HIT, 1024, RayTier.NONE));
+        GraphSpec graph = new GraphSpec(Map.of(), List.of(compute, rayQuery));
         assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                 GraphRunner.computeGraphicsWaitStages(compute, graph, Map.of()));
     }

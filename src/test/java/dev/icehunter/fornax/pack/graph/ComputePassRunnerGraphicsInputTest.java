@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -77,6 +78,19 @@ class ComputePassRunnerGraphicsInputTest {
         int destroy = teardown.indexOf("VK13.vkDestroySemaphore(");
         assertTrue(denied >= 0 && retain > denied && destroy > retain,
                 "uncertain submission or completion must not destroy a live graphics signal");
+    }
+
+    /** ComputePassRunner's graphicsStream field is computed as exactly this expression at
+     * construction; a pass with a G-buffer, shadow-map or traced-shadow-result input dispatches
+     * into the graphics stream instead of the compute queue (see ComputePassRunner.run). */
+    @Test
+    void graphicsOwnedGBufferInputsSelectGraphicsStreamMode() {
+        assertTrue(GraphicsInputDependency.requiredBy(
+                        List.of("globals", "packOptions", "builtin.depth", "builtin.gNormal")),
+                "G-buffer refs in the input list must select graphics-stream mode");
+        assertFalse(GraphicsInputDependency.requiredBy(
+                        List.of("globals", "packOptions", "someTarget")),
+                "an ordinary target input has no graphics-owned ref, so the pass stays on the compute queue");
     }
 
 }

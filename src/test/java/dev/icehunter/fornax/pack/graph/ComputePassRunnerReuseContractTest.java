@@ -22,7 +22,7 @@ class ComputePassRunnerReuseContractTest {
         assertTrue(kernel.contains("vkCmdResetQueryPool"));
         assertTrue(kernel.contains("VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT"));
         assertTrue(source.indexOf("updateAndBindDescriptorSet(registry, cmd,") < branch);
-        assertTrue(source.indexOf("recordComputeWriteReleaseBarrier(cmd, stack);", end) >= end);
+        assertTrue(source.indexOf("recordComputeWriteReleaseBarrier(cmd, stack,", end) >= end);
         assertTrue(source.indexOf("VK13.vkQueueSubmit", end) >= end);
         assertTrue(source.indexOf("graphics.waitSemaphore(slot.graphicsSemaphore", end) >= end);
         assertTrue(source.indexOf("pendingGraphicsRelease = reuseTicket;", end) >= end);
