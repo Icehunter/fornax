@@ -1,6 +1,7 @@
 package dev.icehunter.fornax.rt;
 
 import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
+import dev.icehunter.fornax.pipeline.TerrainMeshRevisionStats;
 import dev.icehunter.fornax.util.GpuFatalErrors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -124,6 +125,7 @@ public final class RayRouter {
      * run before any query; a provider not asked here is treated as not ready.
      */
     public static void beginFrame() {
+        TerrainMeshRevisionStats.publish(profiler);
         profiler.accept("RT cascade CPU", frameNanos * 1e-6);
         frameNanos = 0;
         // The trusted radius is rebuilt from nothing every frame and widened by each tier that

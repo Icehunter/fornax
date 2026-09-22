@@ -2,6 +2,7 @@ package dev.icehunter.fornax.mixin.sodium;
 
 import dev.icehunter.fornax.pipeline.TerrainMeshRevision;
 import dev.icehunter.fornax.pipeline.TerrainMeshRevisions;
+import dev.icehunter.fornax.pipeline.TerrainMeshRevisionStats;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
 import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegion;
 import org.spongepowered.asm.mixin.Mixin;
@@ -31,6 +32,7 @@ public class SectionRenderDataStorageRevisionMixin implements TerrainMeshRevisio
     @Inject(method = "setVertexData", at = @At("HEAD"))
     private void fornax$beforeVertexReplacement(int section, @Coerce Object allocation, int[] vertexCounts, CallbackInfo ci) {
         fornax$meshRevisions.invalidate(section);
+        TerrainMeshRevisionStats.count(TerrainMeshRevisionStats.Site.VERTEX_DATA);
     }
 
     /** Newer arena APIs relocate individual segments without resizing the entire buffer. */
@@ -42,10 +44,14 @@ public class SectionRenderDataStorageRevisionMixin implements TerrainMeshRevisio
     @Inject(method = {"removeVertexData(I)V", "removeData(I)V"}, at = @At("HEAD"))
     private void fornax$beforeSectionRemoval(int section, CallbackInfo ci) {
         fornax$meshRevisions.invalidate(section);
+        TerrainMeshRevisionStats.count(TerrainMeshRevisionStats.Site.SECTION_REMOVAL);
     }
 
+    // onVertexSegmentChanged does not exist on this Sodium version (require = 0 makes that inject
+    // a no-op here), so relocation arrives through onBufferResized and is counted only here.
     @Inject(method = {"onBufferResized()V", "delete()V"}, at = @At("HEAD"))
     private void fornax$beforeStorageReplacement(CallbackInfo ci) {
         fornax$meshRevisions.invalidateAll();
+        TerrainMeshRevisionStats.count(TerrainMeshRevisionStats.Site.STORAGE_REPLACEMENT);
     }
 }
