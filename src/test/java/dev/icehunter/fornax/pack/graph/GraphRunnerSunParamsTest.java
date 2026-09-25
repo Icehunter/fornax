@@ -70,6 +70,21 @@ class GraphRunnerSunParamsTest {
                 () -> assertFalse(GraphRunner.suppliesParam2(name), "terrain render distance"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"dof_accumulate"})
+    void theApertureAccumulatorIsWiredForItsFrameIndexAndActiveFlag(String name) {
+        assertAll(name,
+                () -> assertTrue(GraphRunner.isApertureAccumulatePass(name), "aperture predicate"),
+                () -> assertTrue(GraphRunner.suppliesParam2(name), "param2 supplied"),
+                () -> assertFalse(GraphRunner.wantsSunAndDebugParams(name), "no sun params"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"dof_accumulates", "dof_accumulate_history", "accumulate"})
+    void similarNamesOutsideTheApertureAccumulatorDoNotReceiveItsParams(String name) {
+        assertFalse(GraphRunner.isApertureAccumulatePass(name), name);
+    }
+
     @Test
     void glintOcclusionVariantsReceiveTheSameCelestialDirectionAndDistance() {
         for (String name : new String[]{"glint_occlusion", "glint_occlusion_voxel",

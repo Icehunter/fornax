@@ -18,6 +18,7 @@ import dev.icehunter.fornax.pass.reconstruct.ReconstructPass;
 import dev.icehunter.fornax.pass.reconstruct.TemporalInputs;
 import dev.icehunter.fornax.pass.ssaa.SsaaDownsamplePass;
 import dev.icehunter.fornax.pass.ssaa.SsaaManager;
+import dev.icehunter.fornax.pass.taa.ApertureJitter;
 import dev.icehunter.fornax.pass.taa.CameraJitter;
 import dev.icehunter.fornax.pass.debug.GraphTargetDebugPass;
 import dev.icehunter.fornax.pass.debug.MetalRtDebugPass;
@@ -136,7 +137,21 @@ public class GameRendererMixin {
         // The null-backup check mirrors fornax$ssaaBeginFrame's reconstruct-resources guard:
         // when that guard skips the off-screen swap (shaders disabled / no pack), jittering the
         // projection would shimmer permanently with no reconstruct to resolve it.
-        if (FornaxConfig.get().aaMethod.wantsJitter() && this.fornax$ssaaNativeTargetBackup != null) {
+        if (ApertureJitter.active()) {
+            // Aperture stills replace the TAA jitter outright: the temporal pass is a passthrough
+            // while the aperture accumulates (TemporalPassRunner.accumulationLive), so a sub-pixel
+            // TAA offset here would add wobble with nothing left to resolve it. The unjittered
+            // capture above still ran, so SkyReprojection and the voxel DDA stay clean.
+            //
+            // FIRST upload of the frame only: renderLevel uploads a projection more than once (the
+            // world, then the first-person hand's own), and every upload after the first draws
+            // content the accumulation never averages; jittering those draws the hand at full
+            // aperture amplitude over an otherwise stable still.
+            if (!this.fornax$apertureAppliedThisFrame) {
+                this.fornax$apertureAppliedThisFrame = true;
+                ApertureJitter.applyTo(projectionMatrix);
+            }
+        } else if (FornaxConfig.get().aaMethod.wantsJitter() && this.fornax$ssaaNativeTargetBackup != null) {
             Vector2f jitter = CameraJitter.currentOffsetNdc();
             projectionMatrix.translateLocal(jitter.x(), jitter.y(), 0.0f);
         }
@@ -144,8 +159,14 @@ public class GameRendererMixin {
         return original.call(instance, projectionMatrix);
     }
 
+    /** Whether this frame's FIRST projection upload already took the aperture offset -- see
+     * fornax$setProjection; later uploads (the first-person hand's) stay unjittered. */
+    @Unique
+    private boolean fornax$apertureAppliedThisFrame;
+
     @Inject(method = "renderLevel", at = @At("HEAD"))
     private void fornax$ssaaBeginFrame(CallbackInfo ci) {
+        this.fornax$apertureAppliedThisFrame = false;
         GraphRunner.beginProfileFrame();
         SsaaManager.applyCurrentScale();
 

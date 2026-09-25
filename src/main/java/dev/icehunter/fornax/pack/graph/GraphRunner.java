@@ -49,6 +49,7 @@ import dev.icehunter.fornax.config.RayTracingMode;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pass.ssaa.SsaaManager;
+import dev.icehunter.fornax.pass.taa.ApertureJitter;
 import dev.icehunter.fornax.pass.taa.CameraJitter;
 import dev.icehunter.fornax.pass.voxel.VoxelDebugRaymarchPass;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
@@ -2532,8 +2533,19 @@ public final class GraphRunner {
      * so {@code hiz}-style passes are supplied by a path this predicate does not describe --
      * {@code GraphRunnerSunParamsTest} exempts them by pass TYPE rather than by name.
      */
+    /**
+     * The aperture-accumulation pass, by exact name: {@code u_Param2} carries the aperture frame
+     * index and {@code u_Param3} the active flag (see {@link
+     * dev.icehunter.fornax.pass.taa.ApertureJitter}). Named for the same reason as
+     * {@link #isHiZTracePass}: {@link #suppliesParam2} and {@link #computeParams} share one call,
+     * not two copies of one condition.
+     */
+    static boolean isApertureAccumulatePass(String name) {
+        return name.equals("dof_accumulate");
+    }
+
     static boolean suppliesParam2(String name) {
-        return wantsSunAndDebugParams(name) || isHiZTracePass(name);
+        return wantsSunAndDebugParams(name) || isHiZTracePass(name) || isApertureAccumulatePass(name);
     }
 
     private static PassParams computeParams(PassSpec p, int renderWidth, int renderHeight) {
@@ -2709,6 +2721,13 @@ public final class GraphRunner {
                 }
                 base = base.withParam3(renderDistanceBlocks);
             }
+        } else if (isApertureAccumulatePass(name)) {
+            // The accumulation shader weights its running average by this index and resets on
+            // active == 0. Both values are one frame stale relative to the projection the frame
+            // was rendered with (stillness is detected at the opaque head, after the projection
+            // hook ran), which at worst mis-weights one frame at the start of a still.
+            base = base.withParam2((float) ApertureJitter.frameIndex())
+                    .withParam3(ApertureJitter.active() ? 1.0f : 0.0f);
         }
         return base;
     }

@@ -8,7 +8,10 @@ import dev.icehunter.fornax.pass.shadow.ShadowCasterLists;
 import dev.icehunter.fornax.pass.shadow.ShadowFrameState;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
+import dev.icehunter.fornax.pass.taa.ApertureJitter;
+import dev.icehunter.fornax.pass.taa.CameraJitter;
 import dev.icehunter.fornax.pipeline.CameraMotionState;
+import dev.icehunter.fornax.pipeline.FocusState;
 import dev.icehunter.fornax.pipeline.ChunkRenderContextHolder;
 import dev.icehunter.fornax.pipeline.FornaxRenderPasses;
 import dev.icehunter.fornax.pipeline.LocalActorFrameState;
@@ -30,6 +33,7 @@ import org.joml.Vector3f;
 import java.util.Iterator;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -116,10 +120,64 @@ public class SodiumWorldRendererOrchestrationMixin {
             // u_Globals. See CameraMotionState for why a full-screen pass cannot derive the delta.
             CameraMotionState.commit(x, y, z);
             LocalActorFrameState.commitFromClient();
+            fornax$commitFocusAndAperture(matrices);
             GraphRunner.prepare(matrices, x, y, z);
             fornax$renderShadowPass(matrices, x, y, z, terrainSampler);
             fornax$renderWaterPrepass(matrices, x, y, z, terrainSampler);
         }
+    }
+
+    /**
+     * Focus distance and stillness, then this frame's aperture-jitter decision. Runs after
+     * {@code CameraMotionState.commit} (it reads the fresh deltas) and takes effect on the NEXT
+     * frame's projection: the projection hook already ran by the time the opaque head is reached,
+     * so a still detected here jitters from the following frame on, and one moving frame can slip
+     * into an ending accumulation -- the accumulation pass discards it because its active flag
+     * drops in the same frame.
+     *
+     * <p>The focus source is a fresh 512-block pick along the view ({@code Entity.pick}), NOT
+     * {@code mc.hitResult}: the interaction pick stops at arm's reach, so anything a few blocks
+     * away reads as MISS and focuses the jitter at 512 blocks; the skew then holds a plane at
+     * infinity fixed while the whole near scene wobbles by the full aperture. A true MISS
+     * still focuses at 512, the
+     * pack autofocus's own sky stand-in, so the two focus paths agree while parked.
+     *
+     * <p>Activation waits for {@code STILL_FRAMES_BEFORE_APERTURE} consecutive still frames so
+     * the brief pauses of normal play never start the jitter at all.
+     */
+    @Unique
+    private static final int STILL_FRAMES_BEFORE_APERTURE = 8;
+
+    @Unique
+    private void fornax$commitFocusAndAperture(ChunkRenderMatrices matrices) {
+        Minecraft mc = Minecraft.getInstance();
+        float rawDistance = 512.0f;
+        if (mc.player != null) {
+            net.minecraft.world.phys.HitResult pick = mc.player.pick(512.0, 1.0f, false);
+            if (pick.getType() != net.minecraft.world.phys.HitResult.Type.MISS) {
+                rawDistance = (float) pick.getLocation()
+                        .distanceTo(mc.gameRenderer.mainCamera().position());
+            }
+        }
+        FocusState.commit(rawDistance, CameraMotionState.deltaX(), CameraMotionState.deltaY(),
+                CameraMotionState.deltaZ(), matrices.modelView());
+
+        PackOptionsBuffer options = GraphRunner.optionsBuffer();
+        // Opt-in by pack option, default off: the aperture still touches TAA, upscaler and
+        // ray-tracing history behaviour that only live readings can judge, so it never arms
+        // itself unasked.
+        boolean stillsWanted = options != null && options.get("u_DofApertureStills", 0.0f) > 0.5f;
+        boolean dofOn = GraphRunner.isActive() && GraphRunner.isCompileOptionEnabled("DOF_ENABLED");
+        boolean active = dofOn && stillsWanted
+                && FocusState.stillStreak() >= STILL_FRAMES_BEFORE_APERTURE;
+        float radius = 0.0f;
+        if (active) {
+            float focalMm = options != null ? options.get("u_DofFocalLength", 50.0f) : 50.0f;
+            float fStop = options != null ? options.get("u_DofFStop", 2.0f) : 2.0f;
+            radius = ApertureJitter.apertureRadiusBlocks(focalMm, fStop,
+                    CameraJitter.currentUnjitteredProjection().m00());
+        }
+        ApertureJitter.configure(active, radius, FocusState.distanceBlocks());
     }
 
 

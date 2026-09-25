@@ -122,7 +122,12 @@ public final class TemporalPassRunner {
         return settingsData;
     }
 
-    /** Whether accumulation is live this frame -- see the class doc; false degrades to a copy. */
+    /** Whether accumulation is live this frame -- see the class doc; false degrades to a copy.
+     * Deliberately STILL live while the aperture jitter runs: the jitter offsets report as zero
+     * (only what is applied is reported), so gMotion carries the sub-frames' true apparent
+     * motion and this pass reprojects them like any tiny pan -- and it is the denoiser the
+     * raytraced lighting depends on. Turned off during stills, raw trace noise floods the
+     * aperture accumulation as a growing field of fireflies. */
     static boolean accumulationLive() {
         return FornaxConfig.get().aaMethod == AaMethod.TAA
                 && FornaxConfig.get().debugView == GBufferDebugView.OFF;

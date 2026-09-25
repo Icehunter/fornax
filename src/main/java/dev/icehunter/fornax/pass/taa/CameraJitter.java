@@ -111,12 +111,26 @@ public final class CameraJitter {
      * (NOT getScreenWidth()/getScreenHeight(), which return a separate HiDPI logical/points size).
      */
     public static Vector2f currentOffsetNdc() {
+        // These accessors report what was APPLIED to the projection, and while the aperture
+        // still is running, no TAA/TAAU offset is (ApertureJitter replaces it with its own
+        // depth-dependent offsets that no constant can cancel). Reporting the sequence value
+        // anyway made every consumer -- terrain.vsh's motion-vector cancellation, the temporal
+        // settings, the reconstruct's un-jitter -- correct for an offset that never happened,
+        // and the whole frame swims through the sequence pattern.
+        if (ApertureJitter.active()) {
+            return new Vector2f(0.0f, 0.0f);
+        }
         var window = Minecraft.getInstance().getWindow();
         return offsetForMethod(FornaxConfig.get(), frameIndex, window.getWidth(), window.getHeight());
     }
 
-    /** Last frame's jitter offset -- computed directly from the deterministic sequence, no snapshot needed. */
+    /** Last frame's jitter offset -- computed directly from the deterministic sequence, no snapshot needed.
+     * Zero while the aperture still is running, for the same applied-not-scheduled reason as
+     * {@link #currentOffsetNdc}. */
     public static Vector2f previousOffsetNdc() {
+        if (ApertureJitter.active()) {
+            return new Vector2f(0.0f, 0.0f);
+        }
         var window = Minecraft.getInstance().getWindow();
         return offsetForMethod(FornaxConfig.get(), frameIndex - 1, window.getWidth(), window.getHeight());
     }
