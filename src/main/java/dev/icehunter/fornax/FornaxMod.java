@@ -13,6 +13,7 @@ import dev.icehunter.fornax.pass.compute.ComputeShaderCompiler;
 import dev.icehunter.fornax.pipeline.PersistentPipelineCache;
 import dev.icehunter.fornax.profile.ProfilerOverlay;
 import dev.icehunter.fornax.util.RendererReload;
+import dev.icehunter.fornax.voxel.PrecipCoarseClipmapUpload;
 import dev.icehunter.fornax.voxel.VoxelWindow;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
@@ -44,6 +45,12 @@ public class FornaxMod implements ClientModInitializer {
         // movement are not guaranteed afterward, so chunk availability must wake backfill itself.
         ClientChunkEvents.CHUNK_LOAD.register((level, chunk) ->
                 VoxelWindow.onChunkLoaded(level, chunk.getPos().x(), chunk.getPos().z()));
+        // A chunk's own climate data can arrive well after the coarse precip window already
+        // covers its cells (chunk loading lags render distance while travelling); refreshing them
+        // the moment the chunk loads closes that gap without waiting on the cyclic sweep or a
+        // window slide to reach them.
+        ClientChunkEvents.CHUNK_LOAD.register((level, chunk) ->
+                PrecipCoarseClipmapUpload.onChunkLoaded(chunk.getPos().x(), chunk.getPos().z()));
 
         // Fabric fires this entrypoint from INSIDE Minecraft's constructor (after the singleton
         // instance is assigned, before its final fields exist), so nothing here may touch the

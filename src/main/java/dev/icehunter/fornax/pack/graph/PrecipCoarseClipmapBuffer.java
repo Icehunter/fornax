@@ -16,7 +16,7 @@ package dev.icehunter.fornax.pack.graph;
  * <tr><td>1</td><td>16..23</td><td>downfall, 0..255</td></tr>
  * <tr><td>1</td><td>24..31</td><td>category tags, {@link #TAG_HOT} .. {@link #TAG_MOUNTAIN}</td></tr>
  * <tr><td>2</td><td>0..15</td><td>base biome temperature, signed, same scale</td></tr>
- * <tr><td>2</td><td>16..31</td><td>reserved, written zero</td></tr>
+ * <tr><td>2</td><td>16..31</td><td>surface height at the sampled column, {@link #HEIGHT_BIAS} added</td></tr>
  * <tr><td>3</td><td>0..31</td><td>the pack's ID for the biome at the top block, 0 if it has none</td></tr>
  * </table>
  *
@@ -164,9 +164,23 @@ public final class PrecipCoarseClipmapBuffer {
                 | ((tags & TAGS_MASK) << TAGS_SHIFT);
     }
 
-    /** Packs word 2: the biome's nominal temperature. */
-    public static int encodeBase(float temperatureBase) {
-        return fixedTemperature(temperatureBase) & TEMPERATURE_MASK;
+    /**
+     * Added to a surface height before it is stored in word 2's upper sixteen bits, so any
+     * world height (the deepest modded floor included) packs as an unsigned value. The
+     * uploader already reads the height for its temperature adjustment; storing it costs
+     * nothing and gives a pack a terrain height field over the whole 512-block window.
+     */
+    public static final int HEIGHT_BIAS = 2048;
+
+    /** Packs word 2: the biome's nominal temperature, and the column's surface height. */
+    public static int encodeBase(float temperatureBase, int surfaceHeight) {
+        int biased = Math.max(0, Math.min(0xFFFF, surfaceHeight + HEIGHT_BIAS));
+        return (fixedTemperature(temperatureBase) & TEMPERATURE_MASK) | (biased << 16);
+    }
+
+    /** The surface height stored in word 2, bias removed. */
+    public static int decodeSurfaceHeight(int baseWord) {
+        return ((baseWord >>> 16) & 0xFFFF) - HEIGHT_BIAS;
     }
 
     /** The temperature in a word's low sixteen bits, for words 1 and 2 alike. */

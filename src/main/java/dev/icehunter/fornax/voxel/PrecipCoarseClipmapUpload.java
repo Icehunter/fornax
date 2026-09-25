@@ -54,6 +54,7 @@ public final class PrecipCoarseClipmapUpload {
     private static final ByteBuffer SCRATCH = MemoryUtil.memAlloc((int) PrecipCoarseClipmapBuffer.BYTE_SIZE)
             .order(ByteOrder.nativeOrder());
     private static final PrecipCoarseClipmapUploadPlan PLAN = new PrecipCoarseClipmapUploadPlan();
+    private static final PrecipCoarseClipmapPendingChunks PENDING_CHUNKS = new PrecipCoarseClipmapPendingChunks();
 
     private PrecipCoarseClipmapUpload() {}
 
@@ -61,7 +62,30 @@ public final class PrecipCoarseClipmapUpload {
     public static void reset() {
         PLAN.clear();
         clearMirror();
+        PENDING_CHUNKS.clear();
         EngineBufferUploadQueue.discard(PrecipCoarseClipmapBuffer.TARGET);
+    }
+
+    /**
+     * Records a chunk CHUNK_LOAD just reported, for the next {@link #onFrame} drain.
+     *
+     * <p>Marshals to the render thread when called from any other. Vanilla and Fabric both fire
+     * CHUNK_LOAD from inside client packet handling (a chunk-data packet populating the
+     * just-loaded {@code LevelChunk}), which Minecraft's networking layer confines to the render
+     * thread the same way vanilla game logic already is: no separate network thread does this
+     * work, only a netty thread handing decoded packets off before any handler runs.
+     * {@link #onFrame} runs on that same thread. The guard is for a mod calling {@code
+     * replaceWithPacketData} (or otherwise firing this event) off that thread: an unguarded {@link
+     * PrecipCoarseClipmapPendingChunks#offer} could then run concurrently with {@link #onFrame}'s
+     * drain, which is not thread-safe.
+     */
+    public static void onChunkLoaded(int chunkX, int chunkZ) {
+        Minecraft mc = Minecraft.getInstance();
+        if (!mc.isSameThread()) {
+            mc.execute(() -> PENDING_CHUNKS.offer(chunkX, chunkZ));
+            return;
+        }
+        PENDING_CHUNKS.offer(chunkX, chunkZ);
     }
 
     /**
@@ -93,11 +117,15 @@ public final class PrecipCoarseClipmapUpload {
             // invariant: no old word can be read under the new window.
             EngineBufferUploadQueue.publish(PrecipCoarseClipmapBuffer.TARGET, true, wholeWindowRanges());
             PLAN.commit(plan, level);
+            // The reset just resampled every cell in the new window from its current chunk state,
+            // so anything still pending here is either already covered (inside the new window) or
+            // irrelevant (outside it); nothing is lost by dropping it.
+            PENDING_CHUNKS.clear();
             return true;
         }
 
         EngineBufferUploadQueue.publish(PrecipCoarseClipmapBuffer.TARGET, false,
-                fillRows(level, baseCellX, baseCellZ, plan));
+                combinedRanges(level, baseCellX, baseCellZ, plan));
         PLAN.commit(plan, level);
         return PLAN.isReadyFor(level, baseCellX, baseCellZ);
     }
@@ -132,25 +160,172 @@ public final class PrecipCoarseClipmapUpload {
         return ranges;
     }
 
-    private static List<EngineBufferUploadQueue.Range> fillRows(ClientLevel level, int baseCellX, int baseCellZ,
-                                                                PrecipCoarseClipmapUploadPlan.UploadPlan plan) {
+    /**
+     * The window slide's exposed strip and any chunk that just loaded, alongside the cyclic sweep,
+     * in one publication. Four disjoint scratch regions so no fill can overwrite another's bytes
+     * before its own range is sliced out.
+     */
+    private static List<EngineBufferUploadQueue.Range> combinedRanges(ClientLevel level, int baseCellX,
+                                                                       int baseCellZ,
+                                                                       PrecipCoarseClipmapUploadPlan.UploadPlan plan) {
+        int exposedRowsScratchBase = ROWS_PER_FRAME * ROW_BYTES;
+        int exposedColumnsScratchBase = exposedRowsScratchBase
+                + PrecipCoarseClipmapUploadPlan.NORMAL_STEP_CELLS * ROW_BYTES;
+        int chunkScratchBase = exposedColumnsScratchBase
+                + PrecipCoarseClipmapUploadPlan.NORMAL_STEP_CELLS * GRID * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
+        int chunkScratchStride = (16 / PrecipCoarseClipmapBuffer.CELL_STRIDE)
+                * (16 / PrecipCoarseClipmapBuffer.CELL_STRIDE) * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
+        List<EngineBufferUploadQueue.Range> ranges = new ArrayList<>();
+        ranges.addAll(fillRowSlots(level, baseCellX, baseCellZ, plan.slotRows(), 0));
+        // A window slide exposes cells the cyclic sweep has not reached yet; those cells stay
+        // tag-invalid, and read as lit through a consumer's unknown-is-open fallback, until the
+        // sweep's own sixteen-frame lap reaches them. Sampling the exposed strip this same frame
+        // closes that gap at once (PrecipCoarseClipmapUploadPlan.plan bounds its size).
+        ranges.addAll(fillRowSlots(level, baseCellX, baseCellZ, plan.exposedRows(), exposedRowsScratchBase));
+        ranges.addAll(fillColumnSlots(level, baseCellX, baseCellZ, plan.exposedColumns(), exposedColumnsScratchBase));
+        // A chunk's own data can arrive well after the window already covers its cells, since
+        // chunk loading lags behind render distance at travel speed. Those cells sample as
+        // unknown, through no fault of the cyclic sweep or the slide refresh, until either heals
+        // them, up to sixteen frames. Draining the moment a chunk loads closes that gap the same
+        // frame it can.
+        int chunkIndex = 0;
+        for (PrecipCoarseClipmapPendingChunks.ChunkKey chunk : PENDING_CHUNKS.drain(baseCellX, baseCellZ)) {
+            ranges.addAll(fillChunkSquare(level, chunk.chunkX(), chunk.chunkZ(),
+                    chunkScratchBase + chunkIndex * chunkScratchStride));
+            chunkIndex++;
+        }
+        return ranges;
+    }
+
+    /** One full row (every x) per given z-slot; the cyclic sweep and the slide's exposed rows both
+     * reuse this, since a row publishes the same way whichever list names its slot. */
+    private static List<EngineBufferUploadQueue.Range> fillRowSlots(ClientLevel level, int baseCellX, int baseCellZ,
+                                                                     int[] rowSlots, int scratchBase) {
+        if (rowSlots.length == 0) {
+            return List.of();
+        }
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-        List<EngineBufferUploadQueue.Range> ranges = new ArrayList<>(ROWS_PER_FRAME);
-        for (int row = 0; row < ROWS_PER_FRAME; row++) {
-            int cellZ = baseCellZ + ((PLAN.rowCursor() + row) & (GRID - 1));
-            int scratchBase = row * ROW_BYTES;
+        List<EngineBufferUploadQueue.Range> ranges = new ArrayList<>(rowSlots.length);
+        for (int row = 0; row < rowSlots.length; row++) {
+            int slot = rowSlots[row];
+            int cellZ = absoluteCellForSlot(baseCellZ, slot);
+            int rowScratchBase = scratchBase + row * ROW_BYTES;
             for (int x = 0; x < GRID; x++) {
                 int cellX = baseCellX + x;
                 sampleCell(level, pos, cellX, cellZ, false, CELL);
-                int cellBase = scratchBase + (cellX & (GRID - 1)) * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
+                int cellBase = rowScratchBase + (cellX & (GRID - 1)) * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
                 for (int w = 0; w < WORDS; w++) {
                     SCRATCH.putInt(cellBase + w * Integer.BYTES, CELL[w]);
                 }
             }
-            ranges.add(new EngineBufferUploadQueue.Range((long) plan.slotRows()[row] * ROW_BYTES,
-                    slice(scratchBase, ROW_BYTES)));
+            ranges.add(new EngineBufferUploadQueue.Range((long) slot * ROW_BYTES, slice(rowScratchBase, ROW_BYTES)));
         }
         return ranges;
+    }
+
+    /**
+     * The slide's exposed x-slots, sampled down the whole window height. Adjacent slot-x cells are
+     * contiguous words (slot = z*GRID + x), so most rows publish in one range; a row whose exposed
+     * strip wraps the grid seam publishes in two.
+     */
+    private static List<EngineBufferUploadQueue.Range> fillColumnSlots(ClientLevel level, int baseCellX,
+                                                                        int baseCellZ, int[] columnSlots,
+                                                                        int scratchBase) {
+        if (columnSlots.length == 0) {
+            return List.of();
+        }
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        List<EngineBufferUploadQueue.Range> ranges = new ArrayList<>();
+        int rowSpan = columnSlots.length * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
+        for (int z = 0; z < GRID; z++) {
+            int cellZ = baseCellZ + z;
+            int rowScratchBase = scratchBase + z * rowSpan;
+            for (int j = 0; j < columnSlots.length; j++) {
+                int cellX = absoluteCellForSlot(baseCellX, columnSlots[j]);
+                sampleCell(level, pos, cellX, cellZ, false, CELL);
+                int cellScratch = rowScratchBase + j * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
+                for (int w = 0; w < WORDS; w++) {
+                    SCRATCH.putInt(cellScratch + w * Integer.BYTES, CELL[w]);
+                }
+            }
+            for (ColumnRun run : columnRuns(baseCellX, cellZ, columnSlots)) {
+                ranges.add(new EngineBufferUploadQueue.Range(run.byteOffset(),
+                        slice(rowScratchBase + run.startIndex() * PrecipCoarseClipmapBuffer.BYTES_PER_CELL,
+                                run.lengthBytes())));
+            }
+        }
+        return ranges;
+    }
+
+    /**
+     * One CHUNK_LOAD-triggered refresh: exactly the loaded chunk's own footprint (16 blocks is 4x4
+     * cells), healing it the instant the chunk arrives instead of waiting for the cyclic sweep or a
+     * window slide to reach it. {@code chunkX}/{@code chunkZ} are chunk coordinates, already
+     * confirmed inside the window by {@link PrecipCoarseClipmapPendingChunks#drain}.
+     */
+    private static List<EngineBufferUploadQueue.Range> fillChunkSquare(ClientLevel level, int chunkX, int chunkZ,
+                                                                        int scratchBase) {
+        int cellsPerChunk = 16 / PrecipCoarseClipmapBuffer.CELL_STRIDE;
+        int firstCellX = chunkX * cellsPerChunk;
+        int firstCellZ = chunkZ * cellsPerChunk;
+        int[] columnSlots = new int[cellsPerChunk];
+        for (int k = 0; k < cellsPerChunk; k++) {
+            columnSlots[k] = (firstCellX + k) & (GRID - 1);
+        }
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        List<EngineBufferUploadQueue.Range> ranges = new ArrayList<>();
+        int rowSpan = cellsPerChunk * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
+        for (int zi = 0; zi < cellsPerChunk; zi++) {
+            int cellZ = firstCellZ + zi;
+            int rowScratchBase = scratchBase + zi * rowSpan;
+            for (int j = 0; j < cellsPerChunk; j++) {
+                int cellX = firstCellX + j;
+                sampleCell(level, pos, cellX, cellZ, false, CELL);
+                int cellScratch = rowScratchBase + j * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
+                for (int w = 0; w < WORDS; w++) {
+                    SCRATCH.putInt(cellScratch + w * Integer.BYTES, CELL[w]);
+                }
+            }
+            // firstCellX is itself a valid toroidal base for these four slots (they are its own
+            // first four cells), so columnRuns reconstructs cellX correctly the same way it does
+            // for the window's own baseCellX.
+            for (ColumnRun run : columnRuns(firstCellX, cellZ, columnSlots)) {
+                ranges.add(new EngineBufferUploadQueue.Range(run.byteOffset(),
+                        slice(rowScratchBase + run.startIndex() * PrecipCoarseClipmapBuffer.BYTES_PER_CELL,
+                                run.lengthBytes())));
+            }
+        }
+        return ranges;
+    }
+
+    /** One published range: {@code startIndex} into the caller's slot array, the target buffer
+     * byte offset, and the run's byte length. */
+    record ColumnRun(int startIndex, long byteOffset, int lengthBytes) {}
+
+    /**
+     * Splits {@code columnSlots} into maximal ascending runs. 127 then 0 is not a continuation:
+     * word 127 and word 0 of the same row sit BYTES_PER_CELL * 127 apart, not adjacent, so a
+     * strip that wraps the grid seam publishes as two ranges. Pure, with no world or buffer
+     * access, so it is tested directly.
+     */
+    static List<ColumnRun> columnRuns(int baseCellX, int cellZ, int[] columnSlots) {
+        List<ColumnRun> runs = new ArrayList<>();
+        int runStart = 0;
+        for (int j = 1; j <= columnSlots.length; j++) {
+            boolean boundary = j == columnSlots.length || columnSlots[j] != columnSlots[j - 1] + 1;
+            if (!boundary) continue;
+            int firstCellX = absoluteCellForSlot(baseCellX, columnSlots[runStart]);
+            long byteOffset = (long) PrecipCoarseClipmapBuffer.wordOffsetForCell(firstCellX, cellZ) * Integer.BYTES;
+            int lengthBytes = (j - runStart) * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
+            runs.add(new ColumnRun(runStart, byteOffset, lengthBytes));
+            runStart = j;
+        }
+        return runs;
+    }
+
+    /** The absolute cell, within the current window, whose toroidal slot on this axis is {@code slot}. */
+    private static int absoluteCellForSlot(int base, int slot) {
+        return base + ((slot - (base & (GRID - 1))) & (GRID - 1));
     }
 
     private static EngineBufferUploadQueue.Range range(int offset, int length) {
@@ -187,7 +362,8 @@ public final class PrecipCoarseClipmapUpload {
             }
             return;
         }
-        pos.set(worldX, level.getHeight(Heightmap.Types.MOTION_BLOCKING, worldX, worldZ), worldZ);
+        int surfaceY = level.getHeight(Heightmap.Types.MOTION_BLOCKING, worldX, worldZ);
+        pos.set(worldX, surfaceY, worldZ);
         int seaLevel = level.getSeaLevel();
         Holder<Biome> holder = level.getBiome(pos);
         Biome biome = holder.value();
@@ -196,7 +372,7 @@ public final class PrecipCoarseClipmapUpload {
                 typeOf(biome.getPrecipitationAt(pos, seaLevel)));
         out[PrecipCoarseClipmapBuffer.WORD_CLIMATE] = PrecipCoarseClipmapBuffer.encodeClimate(
                 biome.getTemperature(pos, seaLevel), biome.climateSettings.downfall(), tagsOf(holder));
-        out[PrecipCoarseClipmapBuffer.WORD_BASE] = PrecipCoarseClipmapBuffer.encodeBase(biome.getBaseTemperature());
+        out[PrecipCoarseClipmapBuffer.WORD_BASE] = PrecipCoarseClipmapBuffer.encodeBase(biome.getBaseTemperature(), surfaceY);
         out[PrecipCoarseClipmapBuffer.WORD_BIOME_ID] = BiomeProbe.id(holder);
         System.arraycopy(out, 0, MIRROR, offset, WORDS);
     }

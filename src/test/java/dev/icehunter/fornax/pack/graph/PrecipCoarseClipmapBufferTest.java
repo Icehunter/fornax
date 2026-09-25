@@ -62,10 +62,23 @@ class PrecipCoarseClipmapBufferTest {
     }
 
     @Test
-    void theBaseWordCarriesOnlyTheNominalTemperature() {
-        int base = PrecipCoarseClipmapBuffer.encodeBase(0.8f);
+    void theBaseWordCarriesTheNominalTemperatureAndTheSurfaceHeight() {
+        int base = PrecipCoarseClipmapBuffer.encodeBase(0.8f, 73);
         assertEquals(0.8f, PrecipCoarseClipmapBuffer.decodeTemperature(base), 1.0f / 256.0f);
-        assertEquals(0, base >>> 16, "the upper half of word 2 is reserved and written zero");
+        assertEquals(73, PrecipCoarseClipmapBuffer.decodeSurfaceHeight(base));
+    }
+
+    @Test
+    void theSurfaceHeightSurvivesTheWholeWorldRangeAndANegativeTemperature() {
+        assertEquals(-64, PrecipCoarseClipmapBuffer.decodeSurfaceHeight(
+                PrecipCoarseClipmapBuffer.encodeBase(-0.7f, -64)),
+                "the deepest vanilla floor round-trips beside a signed temperature");
+        assertEquals(320, PrecipCoarseClipmapBuffer.decodeSurfaceHeight(
+                PrecipCoarseClipmapBuffer.encodeBase(2.0f, 320)));
+        assertEquals(-PrecipCoarseClipmapBuffer.HEIGHT_BIAS,
+                PrecipCoarseClipmapBuffer.decodeSurfaceHeight(
+                        PrecipCoarseClipmapBuffer.encodeBase(0.0f, -9999)),
+                "a height below the bias clamps instead of wrapping into the temperature");
     }
 
     @Test

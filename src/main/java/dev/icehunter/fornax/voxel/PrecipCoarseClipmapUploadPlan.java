@@ -12,6 +12,9 @@ import dev.icehunter.fornax.pack.graph.PrecipCoarseClipmapBuffer;
 final class PrecipCoarseClipmapUploadPlan {
     static final int ROWS_PER_FRAME = 8;
     static final int ROW_BYTES = PrecipCoarseClipmapBuffer.GRID * PrecipCoarseClipmapBuffer.BYTES_PER_CELL;
+    /** The one normal per-frame window step; also requiresFullReset's threshold for that step. */
+    static final int NORMAL_STEP_CELLS =
+            PrecipCoarseClipmapBuffer.ANCHOR_SNAP_BLOCKS / PrecipCoarseClipmapBuffer.CELL_STRIDE;
 
     private Object committedLevel;
     private int committedBaseCellX;
@@ -22,15 +25,44 @@ final class PrecipCoarseClipmapUploadPlan {
     UploadPlan plan(Object level, int baseCellX, int baseCellZ) {
         if (requiresFullReset(level, baseCellX, baseCellZ)) {
             return new UploadPlan(true, baseCellX, baseCellZ, new int[0],
-                    PrecipCoarseClipmapBuffer.BYTE_SIZE);
+                    PrecipCoarseClipmapBuffer.BYTE_SIZE, new int[0], new int[0]);
         }
         int[] slotRows = new int[ROWS_PER_FRAME];
         for (int row = 0; row < ROWS_PER_FRAME; row++) {
             slotRows[row] = (baseCellZ + ((rowCursor + row) & (PrecipCoarseClipmapBuffer.GRID - 1)))
                     & (PrecipCoarseClipmapBuffer.GRID - 1);
         }
-        return new UploadPlan(false, baseCellX, baseCellZ, slotRows,
-                (long) ROWS_PER_FRAME * ROW_BYTES);
+        // A window slide exposes cells the cyclic sweep above has not reached yet; those cells
+        // stay tag-invalid, and read as lit through a consumer's unknown-is-open fallback, until
+        // the sweep's own sixteen-frame lap reaches them. Sampling the exposed strip this same
+        // frame closes that gap at once. Bounded by the same NORMAL_STEP_CELLS requiresFullReset
+        // enforces: at most 4 columns plus 4 rows, ~1024 cells, once per 16 blocks of travel on
+        // either axis, well under the steady sweep's own 16 KiB.
+        int[] exposedColumns = exposedSlots(committedBaseCellX, baseCellX);
+        int[] exposedRows = exposedSlots(committedBaseCellZ, baseCellZ);
+        long bytes = (long) ROWS_PER_FRAME * ROW_BYTES
+                + (long) exposedColumns.length * PrecipCoarseClipmapBuffer.GRID * PrecipCoarseClipmapBuffer.BYTES_PER_CELL
+                + (long) exposedRows.length * ROW_BYTES;
+        return new UploadPlan(false, baseCellX, baseCellZ, slotRows, bytes, exposedColumns, exposedRows);
+    }
+
+    /**
+     * The storage slots a window slide newly exposes on one axis, in walk order from the trailing
+     * edge; empty when the base did not move on this axis. Toroidal, the same as every other slot
+     * here, so a run can wrap past the grid seam.
+     */
+    private static int[] exposedSlots(int committedBase, int newBase) {
+        int delta = newBase - committedBase;
+        if (delta == 0) {
+            return new int[0];
+        }
+        int width = Math.abs(delta);
+        int startCell = delta > 0 ? committedBase + PrecipCoarseClipmapBuffer.GRID : newBase;
+        int[] slots = new int[width];
+        for (int i = 0; i < width; i++) {
+            slots[i] = (startCell + i) & (PrecipCoarseClipmapBuffer.GRID - 1);
+        }
+        return slots;
     }
 
     boolean isReadyFor(Object level, int baseCellX, int baseCellZ) {
@@ -60,13 +92,12 @@ final class PrecipCoarseClipmapUploadPlan {
         if (!initialized || committedLevel != level) {
             return true;
         }
-        int normalStepCells = PrecipCoarseClipmapBuffer.ANCHOR_SNAP_BLOCKS
-                / PrecipCoarseClipmapBuffer.CELL_STRIDE;
         // Widen before subtracting so an extreme-coordinate teleport cannot overflow into a small
         // adjacent move and expose a bounded-tag alias under a newly committed window.
-        return Math.abs((long) baseCellX - committedBaseCellX) > normalStepCells
-                || Math.abs((long) baseCellZ - committedBaseCellZ) > normalStepCells;
+        return Math.abs((long) baseCellX - committedBaseCellX) > NORMAL_STEP_CELLS
+                || Math.abs((long) baseCellZ - committedBaseCellZ) > NORMAL_STEP_CELLS;
     }
 
-    record UploadPlan(boolean fullReset, int baseCellX, int baseCellZ, int[] slotRows, long bytes) {}
+    record UploadPlan(boolean fullReset, int baseCellX, int baseCellZ, int[] slotRows, long bytes,
+                       int[] exposedColumns, int[] exposedRows) {}
 }
