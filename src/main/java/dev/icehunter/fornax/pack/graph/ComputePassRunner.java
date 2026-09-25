@@ -61,6 +61,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.Set;
 
 /**
  * The compute-pass analog of {@link FullscreenPassRunner}: one built pipeline per declared
@@ -212,7 +213,8 @@ public final class ComputePassRunner implements AutoCloseable {
                                List<String> bindingOrder, List<Integer> descriptorTypes,
                                List<InputSamplerKind> samplerKinds,
                                int extraPushConstantBytes, boolean graphicsCompletionBeforeStorageWrite,
-                               FrameProfiler profiler, String resolvedSource, byte[] compiledSpirv) {
+                               FrameProfiler profiler, String resolvedSource, byte[] compiledSpirv,
+                               Set<String> graphicsWrittenTargets) {
         this.spec = spec;
         this.resolvedSource = resolvedSource;
         this.compiledSpirv = compiledSpirv;
@@ -241,11 +243,18 @@ public final class ComputePassRunner implements AutoCloseable {
         this.extraPushConstantBytes = extraPushConstantBytes;
         this.imageReuseSequence = graphicsCompletionBeforeStorageWrite
                 ? new CrossQueueImageReuseSequence() : null;
-        this.graphicsStream = GraphicsInputDependency.requiredBy(spec.inputs());
+        this.graphicsStream = GraphicsInputDependency.requiredBy(spec.inputs(), graphicsWrittenTargets);
         // A pass with graphics-owned inputs runs in the graphics stream instead (see run()), so
         // this dependency is never constructed. See docs/ARCHITECTURE.md.
         this.graphicsInputDependency = null;
-        this.timestampQueries = RawTimestampQueries.tryCreate(backend, spec.name());
+        // runInGraphicsStream() never touches timestampQueries/computeTimer; see its own doc
+        // comment ("no fence, no timestamp query"). A pool allocated here would never be read:
+        // a raw VkQueryPool (one MTLCounterSampleBuffer under MoltenVK) held for the runner's
+        // whole lifetime. Each pool is its own live counter-buffer allocation, and a device only
+        // has so many; a pack with enough compute passes enabled at once can use them all up,
+        // which MoltenVK reports as a later vkCreateQueryPool falling back to CPU-emulated
+        // timestamps rather than a hard failure.
+        this.timestampQueries = graphicsStream ? null : RawTimestampQueries.tryCreate(backend, spec.name());
         float timestampPeriodNs = backend.device().getDeviceInfo().timestampPeriod();
         int timestampValidBits = timestampQueries != null ? timestampQueries.validBits() : 0;
         this.computeTimer = new ComputePassTimer(profiler, spec.name(), timestampQueries,
@@ -325,7 +334,7 @@ public final class ComputePassRunner implements AutoCloseable {
     public static ComputePassRunner build(PassSpec spec, VulkanComputeBackend backend, TargetRegistry registry,
                                           int extraPushConstantBytes,
                                           boolean graphicsCompletionBeforeStorageWrite,
-                                          FrameProfiler profiler) {
+                                          FrameProfiler profiler, Set<String> graphicsWrittenTargets) {
         String source = RuntimeShaderPack.getInstance().sourceOrNull(spec.shader());
         if (source == null) {
             throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
@@ -353,7 +362,8 @@ public final class ComputePassRunner implements AutoCloseable {
             ComputePassRunner runner = null;
             try {
                 runner = new ComputePassRunner(spec, backend, compiled, bindingOrder, descriptorTypes,
-                        samplerKinds, extraPushConstantBytes, graphicsCompletionBeforeStorageWrite, profiler, source, compiledSpirv);
+                        samplerKinds, extraPushConstantBytes, graphicsCompletionBeforeStorageWrite, profiler, source,
+                        compiledSpirv, graphicsWrittenTargets);
                 runner.allocateDescriptorSets();
             } catch (RuntimeException e) {
                 if (runner != null) {

@@ -133,13 +133,20 @@ class VulkanPartialFlushContractTest {
      */
     @Test
     void theMeshShadowTierDispatchesItsEventHandoffWithoutAFullSubmit() throws IOException {
-        String trace = method(read("metalfx/rt/MeshMetalProvider.java"), "private void traceFrame(");
-        assertEquals(1, occurrences(trace, FLUSH), "one cross-queue handoff per traced frame");
-        assertFalse(trace.contains("encoder.submit();"),
+        String provider = read("metalfx/rt/MeshMetalProvider.java");
+        // buildStructure() owns the structure's handoff, shared with the query-only path that has
+        // no celestial trace of its own; traceFrame calls it, then traces against what it
+        // promoted.
+        String build = method(provider, "private StructureBuild buildStructure(");
+        assertEquals(1, occurrences(build, FLUSH), "one cross-queue handoff per structure build");
+        assertFalse(build.contains("encoder.submit();"),
                 "a full submit host-waits an earlier frame batch for a signal Metal already has");
-        assertOrdered(trace, "VulkanMetalInterop.recordIntoStream(encoder,", "encoder.signalSemaphore(",
+        assertOrdered(build, "VulkanMetalInterop.recordIntoStream(encoder,", "encoder.signalSemaphore(",
                 FLUSH, "tracer.encodeBuild(");
-        assertOrdered(trace, FLUSH, "tracer.encodeVisibilityTrace(");
+
+        String trace = method(provider, "private void traceFrame(");
+        assertFalse(trace.contains(FLUSH), "the structure's own handoff lives in buildStructure");
+        assertOrdered(trace, "buildStructure(", "tracer.encodeVisibilityTrace(");
     }
 
     /**

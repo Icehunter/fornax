@@ -1,12 +1,13 @@
 package dev.icehunter.fornax.pack;
 
 import dev.icehunter.fornax.rt.RayQueryKind;
+import dev.icehunter.fornax.rt.AtlasUvEncoding;
 import dev.icehunter.fornax.rt.RayTier;
 
 import java.util.Objects;
 
 /**
- * The three fields a {@link PassType#RAY_QUERY} pass carries and no other pass type has.
+ * The fields a {@link PassType#RAY_QUERY} pass carries and no other pass type has.
  *
  * <p>The pass itself has no shader. A pack writes ray requests into a buffer target from an earlier
  * pass, declares this pass over that buffer and a hit buffer, and reads the hits from a later one;
@@ -19,12 +20,18 @@ import java.util.Objects;
  * @param minTier  the lowest tier allowed to answer. {@link RayTier#NONE} accepts any. A pack that
  *                 would rather fall back to its own raster path than take an approximate answer
  *                 raises this, and every provider below it is skipped rather than blended.
+ * @param atlasUvEncoding representation of UV-known hit addresses; defaults to packed half2.
  */
-public record RayQuerySpec(RayQueryKind kind, int rayCount, RayTier minTier) {
+public record RayQuerySpec(RayQueryKind kind, int rayCount, RayTier minTier, AtlasUvEncoding atlasUvEncoding) {
+
+    public RayQuerySpec(RayQueryKind kind, int rayCount, RayTier minTier) {
+        this(kind, rayCount, minTier, AtlasUvEncoding.PACKED_HALF);
+    }
 
     public RayQuerySpec {
         Objects.requireNonNull(kind, "ray query kind");
         Objects.requireNonNull(minTier, "ray query minimum tier");
+        Objects.requireNonNull(atlasUvEncoding, "atlas UV encoding");
         if (rayCount <= 0) {
             throw new IllegalArgumentException("ray count must be positive, got " + rayCount);
         }

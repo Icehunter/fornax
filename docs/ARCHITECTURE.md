@@ -2401,6 +2401,28 @@ alone cannot activate their pass without a live pack reader. Native and contract
 geometry, subscriptions, resource routing, cache/event behavior and filtering; they do not establish
 live frame time, successful runtime mixin injection or visual acceptance.
 
+### Buffer query atlas addresses
+
+A `[pass.ray_query]` table may set `atlas_uv_encoding = "texel_u16"`. Omitted or explicit
+`"packed_half"` selects the default hit-word-3 packing: normalized u/v as two binary16 values.
+Exact mode instead packs the level-zero atlas texel x in bits 0..15 and y in bits 16..31; readers
+use `texelFetch` on that integer coordinate. Exact UV-known hits set flag bit 13
+(`FLAG_ATLAS_TEXEL_U16`); packed-half hits, misses and records without UVs leave it clear. Readers
+can pick their word-3 decoder from this flag. Both modes share the same nine-word, 36-byte hit
+record, UV-known flag and ABI version 4. The encoding travels through `RayQuerySpec`, `BufferQuery` and
+constant byte 28 (zero for packed half); no other member or buffer binding differs between modes.
+
+In exact mode, the Metal cutout test and returned address use the same floor-and-clamp coordinate
+conversion and direct level-zero read. This stops a hit that passed the alpha test at one texel
+from returning another texel's colour after binary16 UV rounding on a large atlas. The interop
+checks the bound atlas size before dispatch: each extent must be 1..65536, the range addressable by two unsigned
+16-bit coordinates. An unknown encoding in the manifest fails at load; an oversized atlas fails the
+query loudly rather than wrapping coordinates. The kernel also leaves unsupported encoding or size
+requests unanswered. Opting in changes only what word 3 holds, so a pack that opts in must change
+its word-3 decoder in the same edit. An engine without this key rejects the manifest instead of
+silently using the wrong encoding. Native tests use a 16384x8192 cutout atlas and trace both modes to pin the
+accepted-texel address; they do not prove live foliage stability or frame rate.
+
 ### Hardware-voxel fill tier (finite-domain voxel representation)
 
 A graph declaring `rtSunDepth` receives an engine-owned RGBA32_FLOAT image at the exact

@@ -6,6 +6,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -36,6 +37,27 @@ class GraphicsInputDependencyTest {
     @Test
     void nonGBufferBuiltinsDoNotRequestAGraphicsFlush() {
         assertFalse(GraphicsInputDependency.requiredBy(List.of("builtin.blockAtlas", "builtin.noise")));
+    }
+
+    @Test
+    void aRayQueryHitBufferInTheGraphicsWrittenSetRequiresTheProducerBoundary() {
+        List<String> inputs = List.of(
+                "globals", "packOptions", "giRayRequests", "giRayHits", "giBounceRaw.history");
+        assertTrue(GraphicsInputDependency.requiredBy(inputs, Set.of("giRayHits")),
+                "giRayHits is in the graphics-written set, so this compute reader needs the"
+                        + " graphics-stream routing RayQueryInterop.answer's copy requires");
+        assertFalse(GraphicsInputDependency.requiredBy(inputs, Set.of()),
+                "an empty graphics-written set means no ray-query pass produced any of these"
+                        + " inputs this frame, so the ordinary compute-queue path is still correct");
+    }
+
+    @Test
+    void aHistoryReaderOfAGraphicsWrittenRayQueryOutputStillRequiresTheProducerBoundary() {
+        // targetBaseName collapses the .history suffix: after the end-of-frame swap, next frame's
+        // current buffer is the physical buffer a reader sampled as history the prior frame, so a
+        // .history reader of a graphics-written target needs the same edge a plain reader would.
+        assertTrue(GraphicsInputDependency.requiredBy(
+                List.of("globals", "giBounceRaw.history"), Set.of("giBounceRaw")));
     }
 
     @Test

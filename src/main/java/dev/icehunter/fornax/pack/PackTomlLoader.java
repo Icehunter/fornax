@@ -9,6 +9,7 @@ import dev.icehunter.fornax.pack.graph.TargetKind;
 import dev.icehunter.fornax.metalfx.rt.RayQueryAbi;
 import dev.icehunter.fornax.rt.RayTier;
 import dev.icehunter.fornax.rt.RayQueryKind;
+import dev.icehunter.fornax.rt.AtlasUvEncoding;
 import dev.icehunter.fornax.pack.graph.TextureSize;
 import org.jspecify.annotations.Nullable;
 
@@ -274,7 +275,7 @@ public final class PackTomlLoader {
             throw new FornaxPackError(file, key, "a ray_query pass must declare a [pass.ray_query] table");
         }
         Config spec = requireTable(p.get("ray_query"), key, file);
-        TomlSupport.rejectUnknownKeys(spec, Set.of("kind", "rays", "min_tier"), file);
+        TomlSupport.rejectUnknownKeys(spec, Set.of("kind", "rays", "min_tier", "atlas_uv_encoding"), file);
 
         String kindName = TomlSupport.requireString(spec, "kind", file).toUpperCase(Locale.ROOT);
         RayQueryKind kind;
@@ -303,7 +304,17 @@ public final class PackTomlLoader {
                                 + "'; expected none, software_voxel, hardware_voxel or hardware_mesh");
             }
         }
-        return new RayQuerySpec(kind, rays, minTier);
+        AtlasUvEncoding encoding = AtlasUvEncoding.PACKED_HALF;
+        if (spec.contains("atlas_uv_encoding")) {
+            String value = TomlSupport.requireString(spec, "atlas_uv_encoding", file);
+            try {
+                encoding = AtlasUvEncoding.valueOf(value.toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException unknown) {
+                throw new FornaxPackError(file, key + ".atlas_uv_encoding",
+                        "unknown atlas UV encoding '" + value + "'; expected packed_half or texel_u16");
+            }
+        }
+        return new RayQuerySpec(kind, rays, minTier, encoding);
     }
 
     private static @Nullable RayTracedShadowSpec parseRayTracedShadows(Config root, String file) {

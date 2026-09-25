@@ -3,12 +3,16 @@ package dev.icehunter.fornax.pack.graph;
 import dev.icehunter.fornax.pack.GraphSpec;
 import dev.icehunter.fornax.pack.PassSpec;
 import dev.icehunter.fornax.pack.PassType;
+import dev.icehunter.fornax.pack.RayQuerySpec;
 import dev.icehunter.fornax.pack.TargetSpec;
 import dev.icehunter.fornax.pipeline.SkyProbe;
+import dev.icehunter.fornax.rt.RayQueryKind;
+import dev.icehunter.fornax.rt.RayTier;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -188,6 +192,40 @@ class GraphRunnerTest {
                         List.of(dev.icehunter.fornax.pipeline.OpaqueDepth.NAME), List.of("builtin.output"),
                         null, null, List.of(), null, null, null)));
         assertFalse(GraphRunner.computePackReferencesOpaqueDepth(g));
+    }
+
+    // --- rayQueryOutputs -------------------------------------------------------------------------
+
+    @Test
+    void rayQueryOutputsCollectsHitBuffersFromEveryEnabledRayQueryPass() {
+        PassSpec traceSun = new PassSpec("trace_sun", PassType.RAY_QUERY, null, null, null,
+                List.of("sunShadowRequests"), List.of("sunShadowHits"), null, null, List.of(), null, null,
+                null, null, null, new RayQuerySpec(RayQueryKind.VISIBILITY, 1024, RayTier.NONE));
+        PassSpec traceGi = new PassSpec("trace_gi", PassType.RAY_QUERY, null, null, null,
+                List.of("giRayRequests"), List.of("giRayHits"), null, null, List.of(), null, null,
+                null, null, null, new RayQuerySpec(RayQueryKind.CLOSEST_HIT, 2048, RayTier.NONE));
+        GraphSpec g = new GraphSpec(Map.of(), List.of(traceSun, traceGi));
+
+        assertEquals(Set.of("sunShadowHits", "giRayHits"), GraphRunner.rayQueryOutputs(g, Map.of()));
+    }
+
+    @Test
+    void rayQueryOutputsExcludesADisabledPassAndAnyNonRayQueryPassOutputs() {
+        // GI_TRACE is a made-up name for this test, not a real engine option; only its value matters.
+        PassSpec gatedTrace = new PassSpec("trace_gi", PassType.RAY_QUERY, null, null, null,
+                List.of("giRayRequests"), List.of("giRayHits"), null, "GI_TRACE == 1", List.of(), null, null,
+                null, null, null, new RayQuerySpec(RayQueryKind.CLOSEST_HIT, 2048, RayTier.NONE));
+        PassSpec compute = new PassSpec("shadow_rays", PassType.COMPUTE, null, null,
+                "shaders/compute/shadow_rays.comp", List.of(), List.of("sunShadowRequests"), null, null,
+                List.of(1, 1, 1), null, null, null);
+        PassSpec fullscreen = new PassSpec("resolve", PassType.FULLSCREEN, null, null,
+                "shaders/post/resolve.fsh", List.of(), List.of("builtin.output"), null, null,
+                List.of(), null, null, null);
+        GraphSpec g = new GraphSpec(Map.of(), List.of(gatedTrace, compute, fullscreen));
+
+        assertEquals(Set.of(), GraphRunner.rayQueryOutputs(g, Map.of("GI_TRACE", 0)),
+                "a compile-disabled ray_query pass's hit buffer is not graphics-written this build");
+        assertEquals(Set.of("giRayHits"), GraphRunner.rayQueryOutputs(g, Map.of("GI_TRACE", 1)));
     }
 
     // --- computeComputeAtlasTextureInputs -------------------------------------------------------

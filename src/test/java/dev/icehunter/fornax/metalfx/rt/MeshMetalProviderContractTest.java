@@ -50,17 +50,20 @@ class MeshMetalProviderContractTest {
     }
 
     /**
-     * Seven, not five. The deleted pass had five: unavailable, no device or atlas, an empty caster
-     * snapshot, the pack's shadow pass gated off, and the catch. The sixth is a frame where nothing
-     * handed over a caster source before the fill, which cannot happen in the shipping call order
-     * but is reachable by any future caller of the interface. The seventh is a frame where a build
-     * is under way but nothing is promoted yet (the first frame after load, or after a
-     * teleport), which has meshes to trace but no structure ready to trace them against.
+     * Eight decline paths, each of which must invalidate. Five are plain refusals: unavailable, no
+     * device or atlas, an empty caster snapshot, the pack's shadow pass gated off, and the catch.
+     * The sixth is a frame where nothing handed over a caster source before the fill, which cannot
+     * happen in the shipping call order but is reachable by any future caller of the interface.
+     * The seventh is a frame where a build is under way but nothing is promoted yet (the first
+     * frame after load, or after a teleport), which has meshes to trace but no structure ready to
+     * trace them against. The eighth is a frame with a zero receiving distance: nothing for this
+     * fill to trace, even though a ray-query caller may still build its own structure later the
+     * same frame.
      */
     @Test
     void everyDeclinePathInvalidatesTheCelestialTarget() throws IOException {
         String provider = read("metalfx/rt/MeshMetalProvider.java");
-        assertEquals(7, provider.split("TerrainShadowResult\\.invalidate\\(\\)", -1).length - 1,
+        assertEquals(8, provider.split("TerrainShadowResult\\.invalidate\\(\\)", -1).length - 1,
                 "a decline that leaves the target valid hands the pack last frame's shadows");
         assertTrue(provider.contains("""
                         if (casters == null) {"""),
@@ -78,7 +81,8 @@ class MeshMetalProviderContractTest {
                 "a stale caster source would trace a previous frame's uploaded meshes");
     }
 
-    /** The frame hook and the phase-one call both moved; naming the deleted pass would not compile. */
+    /** Source-level on purpose: the pass this mixin replaced is not in the tree, so a compiled
+     * reference to it is impossible and the absence check has to read the source. */
     @Test
     void theOrchestrationMixinDrivesTheRouterRatherThanThePassItReplaced() throws IOException {
         String mixin = read("mixin/sodium/SodiumWorldRendererOrchestrationMixin.java");
@@ -135,5 +139,124 @@ class MeshMetalProviderContractTest {
         assertTrue(call > close,
                 "its one call site must be inside close(): a fresh mesh change must never discard "
                         + "a build in flight, only teardown does");
+    }
+
+    /**
+     * RT shadows off does not mean no ray queries: a pack running GI or lamp queries with no shadow
+     * subscription still needs this tier's structure, so a zero receiving distance alone must not
+     * tear it down. Query demand is what keeps the celestial fill from destroying resources a buffer
+     * query is about to build lazily.
+     */
+    @Test
+    void aZeroReceivingDistanceWithQueryDemandKeepsTheStructureInstead() throws IOException {
+        String provider = read("metalfx/rt/MeshMetalProvider.java");
+        String trace = method(provider, "private void traceFrame(");
+        assertTrue(trace.contains("RayRouter.queryDemand()"),
+                "query demand alone must count as subscribed ahead of the availability probe");
+        int radiusGate = trace.indexOf("if (radius <= 0) {");
+        assertTrue(radiusGate > 0, "a zero receiving distance must be its own branch");
+        String radiusBody = trace.substring(radiusGate, trace.indexOf("return;", radiusGate));
+        assertFalse(radiusBody.contains("close()"),
+                "a zero receiving distance must not tear down a structure a query caller still needs");
+    }
+
+    /**
+     * A buffer query in a frame with no celestial trace must trigger the structure build, exactly
+     * once, from its own camera-window selection rather than the sun's light volume this path has
+     * none of.
+     */
+    @Test
+    void aQueryWithNoCelestialFillTriggersTheStructureBuildOncePerFrame() throws IOException {
+        String provider = read("metalfx/rt/MeshMetalProvider.java");
+        String answer = method(provider, "public void answer(BufferQuery query) {");
+        assertTrue(answer.contains("if (debugTlas == 0 && !queryBuildAttempted) {"),
+                "an unanswered frame must attempt the lazy build exactly once");
+        assertTrue(answer.contains("ensureStructureForQuery();"));
+
+        String ensure = method(provider, "private void ensureStructureForQuery() {");
+        assertTrue(ensure.startsWith("\n        queryBuildAttempted = true;"),
+                "the attempt must be marked before any early return, or a frame with nothing to "
+                        + "build would retry on every ray-query pass");
+        assertTrue(ensure.contains("snapshotAroundCamera("),
+                "no light matrix exists here, so casters must be selected by camera window");
+        assertTrue(ensure.contains("MetalRtSupport.isAvailableFor(true)"),
+                "hardware/mode support must still gate this path independent of the shadow radius");
+        assertTrue(ensure.contains("failed = true;"),
+                "a build that keeps throwing must latch failed the same way traceFrame's catch does");
+
+        assertTrue(provider.contains("queryBuildAttempted = false;"),
+                "forgetDebugScene() must reset the attempt at the top of every frame");
+    }
+
+    /**
+     * A pack with buffer-query demand needs this tier's structure to reach as far as GI and lamp rays
+     * do, not only as far as the sun shadow receives into. The fill folds the query-reach window into
+     * its own selection instead of leaving it to a second, later build that would only be attempted
+     * once this frame's debugTlas is still zero.
+     */
+    @Test
+    void aTraceFrameWithQueryDemandUnionsTheQueryReachWindowIntoItsOwnSelection() throws IOException {
+        String provider = read("metalfx/rt/MeshMetalProvider.java");
+        String trace = method(provider, "private void traceFrame(");
+        assertTrue(trace.contains("boolean includeQueryReach = RayRouter.queryDemand();"),
+                "query demand alone decides whether the light-volume selection widens to the query window");
+        assertTrue(trace.contains("snapshot(manager, x, y, z, light, includeQueryReach)"),
+                "the union must be folded into the same selection the shadow trace itself uses");
+        assertTrue(trace.contains("buildStructure(device, atlasSource, x, y, z, sources, phase, includeQueryReach)"));
+    }
+
+    /** Both build paths share one named reach so a caller cannot answer past what the other builds. */
+    @Test
+    void bothStructureBuildPathsShareTheSameQueryReachConstant() throws IOException {
+        String provider = read("metalfx/rt/MeshMetalProvider.java");
+        assertTrue(provider.contains("private static final float QUERY_REACH_BLOCKS = 96f;"));
+        assertTrue(provider.contains("cameraWindowFilter(QUERY_REACH_BLOCKS)"),
+                "traceFrame's union must reach exactly as far as the query-only fallback does");
+        assertTrue(provider.contains("snapshotAroundCamera(manager, x, y, z, QUERY_REACH_BLOCKS)"),
+                "ensureStructureForQuery's camera-only fallback uses the same named reach");
+    }
+
+    /**
+     * The diff gate's own defence against the one case a plain source diff cannot see: a frame where
+     * the light volume already happened to contain the whole query window, so the diffed sources match
+     * even though the reach the caller needs just changed. Exercised directly, not through source
+     * text, since it is a pure function with no GPU dependency.
+     */
+    @Test
+    void queryReachChangedForcesARebuildOnlyWhenLiveDisagreesWithTheNewDemand() {
+        assertFalse(MeshMetalProvider.queryReachChanged(false, false, true),
+                "no live structure yet: nothing to disagree with");
+        assertFalse(MeshMetalProvider.queryReachChanged(true, true, true));
+        assertFalse(MeshMetalProvider.queryReachChanged(true, false, false));
+        assertTrue(MeshMetalProvider.queryReachChanged(true, false, true),
+                "demand just turned on: live was built without the query window");
+        assertTrue(MeshMetalProvider.queryReachChanged(true, true, false),
+                "demand just turned off: live still carries the wider selection");
+    }
+
+    /** The diff gate must weigh the reach-toggle alongside the source and origin diffs, not instead. */
+    @Test
+    void theDiffGateWeighsTheReachToggleAlongsideTheExistingChecks() throws IOException {
+        String provider = read("metalfx/rt/MeshMetalProvider.java");
+        String build = method(provider, "private StructureBuild buildStructure(");
+        int needsBuild = build.indexOf("needsBuild = contentDirty");
+        assertTrue(needsBuild > 0, "the diff gate must still start from the content diff");
+        String gate = build.substring(needsBuild, build.indexOf(';', needsBuild));
+        assertTrue(gate.contains("!retained.equals(copies.keySet())"));
+        assertTrue(gate.contains("ox != liveOriginX || oy != liveOriginY || oz != liveOriginZ"));
+        assertTrue(gate.contains("queryReachChanged(liveBuilt != null, liveIncludesQueryReach, includeQueryReach)"),
+                "the reach toggle must widen the same gate, not replace or bypass it");
+    }
+
+    private static String method(String source, String signature) {
+        int start = source.indexOf(signature);
+        assertTrue(start >= 0, "missing production scope " + signature);
+        int open = source.indexOf('{', start);
+        int depth = 1;
+        for (int i = open + 1; i < source.length(); i++) {
+            if (source.charAt(i) == '{') depth++;
+            if (source.charAt(i) == '}' && --depth == 0) return source.substring(open + 1, i);
+        }
+        throw new AssertionError("unclosed production scope: " + signature);
     }
 }

@@ -197,9 +197,23 @@ public final class ProfilerOverlay implements HudElement {
         return stats.stream()
                 .filter(stat -> !FrameProfiler.LABEL_FRAME.equals(stat.label()))
                 .filter(stat -> FrameProfiler.LABEL_TERRAIN.equals(stat.label())
-                        || FrameProfiler.LABEL_GRAPH.equals(stat.label()) || active.contains(stat.label()))
+                        || FrameProfiler.LABEL_GRAPH.equals(stat.label())
+                        || active.contains(stat.label())
+                        || active.contains(stripMetalSuffix(stat.label())))
                 .toList();
     }
+
+    /** Strips RayQueryInterop's {@code " metal"} row suffix so its label resolves back to the
+     * declaring RAY_QUERY pass name for the {@link #passesOnly} active-name check: that row is a
+     * second GPU reading FOR a pass, not a pass of its own, so it is never itself in {@code
+     * GraphRunner#activePassNames()}. A label without the suffix is returned unchanged. */
+    static String stripMetalSuffix(String label) {
+        return label.endsWith(METAL_ROW_SUFFIX)
+                ? label.substring(0, label.length() - METAL_ROW_SUFFIX.length())
+                : label;
+    }
+
+    private static final String METAL_ROW_SUFFIX = " metal";
 
     private static int colorFor(double ms) {
         return switch (ProfilerLogDump.grade(ms)) {

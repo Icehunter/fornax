@@ -104,6 +104,9 @@ class RayQueryAbiTest {
         assertEquals(0, face & RayQueryAbi.FLAG_FRONT_FACING);
         assertEquals(0, face & RayQueryAbi.FLAG_UV_KNOWN);
         assertEquals(0, RayQueryAbi.FLAG_FRONT_FACING & RayQueryAbi.FLAG_UV_KNOWN);
+        assertEquals(1 << 13, RayQueryAbi.FLAG_ATLAS_TEXEL_U16);
+        assertEquals(0, (face | RayQueryAbi.FLAG_FRONT_FACING | RayQueryAbi.FLAG_UV_KNOWN)
+                & RayQueryAbi.FLAG_ATLAS_TEXEL_U16);
         assertEquals(RayQueryAbi.FLAG_FACE_MASK, RayQueryAbi.FACE_UNKNOWN,
                 "the unknown face is the widest value the field can hold, so it can never be "
                         + "confused with a real face index");

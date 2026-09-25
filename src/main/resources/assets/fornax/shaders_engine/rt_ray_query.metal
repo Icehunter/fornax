@@ -33,7 +33,8 @@ struct RayQueryConstants {
     // a camera-relative ray where the geometry is. packed_float3 for the same reason RayHit uses
     // one: a float3 member carries 16 bytes of size and would move the pad.
     packed_float3 originOffset;
-    uint pad;
+    // AtlasUvEncoding wire values: 0 packed half2, 1 exact x/y unsigned 16-bit texels.
+    uint atlasUvEncoding;
 };
 
 // Mirrors RayQueryAbi's word table: one float, three uints, the normal, then the tier. The normal
@@ -54,11 +55,20 @@ struct RayHit {
     uint tint;
 };
 
+// Nearest normalized coordinates select floor(uv * extent), clamped at the atlas edges. Both the
+// exact-mode alpha test and the returned address use this function, so they cannot name different
+// texels even at a cutout boundary. Half precision cannot represent these centres on large atlases.
+uint2 ray_query_atlas_texel(float2 uv, texture2d<float, access::sample> atlas) {
+    uint2 size = uint2(atlas.get_width(), atlas.get_height());
+    return uint2(clamp(floor(uv * float2(size)), float2(0.0), float2(size - 1u)));
+}
+
 // Flag bits, mirroring RayQueryAbi's FLAG_ constants.
 constant uint RAY_FLAG_FRONT_FACING = 1u;
 constant uint RAY_FLAG_FACE_SHIFT = 8u;
 constant uint RAY_FACE_UNKNOWN = 0xFu;
 constant uint RAY_FLAG_UV_KNOWN = 1u << 12;
+constant uint RAY_FLAG_ATLAS_TEXEL_U16 = 1u << 13;
 
 // Where a record keeps its UVs, read off the surface word. See rt_face_normal.metal for the rule
 // and for why a fixed offset guess samples a real texel and looks like a shading bug.
@@ -103,7 +113,9 @@ kernel void rt_ray_query(
     // A caller built for other offsets gets an unanswered record rather than a buffer read at the
     // wrong stride. Tier zero, not the miss above: the caller's own layout may put the tier
     // elsewhere, and an all-zero record reads as unanswered under every layout this kernel has had.
-    if (constants.abiVersion != 4u) {
+    if (constants.abiVersion != 4u || constants.atlasUvEncoding > 1u
+            || (constants.atlasUvEncoding == 1u
+                && (atlasIn.get_width() > 65536u || atlasIn.get_height() > 65536u))) {
         RayHit unanswered;
         unanswered.distance = 0.0f;
         unanswered.flags = 0u;
@@ -166,7 +178,11 @@ kernel void rt_ray_query(
         // The same 0.1 cutoff the raster shadow pipeline and rt_mesh_shadow both use. A ray that
         // disagrees with the rasteriser about which texels are holes lights foliage differently
         // from the way it shadows.
-        if (atlasIn.sample(nearestAtlas, uv).a >= 0.1f) {
+        if (constants.atlasUvEncoding == 1u) {
+            if (atlasIn.read(ray_query_atlas_texel(uv, atlasIn)).a >= 0.1f) {
+                query.commit_triangle_intersection();
+            }
+        } else if (atlasIn.sample(nearestAtlas, uv).a >= 0.1f) {
             query.commit_triangle_intersection();
         }
     }
@@ -217,9 +233,15 @@ kernel void rt_ray_query(
         float2 uv = float2(uvs[0], uvs[1]) * (1.0f - bary.x - bary.y)
                 + float2(uvs[2], uvs[3]) * bary.x
                 + float2(uvs[4], uvs[5]) * bary.y;
-        // Two halves in one word, low half u. Half precision resolves better than one part in
-        // 2048 over the unit square, finer than an atlas texel at any page size this engine builds.
-        hit.atlasUv = as_type<uint>(half2(uv));
+        if (constants.atlasUvEncoding == 1u) {
+            uint2 texel = ray_query_atlas_texel(uv, atlasIn);
+            hit.atlasUv = texel.x | (texel.y << 16u);
+            flags |= RAY_FLAG_ATLAS_TEXEL_U16;
+        } else {
+            // Packed half2, the default for packs that do not opt in. Above 2048 texels a
+            // binary16 UV can round across atlas texels; exact consumers use texel_u16.
+            hit.atlasUv = as_type<uint>(half2(uv));
+        }
         flags |= RAY_FLAG_UV_KNOWN;
     }
     hit.flags = flags;

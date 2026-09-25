@@ -192,9 +192,14 @@ class RayQueryMeshRoundTripTest {
 
     private static float[] dispatch(long device, long queue, MetalRtShaders.CompiledKernel rayQuery,
             long scene, long atlas, float[] requests, int rays) throws Exception {
+        return dispatch(device, queue, rayQuery, scene, atlas, requests, rays, 0);
+    }
+
+    private static float[] dispatch(long device, long queue, MetalRtShaders.CompiledKernel rayQuery,
+            long scene, long atlas, float[] requests, int rays, int encoding) throws Exception {
         long requestBuffer = MetalRtAcceleration.createBuffer(device, RayQueryAbi.requestByteSize(rays));
         long hitBuffer = MetalRtAcceleration.createBuffer(device, RayQueryAbi.hitByteSize(rays));
-        long constants = MetalRtAcceleration.createBuffer(device, 16L);
+        long constants = MetalRtAcceleration.createBuffer(device, 32L);
         try {
             MemorySegment requestData = MemorySegment
                     .ofAddress(Objc.msgSendId(requestBuffer, Objc.selector("contents")))
@@ -203,7 +208,9 @@ class RayQueryMeshRoundTripTest {
                 requestData.setAtIndex(ValueLayout.JAVA_FLOAT, i, requests[i]);
             }
             MemorySegment constantData = MemorySegment
-                    .ofAddress(Objc.msgSendId(constants, Objc.selector("contents"))).reinterpret(16L);
+                    .ofAddress(Objc.msgSendId(constants, Objc.selector("contents"))).reinterpret(32L);
+            constantData.fill((byte) 0);
+            constantData.set(ValueLayout.JAVA_INT, 28L, encoding);
             constantData.set(ValueLayout.JAVA_INT, 0L, RayQueryAbi.ABI_VERSION);
             constantData.set(ValueLayout.JAVA_INT, 4L, rays);
             constantData.set(ValueLayout.JAVA_INT, 8L, RayTier.HARDWARE_MESH.ordinal());
@@ -249,6 +256,108 @@ class RayQueryMeshRoundTripTest {
             Objc.msgSendVoid(hitBuffer, Objc.selector("release"));
             Objc.msgSendVoid(requestBuffer, Objc.selector("release"));
         }
+    }
+
+    /** The owner's 16384x8192 atlas loses up to four texels when UV is rounded to binary16.
+     * Trace a sparse cutout atlas, then require the returned address to name the alpha-tested texel.
+     * Native only: this cannot establish live descriptors, temporal foliage stability or FPS. */
+    @Test
+    void exactEncodingReturnsTheSameLargeAtlasTexelThatPassedCutoutAlpha() throws Exception {
+        assumeTrue(Objc.isLoaded(), "Metal bridge not linked on this platform");
+        long device = Objc.createSystemDefaultMetalDevice();
+        assumeTrue(device != 0L, "no system default Metal device");
+        long pool = Objc.autoreleasePoolPush();
+        Deque<Long> owned = new ArrayDeque<>();
+        MetalRtShaders.CompiledKernel rayQuery = null;
+        try (MeshShadowTracer tracer = new MeshShadowTracer()) {
+            long queue = keep(owned, Objc.msgSendId(device, Objc.selector("newCommandQueue")));
+            long atlas = keep(owned, cutoutAtlas(device, queue));
+            long output = keep(owned, texture(device, 8, 8));
+            long packed = keep(owned, MetalRtAcceleration.createBuffer(device, 96));
+            writeQuad(packed, 1);
+            List<MeshShadowTracer.Mesh> meshes = List.of(new MeshShadowTracer.Mesh(
+                    new MeshShadowTracer.Key(0, 0, 0, true), 1L, packed, 4, 0, 0, 0));
+            tracer.trace(queue, meshes, atlas, output, 8, IDENTITY, IDENTITY, 0, 0, 0, 32f, 0f, 0f, 0, 0, 0);
+            RESIDENT.set(meshResources(tracer));
+            rayQuery = MetalRtShaders.compileKernel(device, MetalRtShaders.RAY_QUERY_RESOURCE, MetalRtShaders.RAY_QUERY_FUNCTION);
+            // Odd x and y texels are opaque; all other texels are transparent. Cases straddle the
+            // binary16 boundary, include its wrong rounded texel, and the last atlas texel.
+            int[][] texels = {{8195,4097},{8192,4096},{8191,4097},{8192,4097},{16383,8191}};
+            float[] requests = new float[texels.length * RayQueryAbi.REQUEST_WORDS];
+            for (int i=0; i<texels.length; i++) {
+                float u=(texels[i][0]+0.5f)/16384f, v=(texels[i][1]+0.5f)/8192f;
+                int at=i*RayQueryAbi.REQUEST_WORDS;
+                requests[at]=(2*u-1)*H; requests[at+1]=H+STANDOFF; requests[at+2]=(2*v-1)*H;
+                requests[at+5]=-1; requests[at+7]=STANDOFF+1;
+            }
+            long scene = nativeField(tracer, "tlas");
+            float[] exact = dispatch(device, queue, rayQuery, scene, atlas, requests, texels.length, 1);
+            float[] legacy = dispatch(device, queue, rayQuery, scene, atlas, requests, texels.length, 0);
+            for (int i=0; i<texels.length; i++) {
+                int at=i*RayQueryAbi.HIT_WORDS;
+                boolean opaque=(texels[i][0]&1)==1 && (texels[i][1]&1)==1;
+                assertEquals(opaque, exact[at]>=0, "cutout coverage ray " + i);
+                assertEquals(opaque, legacy[at]>=0, "legacy cutout coverage ray " + i);
+                if (opaque) {
+                    // Bit 13 is the next free flag after UV_KNOWN; packed-half consumers keep it clear.
+                    int exactFlags=Float.floatToRawIntBits(exact[at+RayQueryAbi.HIT_FLAGS_WORD]);
+                    int legacyFlags=Float.floatToRawIntBits(legacy[at+RayQueryAbi.HIT_FLAGS_WORD]);
+                    assertNotEquals(0, exactFlags & RayQueryAbi.FLAG_ATLAS_TEXEL_U16, "exact-address format flag");
+                    assertEquals(0, legacyFlags & RayQueryAbi.FLAG_ATLAS_TEXEL_U16, "legacy format flag");
+                    int address=Float.floatToRawIntBits(exact[at+RayQueryAbi.HIT_ATLAS_UV_WORD]);
+                    assertEquals(texels[i][0],address&0xFFFF,"alpha-tested x ray " + i);
+                    assertEquals(texels[i][1],address>>>16,"alpha-tested y ray " + i);
+                    int halfUv=Float.floatToRawIntBits(legacy[at+RayQueryAbi.HIT_ATLAS_UV_WORD]);
+                    int oldX=(int)(Float.float16ToFloat((short)halfUv)*16384);
+                    if (i==0) assertNotEquals(texels[i][0],oldX,"legacy control must reproduce the precision defect");
+                }
+            }
+        } finally {
+            RESIDENT.remove();
+            if (rayQuery != null) rayQuery.release();
+            while (!owned.isEmpty()) Objc.msgSendVoid(owned.pop(), Objc.selector("release"));
+            Objc.autoreleasePoolPop(pool);
+        }
+    }
+
+    private static long cutoutAtlas(long device, long queue) {
+        long desc=Objc.msgSendId(Objc.getClass("MTLTextureDescriptor"),Objc.selector("new"));
+        long atlas;
+        try {
+            // Metal RGBA8Unorm=70. Full live atlas dimensions, 512 MiB rather than RGBA32F's 2 GiB.
+            Objc.msgSendVoidLong(desc,Objc.selector("setTextureType:"),2);
+            Objc.msgSendVoidLong(desc,Objc.selector("setPixelFormat:"),70);
+            Objc.msgSendVoidLong(desc,Objc.selector("setWidth:"),16384);
+            Objc.msgSendVoidLong(desc,Objc.selector("setHeight:"),8192);
+            Objc.msgSendVoidLong(desc,Objc.selector("setUsage:"),3);
+            Objc.msgSendVoidLong(desc,Objc.selector("setStorageMode:"),0);
+            atlas=Objc.msgSendId(device,Objc.selector("newTextureWithDescriptor:"),desc);
+        } finally { Objc.msgSendVoid(desc,Objc.selector("release")); }
+        long library=MetalRtShaders.compileSource(device,"uv_cutout_fixture", """
+                #include <metal_stdlib>
+                using namespace metal;
+                kernel void fill(texture2d<float,access::write> output [[texture(0)]], uint2 p [[thread_position_in_grid]]) {
+                    bool opaque=(p.x&1u)!=0u && (p.y&1u)!=0u;
+                    output.write(opaque?float4(0,1,0,1):float4(1,1,1,0),p);
+                }
+                """);
+        long function=Objc.msgSendId(library,Objc.selector("newFunctionWithName:"),Objc.nsString("fill"));
+        long pipeline=Objc.msgSendIdIdErr(device,Objc.selector("newComputePipelineStateWithFunction:error:"),function).id();
+        try {
+            long cb=Objc.msgSendId(queue,Objc.selector("commandBuffer"));
+            long encoder=Objc.msgSendId(cb,Objc.selector("computeCommandEncoder"));
+            Objc.msgSendVoid(encoder,Objc.selector("setComputePipelineState:"),pipeline);
+            Objc.msgSendVoidIdLong(encoder,Objc.selector("setTexture:atIndex:"),atlas,0);
+            Objc.dispatchThreadgroups(encoder,1024,512,1,16,16,1);
+            Objc.msgSendVoid(encoder,Objc.selector("endEncoding"));
+            Objc.msgSendVoid(cb,Objc.selector("commit"));
+            Objc.msgSendVoid(cb,Objc.selector("waitUntilCompleted"));
+        } finally {
+            Objc.msgSendVoid(pipeline,Objc.selector("release"));
+            Objc.msgSendVoid(function,Objc.selector("release"));
+            Objc.msgSendVoid(library,Objc.selector("release"));
+        }
+        return atlas;
     }
 
     /** Every native handle the tracer's TLAS refers to: each mesh's structure, vertices and data. */

@@ -4,9 +4,13 @@ import dev.icehunter.fornax.metalfx.rt.RayQueryAbi;
 import dev.icehunter.fornax.pack.graph.GraphValidator;
 import dev.icehunter.fornax.rt.RayQueryKind;
 import dev.icehunter.fornax.rt.RayTier;
+import dev.icehunter.fornax.rt.AtlasUvEncoding;
 import org.junit.jupiter.api.Test;
 
 import java.io.StringReader;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -77,6 +81,7 @@ class PackTomlLoaderRayQueryTest {
         assertNotNull(pass.rayQuery());
         assertEquals(RayQueryKind.CLOSEST_HIT, pass.rayQuery().kind());
         assertEquals(RAYS, pass.rayQuery().rayCount());
+        assertEquals(AtlasUvEncoding.PACKED_HALF, pass.rayQuery().atlasUvEncoding());
         assertEquals(RayTier.NONE, pass.rayQuery().minTier(),
                 "a pack that states no floor takes any tier that can answer");
         assertDoesNotThrow(() -> GraphValidator.validate(spec, Map.of(), 1920, 1080));
@@ -87,6 +92,24 @@ class PackTomlLoaderRayQueryTest {
         GraphSpec spec = load(graph(VALID_PASS.replace("rays = 1024",
                 "rays = 1024\nmin_tier = \"hardware_voxel\"")));
         assertEquals(RayTier.HARDWARE_VOXEL, spec.passes().get(1).rayQuery().minTier());
+    }
+
+    @Test
+    void exactAtlasTexelsAreAnExplicitOptInWithoutChangingTheHitBufferSize() {
+        GraphSpec spec = load(graph(VALID_PASS + "atlas_uv_encoding = \"texel_u16\"\n"));
+        assertDoesNotThrow(() -> GraphValidator.validate(spec, Map.of(), 1920, 1080));
+        assertEquals(AtlasUvEncoding.TEXEL_U16, spec.passes().get(1).rayQuery().atlasUvEncoding());
+        assertEquals(36L, RayQueryAbi.hitByteSize(1));
+    }
+
+    @Test
+    void anUnknownAtlasUvEncodingFailsAtLoadWithThePassAndAcceptedValues() throws IOException {
+        String broken = Files.readString(Path.of(
+                "src/test/resources/packs/bad_ray_query_atlas_encoding/graph.toml"));
+        FornaxPackError error = assertThrows(FornaxPackError.class,
+                () -> load(broken));
+        assertTrue(error.getMessage().contains("trace_bounce"), error.getMessage());
+        assertTrue(error.getMessage().contains("packed_half or texel_u16"), error.getMessage());
     }
 
     /** A shader key on this type names something that does not exist, so it is a typo, not a hint. */

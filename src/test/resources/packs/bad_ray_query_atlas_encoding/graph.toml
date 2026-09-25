@@ -1,0 +1,11 @@
+# A bad encoding must fail at load, naming this pass and the two supported values.
+[[pass]]
+name = "trace_bounce"
+type = "ray_query"
+inputs = ["rayRequests"]
+outputs = ["rayHits"]
+
+[pass.ray_query]
+kind = "closest_hit"
+rays = 1
+atlas_uv_encoding = "texel_typo"

@@ -590,6 +590,19 @@ public final class GraphRunner {
         names.addAll(mipchainRunners.keySet());
         names.addAll(computeRunners.keySet());
         names.addAll(particleRunners.keySet());
+        // RAY_QUERY passes have no runner map of their own; finish() answers them inline through
+        // RayRouter rather than a built runner. So without this, neither their own Vulkan-side
+        // bracket row nor a "<pass> metal" GPU row (see RayQueryInterop) ever clears
+        // ProfilerOverlay's active-name filter below. Compile-time gated only, matching how every
+        // runner map above is populated: a runtime_enabled_if pass sitting out this frame still
+        // shows its last-known reading, the same as any other row.
+        if (currentPack != null) {
+            for (PassSpec p : currentPack.graph().passes()) {
+                if (p.type() == PassType.RAY_QUERY && enabledAtCompile(p)) {
+                    names.add(p.name());
+                }
+            }
+        }
         return names;
     }
 
@@ -1454,7 +1467,7 @@ public final class GraphRunner {
                                 dev.icehunter.fornax.rt.RayRouter.answer(
                                         new dev.icehunter.fornax.rt.BufferQuery(raySpec.kind(),
                                                 requestBuffer.vkBuffer(), hitBuffer.vkBuffer(),
-                                                raySpec.rayCount()));
+                                                raySpec.rayCount(), p.name(), raySpec.atlasUvEncoding()));
                             } catch (RuntimeException e) {
                                 GpuFatalErrors.rethrowIfFatal(e);
                                 logPassRunFailureOnce(p.name(), e);
@@ -1660,6 +1673,8 @@ public final class GraphRunner {
         Map<String, ParticlePassRunner> particles = new LinkedHashMap<>();
         Map<String, TemporalPassRunner> temporal = new LinkedHashMap<>();
         Map<String, ConsolidateRunner> consolidate = new LinkedHashMap<>();
+        // Graph-level, not per-pass: every compute runner built below checks against the same set.
+        Set<String> rayQueryOutputTargets = rayQueryOutputs(currentPack.graph(), compileValues);
         try {
             for (PassSpec p : currentPack.graph().passes()) {
                 if (!enabledAtCompile(p)) {
@@ -1687,7 +1702,7 @@ public final class GraphRunner {
                                         extraPushConstantBytesFor(p),
                                         computeStorageWriteNeedsGraphicsCompletion(
                                                 p, currentPack.graph(), compileValues),
-                                        frameProfiler));
+                                        frameProfiler, rayQueryOutputTargets));
                             } catch (RuntimeException e) {
                                 GpuFatalErrors.rethrowIfFatal(e);
                                 logRunnerBuildFailureOnce(p.name(), e);
@@ -2238,6 +2253,30 @@ public final class GraphRunner {
             }
         }
         return stages;
+    }
+
+    /**
+     * The base names of every output a compile-enabled {@link PassType#RAY_QUERY} pass declares.
+     * A ray-query pass's hit buffer is graphics-written: {@code RayQueryInterop.answer} copies the
+     * Metal trace's answer back with a Vulkan submit on the graphics queue, the same as a shadow map
+     * or G-buffer attachment. Fed into {@link ComputePassRunner#build} so {@link
+     * GraphicsInputDependency#requiredBy} can route a compute reader of one of these buffers into
+     * the graphics stream instead of racing that copy from the compute queue.
+     *
+     * <p>Pure function of the graph + compile values, for the same reason {@link
+     * #computeGraphicsWaitStages} is.
+     */
+    static Set<String> rayQueryOutputs(GraphSpec graph, Map<String, Integer> compileValues) {
+        Set<String> outputs = new HashSet<>();
+        for (PassSpec p : graph.passes()) {
+            if (p.type() != PassType.RAY_QUERY || !isEnabledAtCompile(p, compileValues)) {
+                continue;
+            }
+            for (String output : p.outputs()) {
+                outputs.add(targetBaseName(output));
+            }
+        }
+        return outputs;
     }
 
     /**

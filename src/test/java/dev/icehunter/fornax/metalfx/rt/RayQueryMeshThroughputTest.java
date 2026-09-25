@@ -197,10 +197,11 @@ class RayQueryMeshThroughputTest {
             Objc.msgSendVoidIdLong(encoder, Objc.selector("useResource:usage:"), resource, 1L);
         }
         Objc.msgSendVoidIdLong(encoder, Objc.selector("setTexture:atIndex:"), atlas, 0L);
-        long constants = MetalRtAcceleration.createBuffer(Objc.msgSendId(queue, Objc.selector("device")), 16L);
+        long constants = MetalRtAcceleration.createBuffer(Objc.msgSendId(queue, Objc.selector("device")), 32L);
         try {
             MemorySegment seg = MemorySegment
-                    .ofAddress(Objc.msgSendId(constants, Objc.selector("contents"))).reinterpret(16L);
+                    .ofAddress(Objc.msgSendId(constants, Objc.selector("contents"))).reinterpret(32L);
+            seg.fill((byte) 0);
             seg.set(ValueLayout.JAVA_INT, 0L, RayQueryAbi.ABI_VERSION);
             seg.set(ValueLayout.JAVA_INT, 4L, RAYS);
             seg.set(ValueLayout.JAVA_INT, 8L, RayTier.HARDWARE_MESH.ordinal());

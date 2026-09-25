@@ -30,7 +30,7 @@ class ComputePassRunnerGraphicsInputTest {
     void producerBoundaryUsesDeclaredAliasesAndPartialFlushWithoutAHostWait() throws IOException {
         String source = Files.readString(Path.of(
                 "src/main/java/dev/icehunter/fornax/pack/graph/ComputePassRunner.java"));
-        assertTrue(source.contains("GraphicsInputDependency.requiredBy(spec.inputs())"));
+        assertTrue(source.contains("GraphicsInputDependency.requiredBy(spec.inputs(), graphicsWrittenTargets)"));
         int start = source.indexOf("private long publishGraphicsInputs()");
         String publish = source.substring(start, source.indexOf("private boolean captureReuseInputs", start));
         assertTrue(publish.indexOf("if (graphicsInputDependency == null) return 0;")
@@ -80,9 +80,10 @@ class ComputePassRunnerGraphicsInputTest {
                 "uncertain submission or completion must not destroy a live graphics signal");
     }
 
-    /** ComputePassRunner's graphicsStream field is computed as exactly this expression at
-     * construction; a pass with a G-buffer, shadow-map or traced-shadow-result input dispatches
-     * into the graphics stream instead of the compute queue (see ComputePassRunner.run). */
+    /** ComputePassRunner's graphicsStream field is computed from exactly this expression, unioned
+     * with the frame's ray-query outputs, at construction; a pass with a G-buffer, shadow-map,
+     * traced-shadow-result or ray-query-hit input dispatches into the graphics stream instead of
+     * the compute queue (see ComputePassRunner.run). */
     @Test
     void graphicsOwnedGBufferInputsSelectGraphicsStreamMode() {
         assertTrue(GraphicsInputDependency.requiredBy(

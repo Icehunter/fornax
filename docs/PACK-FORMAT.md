@@ -231,7 +231,7 @@ count = 65536
 
 [targets.rayHits]
 kind = "buffer"
-stride_bytes = 32
+stride_bytes = 36
 count = 65536
 
 [[pass]]
@@ -251,10 +251,11 @@ outputs = ["rayHits"]
 kind = "closest_hit"   # or "visibility"
 rays = 65536
 min_tier = "hardware_voxel"   # optional; default accepts any tier
+atlas_uv_encoding = "packed_half"   # optional; use "texel_u16" for exact level-zero atlas texels
 ```
 
 Exactly one input, the request buffer, and one output, the hit buffer. Both must be declared
-`kind = "buffer"` targets, and both must be at least `rays * 32` bytes; a buffer one record short is
+`kind = "buffer"` targets: requests need at least `rays * 32` bytes and hits `rays * 36` bytes; a buffer one record short is
 refused at load, because nothing would report it at run time. The request buffer must be written by
 an **earlier** pass in the same frame: an unwritten one holds whatever the allocation left there,
 which is finite floats often enough to trace, so the failure would be a frame of plausible wrong
@@ -274,12 +275,20 @@ geometry in the wrong place, with nothing to report it.
 | Word | Type | Meaning |
 |---|---|---|
 | 0 | float | distance along the ray. Negative means the ray met nothing |
-| 1 | uint | flags: bit 0 front-facing, bits 8-11 face (15 = none), bit 12 UV known |
+| 1 | uint | flags: bit 0 front-facing, bits 8-11 face (15 = none), bit 12 UV known, bit 13 exact texel address |
 | 2 | uint | surface word, the voxel tiers' `voxelIndex \| face << 12 \| palette << 16`; 0 for meshes |
-| 3 | uint | atlas UV as two halves, low half u, only when the UV-known flag is set |
+| 3 | uint | atlas address, only when bit 12 is set: half2 UV by default, or unsigned 16-bit x/y when bit 13 is set |
 | 4-6 | float | outward normal. The zero vector means the surface names no face; never normalise it |
 | 7 | uint | **the tier that answered. Zero means nothing did** |
 | 8 | uint | tint in the low three bytes, the block's own light level 0-15 in the top one |
+
+`atlas_uv_encoding` defaults to `"packed_half"`: use `unpackHalf2x16` for word 3. Opting into
+`"texel_u16"` returns x in the low 16 bits and y in the high 16 bits, and sets flag bit 13 on
+UV-known hits. Decode those integer coordinates and use `texelFetch(atlas, coord, 0)` to read the
+exact texel the cutout alpha test accepted. Both atlas extents must be 1..65536; an unsupported
+extent fails the query with an error rather than truncating. The record is 36 bytes in both modes.
+Misses and records without UVs do not set bit 13. Readers may branch on bit 13 to support both
+encodings; an engine without this key rejects the manifest, so update the engine before a pack opts in.
 
 **Read word 7 first.** A hit buffer nothing traced reads back all zeros, and zero is a legal
 distance, so the sign of word 0 cannot tell an answer from untouched memory. `<fornax:ray_answer.glsl>`

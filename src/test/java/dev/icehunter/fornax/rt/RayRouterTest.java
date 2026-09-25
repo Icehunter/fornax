@@ -80,7 +80,7 @@ class RayRouterTest {
         RayRouter.beginFrame();
         RayRouter.phaseOne(fill());
         RayRouter.phaseOne(fill());
-        RayRouter.answer(new BufferQuery(RayQueryKind.VISIBILITY, 1L, 2L, 4));
+        RayRouter.answer(new BufferQuery(RayQueryKind.VISIBILITY, 1L, 2L, 4, "test_pass"));
 
         assertEquals(0, image[0], "nothing installed writes nothing");
     }
@@ -252,7 +252,7 @@ class RayRouterTest {
         RayRouter.install(List.of(visibilityOnly, both));
         RayRouter.beginFrame();
 
-        RayRouter.answer(new BufferQuery(RayQueryKind.CLOSEST_HIT, 1L, 2L, 16));
+        RayRouter.answer(new BufferQuery(RayQueryKind.CLOSEST_HIT, 1L, 2L, 16, "test_pass"));
 
         assertEquals(List.of("answer:HARDWARE_VOXEL"), order);
         assertFalse(RayRouter.hasFailed(RayTier.HARDWARE_MESH), "sitting out is not failing");
@@ -264,7 +264,7 @@ class RayRouterTest {
         RayRouter.install(List.of(fake(RayTier.HARDWARE_MESH)));
         RayRouter.beginFrame();
 
-        RayRouter.answer(new BufferQuery(RayQueryKind.VISIBILITY, 0L, 0L, 0));
+        RayRouter.answer(new BufferQuery(RayQueryKind.VISIBILITY, 0L, 0L, 0, "test_pass"));
 
         assertEquals(List.of(), order);
     }

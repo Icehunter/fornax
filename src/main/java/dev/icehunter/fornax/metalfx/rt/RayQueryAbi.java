@@ -58,7 +58,11 @@ public final class RayQueryAbi {
     public static final int HIT_SURFACE_WORD = 2;
 
     /**
-     * Word offset of the hit's atlas UV, packed as two halves in one word, low half u. Zero unless
+     * Word offset of the hit's atlas location. By default, two halves in one word, low half u.
+     * An explicit texel_u16 query instead receives x in the low 16 bits and y in the high 16 bits;
+     * read that atlas texel directly at level zero, without normalized-coordinate filtering.
+     * Test {@link #FLAG_ATLAS_TEXEL_U16} to tell the two forms apart; the record stride and
+     * every other word are the same in both. Zero unless
      * the flag word has {@link #FLAG_UV_KNOWN} set: a record without it has no UV at all, which is
      * different from a UV of (0, 0).
      */
@@ -111,6 +115,9 @@ public final class RayQueryAbi {
 
     /** Flag bit 12: {@link #HIT_ATLAS_UV_WORD} carries a real UV. */
     public static final int FLAG_UV_KNOWN = 1 << 12;
+
+    /** Flag bit 13: a UV-known hit carries exact unsigned texels, rather than normalized half2. */
+    public static final int FLAG_ATLAS_TEXEL_U16 = 1 << 13;
 
     /** What word 0 reads as when the ray met nothing along its whole interval. */
     public static final float MISS_DISTANCE = -1.0f;

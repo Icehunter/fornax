@@ -9,9 +9,11 @@ import java.util.Set;
 import java.util.function.LongConsumer;
 import java.util.function.LongPredicate;
 
-/** Shadow maps and G-buffer attachments are inputs the graphics side writes. This pass's compute
- * work is sent straight to the GPU. Before that, it needs a writer edge for the current frame.
- * This state is independent of the previous-frame storage-reuse edge. */
+/** Shadow maps and G-buffer attachments are inputs the graphics side writes. A ray-query pass's
+ * hit buffer is graphics-written too: RayQueryInterop.answer copies the Metal hits back with a
+ * Vulkan submit on the graphics queue. This pass's compute work is sent straight to the GPU.
+ * Before that, it needs a writer edge for the current frame. This state is independent of the
+ * previous-frame storage-reuse edge. */
 final class GraphicsInputDependency {
     record Wait(long semaphore, long value) { }
 
@@ -25,8 +27,24 @@ final class GraphicsInputDependency {
     private boolean uncertainSubmission;
 
     static boolean requiredBy(List<String> inputs) {
+        return requiredBy(inputs, Set.of());
+    }
+
+    /** {@code graphicsWrittenTargets} is the base names of this frame's ray-query outputs (see
+     * {@code GraphRunner.rayQueryOutputs}): a compute reader of one of them needs the same
+     * graphics-stream routing a shadow-map or G-buffer reader already gets, since the hit buffer
+     * arrives via RayQueryInterop.answer's graphics-queue copy, not a compute write. */
+    static boolean requiredBy(List<String> inputs, Set<String> graphicsWrittenTargets) {
         return inputs.stream().anyMatch(ref -> ShadowMapManager.isShadowMapRef(ref)
-                || TerrainShadowResult.isRef(ref) || GBUFFER_REFS.contains(ref));
+                || TerrainShadowResult.isRef(ref) || GBUFFER_REFS.contains(ref)
+                || graphicsWrittenTargets.contains(targetBaseName(ref)));
+    }
+
+    /** Collapses a {@code .history} suffix, the same way {@code GraphRunner.targetBaseName} does:
+     * a {@code .history} reader of a graphics-written target needs the identical edge a plain
+     * reader of it would. */
+    private static String targetBaseName(String ref) {
+        return ref.endsWith(".history") ? ref.substring(0, ref.length() - ".history".length()) : ref;
     }
 
     /** Signal and dispatch the producer before publishing a value for the compute wait. A failed

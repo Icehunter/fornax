@@ -6,6 +6,8 @@ import dev.icehunter.fornax.metalfx.VulkanMetalInterop;
 import dev.icehunter.fornax.metalfx.objc.Objc;
 import dev.icehunter.fornax.pipeline.VulkanPartialFlush;
 import dev.icehunter.fornax.rt.BufferQuery;
+import dev.icehunter.fornax.rt.AtlasUvEncoding;
+import org.jspecify.annotations.Nullable;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK13;
 import org.lwjgl.vulkan.VkBufferCopy;
@@ -37,12 +39,28 @@ public final class RayQueryInterop implements AutoCloseable {
 
     private static final long THREADS_PER_GROUP = 64;
 
+    // MTLCommandBufferStatus (MTLCommandBuffer.h): the trace buffer is polled, never waited on, so
+    // only "did it finish" and "did it finish cleanly" matter here.
+    private static final long MTL_COMMAND_BUFFER_STATUS_COMPLETED = 4;
+    private static final long MTL_COMMAND_BUFFER_STATUS_ERROR = 5;
+
     private MetalRtGeometry.ExportedBuffer requests;
     private MetalRtGeometry.ExportedBuffer hits;
     private VulkanMetalInterop.SharedTimeline timeline;
     private MetalRtShaders.CompiledKernel kernel;
     private long nextValue = 1;
     private long lastValue;
+
+    // One trace command buffer at a time is tracked for GPU timing. Retained (see answer()) so it
+    // survives after this method's own autorelease pool pops. Metal keeps a committed buffer
+    // alive on its own until it completes, but that is a different, driver-internal reference and
+    // not one this class may read the buffer through once its own has gone. Polled rather than
+    // read via a completion handler: this bridge has no block-literal support, and polling a
+    // buffer several frames later is exactly the "read it late, never stall" shape PassTimer's own
+    // ring already uses.
+    private long pendingMetalCommandBuffer;
+    @Nullable
+    private String pendingMetalPassName;
 
     /**
      * Answers {@code query} at {@code tier} against {@code structure}.
@@ -58,6 +76,7 @@ public final class RayQueryInterop implements AutoCloseable {
      */
     boolean answer(BufferQuery query, int tier, long structure, List<Long> resident, long atlas,
             float cameraInStructureX, float cameraInStructureY, float cameraInStructureZ) {
+        drainPendingMetalTiming();
         VulkanDevice device = VulkanMetalInterop.vulkanDevice();
         if (device == null || structure == 0 || query.rayCount() <= 0) {
             return false;
@@ -65,6 +84,17 @@ public final class RayQueryInterop implements AutoCloseable {
         long queue = VulkanMetalInterop.metalCommandQueue();
         if (queue == 0) {
             return false;
+        }
+        // Atlas size becomes known at runtime. Reject an unrepresentable exact address before any
+        // copies/dispatch; truncating its high bits would silently shade a different texel.
+        if (query.atlasUvEncoding() == AtlasUvEncoding.TEXEL_U16) {
+            if (atlas == 0) {
+                throw new IllegalArgumentException("ray query '" + query.passName()
+                        + "' texel_u16 needs a bound atlas");
+            }
+            query.atlasUvEncoding().validateAtlasDimensions(
+                    Objc.msgSendLong(atlas, Objc.selector("width")),
+                    Objc.msgSendLong(atlas, Objc.selector("height")));
         }
         long requestBytes = RayQueryAbi.requestByteSize(query.rayCount());
         long hitBytes = RayQueryAbi.hitByteSize(query.rayCount());
@@ -118,7 +148,7 @@ public final class RayQueryInterop implements AutoCloseable {
                 constants.set(ValueLayout.JAVA_FLOAT, 16L, cameraInStructureX);
                 constants.set(ValueLayout.JAVA_FLOAT, 20L, cameraInStructureY);
                 constants.set(ValueLayout.JAVA_FLOAT, 24L, cameraInStructureZ);
-                constants.set(ValueLayout.JAVA_INT, 28L, 0);
+                constants.set(ValueLayout.JAVA_INT, 28L, query.atlasUvEncoding().wireValue());
                 Objc.msgSendVoid(computeEncoder, Objc.selector("setComputePipelineState:"), kernel.pipeline());
                 Objc.msgSendVoidIdLong(computeEncoder,
                         Objc.selector("setAccelerationStructure:atBufferIndex:"), structure, 1L);
@@ -143,6 +173,9 @@ public final class RayQueryInterop implements AutoCloseable {
             }
             Objc.msgSendVoidIdLong(cb, Objc.selector("encodeSignalEvent:value:"), timeline.mtlSharedEvent, value + 1);
             Objc.msgSendVoid(cb, Objc.selector("commit"));
+            // Metal GPU timing is off: retaining and polling this buffer crashes the render
+            // thread with an unrecognized selector at launch. Nothing is retained, so
+            // drainPendingMetalTiming() below always finds nothing to read.
         } finally {
             Objc.autoreleasePoolPop(pool);
         }
@@ -192,6 +225,35 @@ public final class RayQueryInterop implements AutoCloseable {
         ((VulkanPartialFlush) encoder).fornax$flushPending();
     }
 
+    /**
+     * Checks, without waiting, the trace command buffer a previous {@link #answer} committed.
+     * Publishes one GPU row, labelled {@code "<pass name> metal"}, once the buffer reports it
+     * finished. {@code gpuStartTime}/{@code gpuEndTime} are the real Metal trace span, not the
+     * surrounding buffer copies the Vulkan-side {@code PassTimer} bracket times. Still running is
+     * not an error: the next call checks again. An errored buffer (device lost, validation
+     * failure) has no real timing and is dropped rather than reported as zero.
+     */
+    private void drainPendingMetalTiming() {
+        if (pendingMetalCommandBuffer == 0) {
+            return;
+        }
+        long status = Objc.msgSendLong(pendingMetalCommandBuffer, Objc.selector("status"));
+        if (status != MTL_COMMAND_BUFFER_STATUS_COMPLETED && status != MTL_COMMAND_BUFFER_STATUS_ERROR) {
+            return; // still running; the retain keeps the handle valid to check again later
+        }
+        if (status == MTL_COMMAND_BUFFER_STATUS_COMPLETED) {
+            double startSeconds = Objc.msgSendDouble(pendingMetalCommandBuffer, Objc.selector("gpuStartTime"));
+            double endSeconds = Objc.msgSendDouble(pendingMetalCommandBuffer, Objc.selector("gpuEndTime"));
+            if (endSeconds > startSeconds) {
+                dev.icehunter.fornax.pack.graph.GraphRunner.frameProfiler()
+                        .record(pendingMetalPassName + " metal", (endSeconds - startSeconds) * 1000.0);
+            }
+        }
+        Objc.msgSendVoid(pendingMetalCommandBuffer, Objc.selector("release"));
+        pendingMetalCommandBuffer = 0;
+        pendingMetalPassName = null;
+    }
+
     private void ensureBuffers(VulkanDevice device, long requestBytes, long hitBytes) {
         if (requests != null && requests.sizeBytes() >= requestBytes
                 && hits != null && hits.sizeBytes() >= hitBytes) {
@@ -227,12 +289,24 @@ public final class RayQueryInterop implements AutoCloseable {
     public void close() {
         VulkanDevice device = VulkanMetalInterop.vulkanDevice();
         if (device != null) {
+            // Waits for the timeline value the last answer() signalled. The Metal trace buffer
+            // signals that value before the Vulkan copy-back that follows it, so when this
+            // returns the trace buffer is done and the ordinary read-and-release path below
+            // applies rather than a forced one.
             await(device);
+            drainPendingMetalTiming();
             MetalRtGeometry.destroyOne(device, requests);
             MetalRtGeometry.destroyOne(device, hits);
             if (timeline != null) {
                 VK13.vkDestroySemaphore(device.vkDevice(), timeline.vkSemaphore, null);
             }
+        }
+        if (pendingMetalCommandBuffer != 0) {
+            // No Vulkan device to synchronize through, or the buffer was somehow still running
+            // above: release the retain without reading rather than leak it.
+            Objc.msgSendVoid(pendingMetalCommandBuffer, Objc.selector("release"));
+            pendingMetalCommandBuffer = 0;
+            pendingMetalPassName = null;
         }
         if (kernel != null) {
             kernel.release();

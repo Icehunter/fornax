@@ -67,7 +67,7 @@ class RayRouterProfilerContractTest {
         assertTrue(rows.containsKey("RT tier3 CPU"));
         assertTrue(rows.containsKey("RT tier2 CPU"), "every tier traces in one phase");
 
-        RayRouter.answer(new BufferQuery(RayQueryKind.VISIBILITY, 1L, 2L, 8));
+        RayRouter.answer(new BufferQuery(RayQueryKind.VISIBILITY, 1L, 2L, 8, "test_pass"));
         assertTrue(rows.containsKey("RT tier3 query CPU"));
         assertTrue(rows.containsKey("RT tier2 query CPU"),
                 "buffer queries are timed separately: they trace a pack's own rays, not the "

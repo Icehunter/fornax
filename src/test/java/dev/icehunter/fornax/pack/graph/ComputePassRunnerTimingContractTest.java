@@ -79,6 +79,24 @@ class ComputePassRunnerTimingContractTest {
                 "host dependency waits must not enter the rolling GPU avg/p95 channel");
     }
 
+    /**
+     * A pass that runs in the graphics stream never reads {@code timestampQueries} or {@code
+     * computeTimer} (see {@code runInGraphicsStream}'s own "no fence, no timestamp query" doc), so
+     * allocating one is a raw {@code VkQueryPool}, one live MoltenVK counter-buffer allocation,
+     * that is never read for the runner's whole lifetime. A pack with enough compute passes enabled
+     * at once can run the device out of those, which surfaces as MoltenVK falling back a LATER
+     * pass's pool to CPU-emulated timestamps rather than a clean failure on the one that tipped it
+     * over.
+     */
+    @Test
+    void graphicsStreamPassesSkipTheDeadTimestampPool() throws IOException {
+        String source = source();
+        int assign = source.indexOf(
+                "this.timestampQueries = graphicsStream ? null : RawTimestampQueries.tryCreate(backend, spec.name());");
+        assertTrue(assign >= 0,
+                "a graphics-stream pass must not allocate a raw query pool it will never read");
+    }
+
     @Test
     void computeQueueFamilyTimestampSupportGatesQueryCommands() throws IOException {
         String source = source();

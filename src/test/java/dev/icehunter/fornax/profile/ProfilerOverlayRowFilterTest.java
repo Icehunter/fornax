@@ -47,4 +47,14 @@ class ProfilerOverlayRowFilterTest {
         List<FrameProfiler.Stat> few = passes(ProfilerOverlay.TOP_PASS_ROWS);
         assertEquals(few, ProfilerOverlay.visiblePasses(few, true, true));
     }
+
+    /** RayQueryInterop publishes a Metal-tier trace timing as {@code "<pass name> metal"}: a
+     * second GPU row for a RAY_QUERY pass, not a pass of its own. So the active-name check that
+     * gates {@code passesOnly} must resolve it back to the declaring pass's own name. */
+    @Test
+    void stripMetalSuffixResolvesTheRowBackToItsDeclaringPassName() {
+        assertEquals("gi_lamp_trace", ProfilerOverlay.stripMetalSuffix("gi_lamp_trace metal"));
+        assertEquals("gi_lamp_trace", ProfilerOverlay.stripMetalSuffix("gi_lamp_trace"));
+        assertEquals("", ProfilerOverlay.stripMetalSuffix(""));
+    }
 }
