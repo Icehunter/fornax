@@ -96,4 +96,66 @@ class AtlasTexelSamplerTest {
                     "inverted v-rect must collapse to its start edge, not read as an empty region");
         }
     }
+    @Test
+    void theReadIsBudgetedPerAxisSoAHighResolutionPackCostsWhatAThirtyTwoPixelFaceDoes() {
+        // Up to 32 texels an axis is read exactly; past that the stride grows so the count stays
+        // at or under 32: a 512x face is 16 strides = 32 samples, not 512.
+        assertEquals(1, AtlasTexelSampler.sampleStride(16));
+        assertEquals(1, AtlasTexelSampler.sampleStride(32));
+        assertEquals(2, AtlasTexelSampler.sampleStride(33));
+        assertEquals(4, AtlasTexelSampler.sampleStride(128));
+        assertEquals(16, AtlasTexelSampler.sampleStride(512));
+        assertEquals(1, AtlasTexelSampler.sampleStride(1));
+    }
+
+    @Test
+    void aStridedReadStillAveragesBothPhasesOfAPatternWhosePeriodDividesTheStride() {
+        // 256x256 checkerboard of black and white, period 2: a stride of 8 aligned to one phase
+        // would read all black or all white. The per-cell offsets land on both.
+        try (NativeImage image = new NativeImage(NativeImage.Format.RGBA, 256, 256, false)) {
+            for (int y = 0; y < 256; y++) {
+                for (int x = 0; x < 256; x++) {
+                    image.setPixel(x, y, ((x + y) & 1) == 0 ? 0xFF000000 : 0xFFFFFFFF);
+                }
+            }
+            int avg = AtlasTexelSampler.averageColor(image, 0f, 0f, 1f, 1f);
+            int r = (avg >> 16) & 0xFF;
+            assertTrue(r >= 100 && r <= 155, "expected roughly mid-gray from both phases, got " + r);
+            assertEquals(0xFF, (avg >>> 24), "fully opaque texels average to full alpha");
+        }
+    }
+
+    @Test
+    void aStridedCoverageReadStillSeesTheOpaqueHalf() {
+        // 512x512, left half opaque: 0.5 coverage from 32x32 samples.
+        try (NativeImage image = new NativeImage(NativeImage.Format.RGBA, 512, 512, false)) {
+            for (int y = 0; y < 512; y++) {
+                for (int x = 0; x < 512; x++) {
+                    image.setPixel(x, y, x < 256 ? 0xFF00FF00 : 0x0000FF00);
+                }
+            }
+            assertEquals(0.5f, AtlasTexelSampler.opaqueFraction(image, 0f, 0f, 1f, 1f, 0.5f), 0.04f);
+        }
+    }
+
+    @Test
+    void theAnswerIsCachedPerImageAndRectangleAndDistinguishesTheTwoReads() {
+        try (NativeImage image = new NativeImage(NativeImage.Format.RGBA, 4, 4, false)) {
+            for (int y = 0; y < 4; y++) {
+                for (int x = 0; x < 4; x++) {
+                    image.setPixel(x, y, x < 2 ? 0xFFFF0000 : 0x00FF0000);
+                }
+            }
+            int first = AtlasTexelSampler.averageColor(image, 0f, 0f, 1f, 1f);
+            // A cached average must not be handed back as a coverage, nor one coverage threshold
+            // as another: the keys carry the kind and the threshold.
+            assertEquals(0.5f, AtlasTexelSampler.opaqueFraction(image, 0f, 0f, 1f, 1f, 0.5f), 1e-4f);
+            assertEquals(1.0f, AtlasTexelSampler.opaqueFraction(image, 0f, 0f, 1f, 1f, 0.0f), 1e-4f);
+            assertEquals(first, AtlasTexelSampler.averageColor(image, 0f, 0f, 1f, 1f));
+            // Writing the image afterwards is not seen: a decoded sprite is immutable, and the
+            // cache is what keeps a section's harvest off the frame time.
+            image.setPixel(0, 0, 0xFF0000FF);
+            assertEquals(first, AtlasTexelSampler.averageColor(image, 0f, 0f, 1f, 1f));
+        }
+    }
 }

@@ -3033,6 +3033,15 @@ readback content and driver behavior. The capture frame's timing includes readba
   to reset `WaterSurfaceTracker` on exactly this discontinuity; both accumulators' resets are called
   from that same guard so a portal trip or rejoining a world doesn't read as 20 seconds of drying
   out or a slow mist fade from yesterday's value.
+- **A CPU walk over a sprite's texels costs the resource pack's resolution squared, and the voxel
+  harvest runs it on the render thread.** `VoxelWindow.recenterAndResync` harvests its nearest
+  sections synchronously at every window recenter, and `SectionHarvester.buildEntry` reads a face
+  colour and a cutout coverage off the sprite image for every face of every palette entry. Read
+  texel by texel, a 512x pack's face is 262,144 reads where a 16x face is 256, and a recenter
+  becomes a stall of hundreds of milliseconds at every chunk boundary, with nothing in the log.
+  `AtlasTexelSampler` reads at most `SAMPLES_PER_AXIS` texels an axis with per-cell
+  offsets that break alignment with the pattern, and caches each answer per image and rectangle in
+  a map that is weak on the image, so a re-stitched atlas releases the old entries.
 - **A mesh-triggered voxel harvest must never run inside Sodium's meshing task.** The harvest reads
   vanilla's own section storage and sorts the fixed baked block parts it collects; it never asks a
   live block-and-position path to fill in PARTIAL cells. The parts-based geometry rebuild (see
