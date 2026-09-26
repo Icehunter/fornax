@@ -59,12 +59,15 @@ public class DeferredSlotDepthContractTest {
         // Terrain routes through Sodium, not through a vanilla RenderPipeline. The rest either cannot
         // write depth or have no single pipeline that identifies them: the hand and held items share
         // ITEM_CUTOUT with dropped items on the ground, and nothing in the pipeline alone tells them
-        // apart -- that distinction rides on the submit node, which this table cannot see.
+        // apart -- that distinction rides on the submit node, which this table cannot see. Player
+        // mirror has no vanilla pipeline at all: it draws through a dedicated engine pass,
+        // PlayerMirrorCaster, which does not exist yet. This matches how shadow and shadow
+        // entities draw through the shadow pass instead of appearing in this map.
         for (GeometrySlot slot : new GeometrySlot[]{
                 GeometrySlot.TERRAIN, GeometrySlot.SPIDER_EYES, GeometrySlot.DAMAGED_BLOCK,
                 GeometrySlot.ARMOR_GLINT, GeometrySlot.SKY_BASIC, GeometrySlot.SKY_TEXTURED,
                 GeometrySlot.HAND, GeometrySlot.HAND_TRANSLUCENT, GeometrySlot.ENTITIES_GLOWING,
-                GeometrySlot.SHADOW, GeometrySlot.SHADOW_ENTITIES}) {
+                GeometrySlot.SHADOW, GeometrySlot.SHADOW_ENTITIES, GeometrySlot.PLAYER_MIRROR}) {
             assertTrue(!GeometryPipelineMap.isMapped(slot),
                     "slot '" + slot.token() + "' is mapped, but is documented as unmappable");
         }

@@ -7,7 +7,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
@@ -27,8 +29,15 @@ import org.junit.jupiter.api.Test;
 class GBufferFormatLockTest {
     private static final Pattern PIPELINE_FORMAT =
             Pattern.compile("GpuFormat\\.(\\w+),\\s*//\\s*g(\\w+):");
-    private static final Pattern MANAGER_FORMAT =
-            Pattern.compile("GpuFormat\\.(\\w+), width, height, 1, 1\\);");
+    // Matches a bare GpuFormat.X literal, or one of the three named colour-lane constants
+    // (NORMAL_FORMAT, ALBEDO_FORMAT, MATERIAL_FORMAT) at the same call site. PlayerMirrorTargets
+    // reuses these constants by reference. DEPTH_FORMAT is left out of this list because depth is
+    // not one of the five colour lanes this test compares.
+    // CONSTANT_DECL maps a named constant to the literal it stands for.
+    private static final Pattern MANAGER_FORMAT = Pattern.compile(
+            "(GpuFormat\\.\\w+|NORMAL_FORMAT|ALBEDO_FORMAT|MATERIAL_FORMAT), width, height, 1, 1\\);");
+    private static final Pattern CONSTANT_DECL =
+            Pattern.compile("GpuFormat (\\w+_FORMAT) = GpuFormat\\.(\\w+);");
 
     @Test
     void colourTargetsAgreeBetweenDeclarationSitesAndMaterialAlbedoAoStayRgba8Unorm() throws IOException {
@@ -44,10 +53,19 @@ class GBufferFormatLockTest {
             pipelineFormats.add(pipelineMatcher.group(1));
             pipelineSlots.add(pipelineMatcher.group(2));
         }
+
+        Map<String, String> namedFormatConstants = new HashMap<>();
+        Matcher constantMatcher = CONSTANT_DECL.matcher(manager);
+        while (constantMatcher.find()) {
+            namedFormatConstants.put(constantMatcher.group(1), constantMatcher.group(2));
+        }
         List<String> managerFormats = new ArrayList<>();
         Matcher managerMatcher = MANAGER_FORMAT.matcher(manager);
         while (managerMatcher.find()) {
-            managerFormats.add(managerMatcher.group(1));
+            String token = managerMatcher.group(1);
+            String literal = token.startsWith("GpuFormat.") ? token.substring("GpuFormat.".length())
+                    : namedFormatConstants.get(token);
+            managerFormats.add(literal);
         }
 
         assertEquals(List.of("Normal", "Albedo", "Material", "Ao", "Motion"), pipelineSlots,

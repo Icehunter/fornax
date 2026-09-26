@@ -194,6 +194,99 @@ class GraphRunnerTest {
         assertFalse(GraphRunner.computePackReferencesOpaqueDepth(g));
     }
 
+    // --- computePackClaimsMirrorSlot ----------------------------------------------------------------
+
+    @Test
+    void falseWhenNoGeometryPassClaimsPlayerMirror() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("terrain", PassType.GEOMETRY,
+                        dev.icehunter.fornax.pack.GeometrySlot.DEFAULT, "terrain", null,
+                        List.of("builtin.blockAtlas"), List.of(), null, null, List.of(), null, null, null)));
+        assertFalse(GraphRunner.computePackClaimsMirrorSlot(g, dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR));
+    }
+
+    @Test
+    void trueWhenAGeometryPassClaimsPlayerMirror() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("mirror", PassType.GEOMETRY,
+                        dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR, "player_mirror", null,
+                        List.of(), List.of(), null, null, List.of(), null, null, null)));
+        assertTrue(GraphRunner.computePackClaimsMirrorSlot(g, dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR));
+    }
+
+    @Test
+    void falseWhenANonGeometryPassNamesTheSlotToken() {
+        // A pass's slot value only matters for PassType.GEOMETRY; GraphValidator enforces this
+        // elsewhere. The check must look at the pass type, not only at whether the slot field is set.
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("resolve", PassType.FULLSCREEN,
+                        dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR, null, "shaders/post/resolve.fsh",
+                        List.of(), List.of("builtin.output"), null, null, List.of(), null, null, null)));
+        assertFalse(GraphRunner.computePackClaimsMirrorSlot(g, dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR));
+    }
+
+    @Test
+    void aClaimOnOneMirrorSlotDoesNotClaimAnother() {
+        // Claiming the floor must not count as claiming either wall, and the reverse must hold too:
+        // each mirror family gets a PlayerMirrorTargets instance only from its matching claim.
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("mirror_x", PassType.GEOMETRY,
+                        dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X, "player_mirror_x", null,
+                        List.of(), List.of(), null, null, List.of(), null, null, null)));
+        assertTrue(GraphRunner.computePackClaimsMirrorSlot(g, dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X));
+        assertFalse(GraphRunner.computePackClaimsMirrorSlot(g, dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR));
+        assertFalse(GraphRunner.computePackClaimsMirrorSlot(g, dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_Z));
+    }
+
+    // --- anyEnabledPassReadsPlayerMirrorBuiltins ---------------------------------------------------
+
+    @Test
+    void falseWhenNoPassReadsAMirrorBuiltin() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("resolve", PassType.FULLSCREEN, null, null, "shaders/post/resolve.fsh",
+                        List.of("builtin.depth"), List.of("builtin.output"), null, null, List.of(),
+                        null, null, null)));
+        assertFalse(GraphRunner.anyEnabledPassReadsPlayerMirrorBuiltins(g, Map.of(),
+                dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR));
+    }
+
+    @Test
+    void trueWhenAFullscreenPassReadsAMirrorBuiltin() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("player_mirror_resolve", PassType.FULLSCREEN, null, null,
+                        "shaders/post/player_mirror_resolve.fsh",
+                        List.of(dev.icehunter.fornax.pipeline.PlayerMirrorTargets.ALBEDO_NAME),
+                        List.of("builtin.output"), null, null, List.of(), null, null, null)));
+        assertTrue(GraphRunner.anyEnabledPassReadsPlayerMirrorBuiltins(g, Map.of(),
+                dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR));
+    }
+
+    @Test
+    void falseWhenTheOnlyReaderIsCompileDisabled() {
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("player_mirror_resolve", PassType.FULLSCREEN, null, null,
+                        "shaders/post/player_mirror_resolve.fsh",
+                        List.of(dev.icehunter.fornax.pipeline.PlayerMirrorTargets.DEPTH_NAME),
+                        List.of("builtin.output"), null, "SSR_QUALITY", List.of(), null, null, null)));
+        assertFalse(GraphRunner.anyEnabledPassReadsPlayerMirrorBuiltins(g, Map.of("SSR_QUALITY", 0),
+                dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR));
+        assertTrue(GraphRunner.anyEnabledPassReadsPlayerMirrorBuiltins(g, Map.of("SSR_QUALITY", 1),
+                dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR));
+    }
+
+    @Test
+    void readingTheFloorsBuiltinDoesNotCountForTheXWallSlot() {
+        // Per-slot isolation: a pass that reads the floor family's builtin.mirrorAlbedo must not
+        // arm the X-wall caster.
+        GraphSpec g = new GraphSpec(Map.of(), List.of(
+                new PassSpec("player_mirror_resolve", PassType.FULLSCREEN, null, null,
+                        "shaders/post/player_mirror_resolve.fsh",
+                        List.of(dev.icehunter.fornax.pipeline.PlayerMirrorTargets.ALBEDO_NAME),
+                        List.of("builtin.output"), null, null, List.of(), null, null, null)));
+        assertFalse(GraphRunner.anyEnabledPassReadsPlayerMirrorBuiltins(g, Map.of(),
+                dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X));
+    }
+
     // --- rayQueryOutputs -------------------------------------------------------------------------
 
     @Test

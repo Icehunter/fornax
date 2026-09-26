@@ -93,6 +93,7 @@ import org.lwjgl.vulkan.VK13;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -205,6 +206,18 @@ public final class GraphRunner {
     // builtin.depth_opaque as an input. GraphValidator only allows this input on a GEOMETRY pass,
     // so most packs never ask for it.
     private static boolean packReferencesOpaqueDepth;
+    // Set once per rebuild, same shape as packReferencesOpaqueDepth: whether the loaded pack claims
+    // each of the three player-mirror slots (GeometrySlot.PLAYER_MIRROR/PLAYER_MIRROR_X/
+    // PLAYER_MIRROR_Z) with a program. This is a pack-load-time fact, not a runtime option, so each
+    // slot's PlayerMirrorTargets instance is resized from prepare() below exactly like OpaqueDepth,
+    // never from a per-frame mixin call the way WaterSurfaceManager's runtime-gated targets are.
+    // Keyed by slot rather than three separate booleans so prepare()'s sizing loop can iterate
+    // PlayerMirrorTargets.slots() without naming each family.
+    private static final Map<GeometrySlot, Boolean> packClaimsMirrorSlot = new EnumMap<>(GeometrySlot.class);
+    // Set once per rebuild alongside packClaimsMirrorSlot, same keying: whether any compile-enabled
+    // pass reads that slot's builtin.mirror* names. This, not a hardcoded compile option, gates each
+    // slot's PlayerMirrorCaster.cast(). See wantsPlayerMirrorConsumed for why.
+    private static final Map<GeometrySlot, Boolean> anyPassReadsMirrorSlotBuiltins = new EnumMap<>(GeometrySlot.class);
     // Every input a compile-enabled COMPUTE pass declares, set once per rebuild for
     // prepareComputeAtlasTextures to read every frame. Which passes are compute and compile-enabled
     // is fixed until the next rebuild, so re-deriving this list every frame bought nothing.
@@ -844,6 +857,11 @@ public final class GraphRunner {
         packTextureRegistry = PackTextureRegistry.create(pack.root(), pack.graph().textures());
         packDeclaresDepthCopyback = computePackDeclaresDepthCopyback(graphWithSceneHistory);
         packReferencesOpaqueDepth = computePackReferencesOpaqueDepth(graphWithSceneHistory);
+        for (GeometrySlot mirrorSlot : dev.icehunter.fornax.pipeline.PlayerMirrorTargets.slots()) {
+            packClaimsMirrorSlot.put(mirrorSlot, computePackClaimsMirrorSlot(graphWithSceneHistory, mirrorSlot));
+            anyPassReadsMirrorSlotBuiltins.put(mirrorSlot,
+                    anyEnabledPassReadsPlayerMirrorBuiltins(graphWithSceneHistory, compileValues, mirrorSlot));
+        }
         computeAtlasTextureInputs = computeComputeAtlasTextureInputs(graphWithSceneHistory, compileValues);
 
         pendingOptionsLayout = PackOptionsLayout.build(List.copyOf(pack.options().values()));
@@ -1038,6 +1056,18 @@ public final class GraphRunner {
             opaqueDepth.ensureSize(width, height);
         } else if (opaqueDepth.getTexture() != null) {
             opaqueDepth.free();
+        }
+        // Each slot's PlayerMirrorTargets instance sizes off the same width/height basis as
+        // GBufferManager's G-buffer (halved internally), gated on that slot's pack-load-time claim
+        // exactly like opaqueDepth above. See that field's doc for why this differs from
+        // WaterSurfaceManager's runtime-gated, mixin-driven sizing.
+        for (GeometrySlot mirrorSlot : dev.icehunter.fornax.pipeline.PlayerMirrorTargets.slots()) {
+            var mirrorTargets = dev.icehunter.fornax.pipeline.PlayerMirrorTargets.forSlot(mirrorSlot);
+            if (packClaimsMirrorSlot.getOrDefault(mirrorSlot, false)) {
+                mirrorTargets.ensureSize(width, height);
+            } else if (mirrorTargets.getWidth() > 0) {
+                mirrorTargets.close();
+            }
         }
         if (packTextureRegistry != null) {
             packTextureRegistry.ensureLoaded();
@@ -1850,6 +1880,62 @@ public final class GraphRunner {
                 && p.inputs().contains(OpaqueDepth.NAME));
     }
 
+    /** Whether any geometry pass claims {@code slot} (one of {@link
+     * dev.icehunter.fornax.pack.GeometrySlot#PLAYER_MIRROR}/{@code PLAYER_MIRROR_X}/{@code
+     * PLAYER_MIRROR_Z}) with a program. Mirrors {@link #computePackReferencesOpaqueDepth}'s shape:
+     * a pure function of the graph, set once per rebuild rather than re-derived every frame. */
+    static boolean computePackClaimsMirrorSlot(GraphSpec graph, dev.icehunter.fornax.pack.GeometrySlot slot) {
+        return graph.passes().stream().anyMatch(p -> p.type() == PassType.GEOMETRY && p.slot() == slot);
+    }
+
+    /**
+     * Whether the currently loaded pack claims {@code slot} with a program. Reads back {@link
+     * #packClaimsMirrorSlot}'s private field, so {@code PlayerMirrorCaster} and {@code
+     * FeatureSolidFeaturesGraphMixin} can gate on it without reaching into this class's internals.
+     */
+    public static boolean packClaimsMirrorSlot(dev.icehunter.fornax.pack.GeometrySlot slot) {
+        return packClaimsMirrorSlot.getOrDefault(slot, false);
+    }
+
+    /**
+     * True if any compile-enabled pass in {@code graph} reads one of {@code slot}'s {@code
+     * PlayerMirrorTargets} {@code builtin.mirror*} names. Modelled on {@link
+     * #anyEnabledComputePassReadsPrecipCoarseClipmap}'s shape, but over every pass type rather than
+     * compute only: the one real consumer today, {@code player_mirror_resolve}, is a fullscreen
+     * pass, and any later consumer can be any pass type without this gate needing to know which.
+     *
+     * <p>{@link #wantsPlayerMirrorConsumed} reads this instead of a hardcoded compile option name
+     * such as {@code SSR_WATER_MODE}: the caster's only reason to draw is that something reads its
+     * output, and asking the graph directly cannot drift from whichever option actually gates that
+     * reader, the same argument {@code anyEnabledComputePassReadsPrecipCoarseClipmap} makes for
+     * itself. This is checked per slot, not with a single flag: a pack reading the floor's builtins
+     * must not arm the wall caster, and vice versa.
+     */
+    static boolean anyEnabledPassReadsPlayerMirrorBuiltins(GraphSpec graph, Map<String, Integer> compileValues,
+            dev.icehunter.fornax.pack.GeometrySlot slot) {
+        Set<String> names = Set.of(dev.icehunter.fornax.pipeline.PlayerMirrorTargets.builtinNamesFor(slot));
+        for (PassSpec p : graph.passes()) {
+            if (!isEnabledAtCompile(p, compileValues)) {
+                continue;
+            }
+            for (String in : p.inputs()) {
+                if (names.contains(in)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether some compile-enabled pass consumes {@code slot}'s {@code PlayerMirrorTargets} output
+     * this session. Reads back {@link #anyPassReadsMirrorSlotBuiltins}'s private field, so {@code
+     * FeatureSolidFeaturesGraphMixin} can gate that slot's {@code PlayerMirrorCaster.cast()} on it.
+     */
+    public static boolean wantsPlayerMirrorConsumed(dev.icehunter.fornax.pack.GeometrySlot slot) {
+        return anyPassReadsMirrorSlotBuiltins.getOrDefault(slot, false);
+    }
+
     /**
      * Whether a {@code RuntimeShaderPack.reload} completion belonging to {@code completedGeneration}
      * may mark {@link #sourcesReady} true, given the live rebuild counter now reads {@code
@@ -2489,6 +2575,15 @@ public final class GraphRunner {
      * direction it is cast from, reading both {@code u_SunDirection.xyz} and {@code .w}. It is
      * matched exactly: the name looks like the {@code clouds_march} family but shares no prefix
      * with it, so the family entry above does not cover it.
+     *
+     * <p>{@code player_mirror_resolve} reads both {@code u_SunDirection.xyz} (the active light for
+     * its shadow lookup and diffuse term) and {@code .w} (true sun elevation, fed to {@code
+     * plagueOverworldLighting}'s day/night curve), the same two fields {@code resolve} reads, on a
+     * different surface. Matched by prefix, not exactly, unlike {@code cloud_shadow_mask} above:
+     * sibling resolve passes for the X/Z wall families ({@code player_mirror_resolve_x}/{@code _z}
+     * or however a pack names them) read the same two fields for their own surface, and {@code
+     * startsWith} covers all of them without this list needing each family's exact resolve-pass
+     * name.
      */
     static boolean wantsSunAndDebugParams(String name) {
         return name.equals("resolve") || name.startsWith("resolve_hdr")
@@ -2500,7 +2595,7 @@ public final class GraphRunner {
                 || name.equals("water_volume_composite_submerged")
                 || name.equals("ssr_water_fill") || name.equals("direct_light_analytic")
                 || name.startsWith("clouds_march") || name.equals("cloud_shadow_mask")
-                || name.startsWith("glint_occlusion");
+                || name.startsWith("glint_occlusion") || name.startsWith("player_mirror_resolve");
     }
 
     /**
@@ -3182,6 +3277,14 @@ public final class GraphRunner {
         // WaterSurfaceManager was never allocated this session (SSR_WATER_MODE never exceeded 1).
         WaterSurfaceManager.close();
 
+        // The three mirror MRT families are torn down unconditionally here, like WaterSurfaceManager
+        // above, rather than left to the next prepare()'s else-branch: a pack switch that drops a
+        // player_mirror* claim must not leave a stale-sized mirror target's GPU texture or view
+        // outliving the registry and runners it is torn down alongside. closeAll() closes every
+        // slot's instance and is null-safe and idempotent, so this is harmless even when a slot was
+        // never claimed this session.
+        dev.icehunter.fornax.pipeline.PlayerMirrorTargets.closeAll();
+
         TerrainShadowResult.close();
 
         for (MipchainRunner m : mipchainRunners.values()) {
@@ -3244,6 +3347,8 @@ public final class GraphRunner {
         dev.icehunter.fornax.pipeline.DeferredGeometryPipelines.invalidate();
         packDeclaresDepthCopyback = false;
         packReferencesOpaqueDepth = false;
+        packClaimsMirrorSlot.clear();
+        anyPassReadsMirrorSlotBuiltins.clear();
         computeAtlasTextureInputs = List.of();
         graphicsDrainableTargets = List.of();
         // Drop every rolling per-label sample: a pass whose enabled_if just went permanently false

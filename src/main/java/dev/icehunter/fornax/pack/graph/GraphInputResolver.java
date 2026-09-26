@@ -14,6 +14,7 @@ import dev.icehunter.fornax.pipeline.GBuffer;
 import dev.icehunter.fornax.pipeline.GBufferManager;
 import dev.icehunter.fornax.pipeline.NoiseTexture;
 import dev.icehunter.fornax.pipeline.OpaqueDepth;
+import dev.icehunter.fornax.pipeline.PlayerMirrorTargets;
 import dev.icehunter.fornax.atlas.MaterialMapAtlas;
 import dev.icehunter.fornax.atlas.NormalMapAtlas;
 import net.minecraft.client.Minecraft;
@@ -50,6 +51,16 @@ import java.util.Map;
  * unlike {@code builtin.depth_opaque} they carry no {@code PassType} restriction.
  * as the shadow map. They are not {@code builtin.}-prefixed: like {@link ShadowMapManager#TARGET}
  * they are engine-owned but not G-buffer attachments.
+ *
+ * <p>{@code builtin.mirrorNormal}/{@code mirrorAlbedo}/{@code mirrorMaterial}/{@code mirrorDepth}
+ * ({@link dev.icehunter.fornax.pipeline.PlayerMirrorTargets}) resolve against that class's
+ * {@code forSlot(GeometrySlot.PLAYER_MIRROR)} instance the same nullable way as the G-buffer's
+ * attachments. Unlike those, which exist for every active pack, these are {@code builtin.}-prefixed
+ * because they are a G-buffer-shaped MRT, a second, half-resolution one that only exists while the
+ * pack claims {@code GeometrySlot.PLAYER_MIRROR}. {@code mirrorX*}/{@code mirrorZ*} are the same
+ * shape again, resolved against {@code forSlot(PLAYER_MIRROR_X)}/{@code forSlot(PLAYER_MIRROR_Z)}.
+ * {@code GraphValidator} refuses a pack that names one of these without claiming the matching slot,
+ * at load time, so a null here is always transient (not yet sized this frame), never permanent.
  *
  * <p>A {@code mipchainTargets} map is threaded through separately from {@link TargetRegistry}:
  * {@link MipchainRunner} owns its own multi-level texture independently of the registry (a pack
@@ -197,6 +208,35 @@ final class GraphInputResolver {
             case WaterSurfaceManager.NORMAL_NAME -> WaterSurfaceManager.getNormalView();
             case WaterSurfaceManager.DEPTH_NAME -> WaterSurfaceManager.getDepthView();
             case TerrainShadowResult.TARGET -> TerrainShadowResult.view();
+            // Null when the pack does not claim GeometrySlot.PLAYER_MIRROR, or when the slot is
+            // claimed but the graph has not prepared this frame yet. GraphValidator refuses a pack
+            // that names these without claiming the slot at load time, so a null here in practice
+            // means the target is not yet sized this frame, the same transient window every other
+            // nullable builtin above has, never a permanent one.
+            case PlayerMirrorTargets.NORMAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR).getNormalView();
+            case PlayerMirrorTargets.ALBEDO_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR).getAlbedoView();
+            case PlayerMirrorTargets.MATERIAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR).getMaterialView();
+            case PlayerMirrorTargets.DEPTH_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR).getDepthView();
+            case PlayerMirrorTargets.X_NORMAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X).getNormalView();
+            case PlayerMirrorTargets.X_ALBEDO_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X).getAlbedoView();
+            case PlayerMirrorTargets.X_MATERIAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X).getMaterialView();
+            case PlayerMirrorTargets.X_DEPTH_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X).getDepthView();
+            case PlayerMirrorTargets.Z_NORMAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_Z).getNormalView();
+            case PlayerMirrorTargets.Z_ALBEDO_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_Z).getAlbedoView();
+            case PlayerMirrorTargets.Z_MATERIAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_Z).getMaterialView();
+            case PlayerMirrorTargets.Z_DEPTH_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_Z).getDepthView();
             default -> null;
         };
     }
@@ -242,6 +282,30 @@ final class GraphInputResolver {
             case WaterSurfaceManager.NORMAL_NAME -> WaterSurfaceManager.getNormalTexture();
             case WaterSurfaceManager.DEPTH_NAME -> WaterSurfaceManager.getDepthTexture();
             case TerrainShadowResult.TARGET -> TerrainShadowResult.texture();
+            case PlayerMirrorTargets.NORMAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR).getNormalTexture();
+            case PlayerMirrorTargets.ALBEDO_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR).getAlbedoTexture();
+            case PlayerMirrorTargets.MATERIAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR).getMaterialTexture();
+            case PlayerMirrorTargets.DEPTH_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR).getDepthTexture();
+            case PlayerMirrorTargets.X_NORMAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X).getNormalTexture();
+            case PlayerMirrorTargets.X_ALBEDO_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X).getAlbedoTexture();
+            case PlayerMirrorTargets.X_MATERIAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X).getMaterialTexture();
+            case PlayerMirrorTargets.X_DEPTH_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_X).getDepthTexture();
+            case PlayerMirrorTargets.Z_NORMAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_Z).getNormalTexture();
+            case PlayerMirrorTargets.Z_ALBEDO_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_Z).getAlbedoTexture();
+            case PlayerMirrorTargets.Z_MATERIAL_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_Z).getMaterialTexture();
+            case PlayerMirrorTargets.Z_DEPTH_NAME ->
+                    PlayerMirrorTargets.forSlot(dev.icehunter.fornax.pack.GeometrySlot.PLAYER_MIRROR_Z).getDepthTexture();
             default -> null;
         };
     }

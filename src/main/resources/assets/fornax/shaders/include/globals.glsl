@@ -346,4 +346,52 @@ layout(std140) uniform u_Globals {
     // Heat and rain are sent even when the ID is 0. Nothing here is smoothed or styled.
     // Whole numbers up to 2^24 fit this float exactly, and the file check holds IDs there.
     vec4 u_CameraBiome;
+
+    // Player-mirror plane (bytes 848..864): the surface directly below the player, for a pack
+    // drawing the player's own reflection against a flat plane. Two candidate planes are scanned:
+    // water, and whatever solid top or water the player's feet actually rest on. The render plane
+    // (what the geometry pass draws against) is the standing plane whenever it validates, never a
+    // minimum: an offline model (tools/verify_player_mirror.py) found that rendering about the
+    // lower plane drags the mirrored image below the mirror pass's own guard-band frustum and
+    // loses most of it, while rendering about the standing plane, which is always the upper one,
+    // does not. A consumer that wants the other plane (open water under a dock or a bridge) shifts
+    // its own lookups instead of moving the render; see shaders/include/player_mirror_trace.glsl.
+    //   x = 1.0 when either plane was found within reach of the player's feet and the eye is dry,
+    //       0.0 otherwise (neither plane below, or the player is submerged, so there is no plane to
+    //       mirror against from outside it).
+    //   y = the render plane's world height in blocks. y equals w (the standing plane) when w
+    //       validated, else z (the water plane). When only the water plane validates (z valid,
+    //       w == -1e4), y matches the single-plane value this lane held before the standing plane
+    //       was added.
+    //   z = the water plane: the water block's own Y plus the fluid's rendered height (about 0.889
+    //       for a still source), or -1e4 when no water validated. Passes through solid blocks, so a
+    //       dock plank over water still finds the water here. A consumer that wants the water plane
+    //       specifically reads this and shifts lookups by 2*(z - y).
+    //   w = the standing plane: block Y plus that block's own visual shape max Y (a bottom slab
+    //       lands at +0.5, farmland at +15/16, a full block at the next block's top), or -1e4 when
+    //       no solid top or water validated within reach. A water block validates this lane too, at
+    //       the same height z reports, so wading reads z == w. Kept alongside y for symmetry with z
+    //       even though it is normally identical to y.
+    // -1e4 in z or w means that one plane specifically was not found; it is independent of x, which
+    // asks whether at least one of the two validated. 0.0 in x tells every consumer to keep its
+    // no-mirror behaviour, the same contract every other valid/enum lane in this block follows.
+    vec4 u_PlayerMirrorState;
+
+    // Wall-mirror planes (bytes 864..880; nothing reads this lane yet): the vertical wall beside
+    // the player, on the X axis and the Z axis, each tracked on its own. WallPlaneProbe scans
+    // outward in all four cardinal directions, at feet height and head height, for the first block
+    // whose visual shape (getShape, the same method u_PlayerMirrorState.w uses for the standing
+    // plane) is not empty. Per axis, whichever of the two opposing directions the camera actually
+    // faces wins; the nearer wall breaks a tie.
+    //   x = the X-axis wall's facing: -1 (its face points back at the player in -X, found scanning
+    //       toward +X) or +1 (face points +X, found scanning toward -X), 0 when no X-axis wall is
+    //       within reach.
+    //   y = that wall's plane position, relative to the camera: world X minus the camera's own X,
+    //       subtracted in double on the CPU before the cast to this float32 lane. A wall's
+    //       horizontal position can sit tens of millions of blocks from the origin, where float32
+    //       spacing alone is coarser than the mirror pass's own 0.05-block receiver guard, so an
+    //       absolute value here would fail on the far-from-origin worlds this pack is least likely
+    //       to be tested against. Zero-filled when x is 0.
+    //   z/w = the same pair for the Z axis.
+    vec4 u_PlayerMirrorWalls;
 };

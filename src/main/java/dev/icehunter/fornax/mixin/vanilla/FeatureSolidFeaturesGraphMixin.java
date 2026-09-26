@@ -1,5 +1,6 @@
 package dev.icehunter.fornax.mixin.vanilla;
 
+import dev.icehunter.fornax.pack.GeometrySlot;
 import dev.icehunter.fornax.pack.graph.GraphRunner;
 import dev.icehunter.fornax.pass.shadow.ShadowMapManager;
 import dev.icehunter.fornax.pipeline.DeferredGeometryPipelines;
@@ -44,7 +45,16 @@ public class FeatureSolidFeaturesGraphMixin {
         // The shadow phase below re-executes these same solid draws, which re-enters this method.
         // Without this guard the nested pass would start its own shadow replay and resolve the graph
         // midway through building the shadow map.
-        if (DeferredGeometryPipelines.isShadowPhase()) {
+        //
+        // The mirror phase needs the same guard for a different reason: PlayerMirrorCaster.cast()'s
+        // renderAllFeatures call reaches a second PreparedFrame.executeSolid internally (the caster's
+        // frame, not the level's main one), which re-enters this hook. isPlayerMirrorPhase() is true
+        // for the whole call to cast(), set before renderAllFeatures and cleared in a finally right
+        // after, so it stays raised for the window the reentrant call falls inside. Without this
+        // check, the reentrant call would see wantPlayerMirror() still true and call cast() a second
+        // time while the first call's PreparedFrame is still marked in use, throwing "PreparedFrame
+        // already in use" and disabling the mirror for the rest of the session.
+        if (DeferredGeometryPipelines.isShadowPhase() || DeferredGeometryPipelines.isPlayerMirrorPhase()) {
             return;
         }
 
@@ -90,8 +100,67 @@ public class FeatureSolidFeaturesGraphMixin {
             }
         }
 
+        // The player's reflection draws here, independent of shadows: unlike the block above, this
+        // runs whether or not wantShadowCasters was true. It must happen before the graph resolves,
+        // since player_mirror_resolve (and its _x/_z siblings) sample
+        // builtin.mirror{,X,Z}{Albedo,Normal,Material,Depth}, so each slot's caster must draw into its
+        // MRT first. One slot finishes fully, submit, draw, endFrame, phase lowered, before the next
+        // slot's wantPlayerMirror/cast runs at all: never interleaved, never nested, so
+        // PlayerMirrorCaster's per-instance RenderBuffers never serves two overlapping
+        // renderAllFeatures calls at once.
+        for (GeometrySlot mirrorSlot : dev.icehunter.fornax.pipeline.PlayerMirrorTargets.slots()) {
+            boolean wantMirror = wantPlayerMirror(mirrorSlot);
+            if (wantMirror) {
+                DeferredGeometryPipelines.setActiveMirrorSlot(mirrorSlot);
+                try {
+                    dev.icehunter.fornax.pass.mirror.PlayerMirrorCaster.forSlot(mirrorSlot).cast();
+                } finally {
+                    // Cleared in a finally for the same reason as the shadow phase flag: a throwing
+                    // draw must not strand it raised and misroute every later frame's entities.
+                    DeferredGeometryPipelines.setActiveMirrorSlot(null);
+                }
+            } else if (DeferredGeometryPipelines.shouldClearMirrorOnFallingEdge(
+                    wantMirror, fornax$mirrorDrewLastFrame.getOrDefault(mirrorSlot, false))) {
+                // See shouldClearMirrorOnFallingEdge's doc: the player left the water or wall, the
+                // pack unloaded, or the probe stopped finding a plane. Nothing else clears this
+                // slot's builtin.mirror* when that happens, so this clears the stale frame here.
+                // This is a full clear, colour and depth, not the per-frame depth-only trim: see
+                // PlayerMirrorTargets.clearFullOnFallingEdge's doc for why this call stays full.
+                dev.icehunter.fornax.pipeline.PlayerMirrorTargets.forSlot(mirrorSlot).clearFullOnFallingEdge();
+            }
+            fornax$mirrorDrewLastFrame.put(mirrorSlot, wantMirror);
+        }
+
         if (GraphRunner.deferGraphUntilAfterSolidFeatures()) {
             GraphRunner.finishDeferred();
         }
+    }
+
+    @org.spongepowered.asm.mixin.Unique
+    private static final java.util.Map<GeometrySlot, Boolean> fornax$mirrorDrewLastFrame =
+            new java.util.EnumMap<>(GeometrySlot.class);
+
+    /**
+     * Reads this frame's live state for {@code slot} and hands it to {@link DeferredGeometryPipelines
+     * #wantsPlayerMirrorPhase}, the pure predicate that decides. {@link
+     * GraphRunner#wantsPlayerMirrorConsumed(GeometrySlot)} is the consumer-driven half of the gate:
+     * whether some compile-enabled pass reads that slot's {@code builtin.mirror*} input, rather than
+     * a hardcoded option name or threshold; see that method's doc. The validity check differs by
+     * family: the floor slot asks {@code WaterPlaneProbe}'s valid flag, while each wall slot asks
+     * {@code WallPlaneProbe}'s per-axis facing lane (0 means no wall found on that axis, the same
+     * "0 means invalid" convention every enum lane in {@code u_Globals} uses).
+     */
+    private static boolean wantPlayerMirror(GeometrySlot slot) {
+        boolean probeValid = switch (slot) {
+            case PLAYER_MIRROR -> dev.icehunter.fornax.pipeline.WaterPlaneProbe.current().valid() != 0.0f;
+            case PLAYER_MIRROR_X -> dev.icehunter.fornax.pipeline.WallPlaneProbe.current().xFacing() != 0.0f;
+            case PLAYER_MIRROR_Z -> dev.icehunter.fornax.pipeline.WallPlaneProbe.current().zFacing() != 0.0f;
+            default -> false;
+        };
+        return DeferredGeometryPipelines.wantsPlayerMirrorPhase(
+                FornaxRenderState.isActive(),
+                GraphRunner.packClaimsMirrorSlot(slot),
+                GraphRunner.wantsPlayerMirrorConsumed(slot),
+                probeValid);
     }
 }

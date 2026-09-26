@@ -128,7 +128,41 @@ public enum GeometrySlot {
      */
     SHADOW("shadow"),
     /** Entity geometry in the shadow pass, so entities can cast shadows. */
-    SHADOW_ENTITIES("shadow_entities");
+    SHADOW_ENTITIES("shadow_entities"),
+
+    /**
+     * The player's reflection, for a pack drawing it into water and other mirrors.
+     *
+     * <p>Modelled on {@link #SHADOW_ENTITIES}'s shape, not on a normal deferred slot: a claiming
+     * pack's program renders through a dedicated engine pass ({@code PlayerMirrorCaster}) into a
+     * half-resolution MRT ({@code PlayerMirrorTargets}, exposed as {@code builtin.mirrorAlbedo}/
+     * {@code mirrorNormal}/{@code mirrorMaterial}/{@code mirrorDepth}), under the camera's
+     * projection, with the vertex stage reflecting y across the water plane below the player. It is
+     * never the standard five-attachment entities G-buffer, and never vanilla's forward target.
+     *
+     * <p>{@code PlayerMirrorCaster} routes to it: a claiming pack's program draws whenever the
+     * gating in {@code FeatureSolidFeaturesGraphMixin.wantPlayerMirror} is satisfied (slot claimed,
+     * water SSR enabled, the frame's water-plane probe valid). It is still no forward or
+     * standard-deferred shape, the same claim {@link #SHADOW_ENTITIES} makes about itself.
+     *
+     * <p>Casts no shadow: a reflection does not occlude light, the same reasoning {@link #END_PORTAL}
+     * documents.
+     */
+    PLAYER_MIRROR("player_mirror"),
+
+    /**
+     * The player's reflection against the vertical wall directly beside them, on the X axis. Same
+     * semantics as {@link #PLAYER_MIRROR} in every respect: a pack-claimed program, a dedicated
+     * engine pass, a half-resolution MRT ({@code PlayerMirrorTargets.forSlot(PLAYER_MIRROR_X)},
+     * exposed as {@code builtin.mirrorXAlbedo}/{@code mirrorXNormal}/{@code mirrorXMaterial}/
+     * {@code mirrorXDepth}). It differs only in which plane {@code WallPlaneProbe} publishes it
+     * against and which axis the vertex stage reflects across. See {@link #PLAYER_MIRROR}'s doc for
+     * the shape both slots share.
+     */
+    PLAYER_MIRROR_X("player_mirror_x"),
+
+    /** The Z-axis sibling of {@link #PLAYER_MIRROR_X}: same semantics, the other wall. */
+    PLAYER_MIRROR_Z("player_mirror_z");
 
     /** The default slot for a geometry pass that omits {@code slot}. */
     public static final GeometrySlot DEFAULT = TERRAIN;
@@ -182,7 +216,8 @@ public enum GeometrySlot {
         return switch (this) {
             case TERRAIN, ENTITIES, ENTITIES_TRANSLUCENT, BLOCK_ENTITIES, BLOCK_ENTITIES_TRANSLUCENT,
                  PARTICLES, PARTICLES_TRANSLUCENT, BEACON_BEAM, LIGHTNING, CLOUDS, LINES,
-                 SHADOW_ENTITIES, BANNER_PATTERNS, END_PORTAL -> true;
+                 SHADOW_ENTITIES, BANNER_PATTERNS, END_PORTAL, PLAYER_MIRROR, PLAYER_MIRROR_X,
+                 PLAYER_MIRROR_Z -> true;
             default -> false;
         };
     }

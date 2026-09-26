@@ -36,6 +36,17 @@ public final class GBufferManager {
      */
     public static final GpuFormat DEPTH_FORMAT = GpuFormat.D32_FLOAT;
 
+    /**
+     * The three colour formats below are named for the same reason as {@link #DEPTH_FORMAT}: so a
+     * consumer that must declare a matching attachment format cannot drift from what {@link
+     * #ensureSize} creates. {@code PlayerMirrorTargets} is such a consumer: its render targets are
+     * a half-resolution copy of the albedo/normal/material lanes below, and a format mismatch there
+     * gives an empty mirror image with no error anywhere, not a crash.
+     */
+    public static final GpuFormat NORMAL_FORMAT = GpuFormat.RGBA16_SNORM;
+    public static final GpuFormat ALBEDO_FORMAT = GpuFormat.RGBA8_UNORM;
+    public static final GpuFormat MATERIAL_FORMAT = GpuFormat.RGBA8_UNORM;
+
     @Nullable
     private static volatile GBuffer instance;
 
@@ -140,15 +151,15 @@ public final class GBufferManager {
         try {
             normalTexture = device.createTexture("Sodium GBuffer Normal",
                     GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
-                    GpuFormat.RGBA16_SNORM, width, height, 1, 1);
+                    NORMAL_FORMAT, width, height, 1, 1);
             normalView = device.createTextureView(normalTexture);
             albedoTexture = device.createTexture("Sodium GBuffer Albedo",
                     GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
-                    GpuFormat.RGBA8_UNORM, width, height, 1, 1);
+                    ALBEDO_FORMAT, width, height, 1, 1);
             albedoView = device.createTextureView(albedoTexture);
             materialTexture = device.createTexture("Sodium GBuffer Material",
                     GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC,
-                    GpuFormat.RGBA8_UNORM, width, height, 1, 1);
+                    MATERIAL_FORMAT, width, height, 1, 1);
             materialView = device.createTextureView(materialTexture);
             // RGBA8 since ecv2: R = baked AO (unchanged consumer contract -- resolve reads .r), GBA =
             // intrinsic (unlit) raw albedo, packed here because a 6th color attachment's writes were

@@ -1053,7 +1053,7 @@ no compiler between them.
 
 ## 6. Uniform contracts
 
-### `u_Globals` (std140, 848 bytes)
+### `u_Globals` (std140, 880 bytes)
 
 Written in two pieces sharing one physical buffer: Sodium's own uniform writer produces the first
 184 bytes unmodified, and `GlobalUniformsWriteMixin` appends the remaining fields to the same
@@ -1100,8 +1100,10 @@ buffer object. The backing ring buffer (`UniformBufferManagerMixin`) is widened 
 | `u_WorldClock` | vec4 | 800 | 16 |
 | `u_WorldBounds` | vec4 | 816 | 16 |
 | `u_CameraBiome` | vec4 | 832 | 16 |
+| `u_PlayerMirrorState` | vec4 | 848 | 16 |
+| `u_PlayerMirrorWalls` | vec4 | 864 | 16 |
 
-Total: 848 bytes exactly, the size `UniformBufferManagerMixin` widens the ring storage to. Both
+Total: 880 bytes exactly, the size `UniformBufferManagerMixin` widens the ring storage to. Both
 sides apply the same std140 alignment rules (std140 is a fixed, standard packing convention that
 lets GPU shader code and CPU-side buffer-writing code agree on where each field sits in memory) to
 the same declared type sequence in the same order, so in
@@ -1123,6 +1125,31 @@ and nothing here is smoothed or read as weather. With no world or no camera ever
 the probe keeps nothing from the world before. Rain and snow at the camera stay in
 `u_CameraSkyLight.y`. Adding this at the end leaves every earlier offset where it was, and a shader
 that names only the first part of the block still reads the same buffer.
+
+`u_PlayerMirrorState` is one vec4 after the camera biome, for drawing the player's own reflection.
+`x` is 1.0 when a water surface sits within reach of the player's feet and the eye is dry, 0.0
+otherwise (no water below, or the eye is underwater, so there is nothing to mirror against from
+outside it). `y` is that surface's world height in blocks: the water block's own Y plus the fluid's
+rendered height (about 0.889 for a still source). `zw` are reserved and zero-filled. `x` = 0.0 tells
+every consumer to keep its no-mirror behaviour, the same rule every valid/enum lane in this block
+follows. `WaterPlaneProbe` runs the scan as a pure function, tested with a plain height function
+instead of a level, bounded to the feet block plus 8 blocks below (a player who can see their own
+reflection floats at most a couple of blocks above it). It shares the eye-in-water flag
+`u_WaterState.x` already computes, read beside it in `GlobalUniformsWriteMixin`.
+
+`u_PlayerMirrorWalls` is one vec4 after `u_PlayerMirrorState`, for the vertical wall beside the
+player on the X axis and the Z axis, each tracked on its own. Nothing reads this lane yet. `x` is
+the X-axis wall's facing: -1, +1, or 0 when no wall is found within reach. `y` is that wall's plane
+position, relative to the camera: world X minus the camera's X, subtracted in double before the
+cast to the float32 this lane holds. A wall's position can sit tens of millions of blocks from the
+origin, where float32 spacing alone is coarser than the mirror pass's own 0.05-block receiver
+guard, so the camera-relative value is kept instead of an absolute one. `z`/`w` hold the same pair
+for the Z axis. `WallPlaneProbe` runs the scan: from the feet block and the block above it, four
+scans outward (+X, -X, +Z, -Z), each up to 8 blocks, for the first block whose visual shape
+(`getShape`, the same method the standing-plane scan in `WaterPlaneProbe` uses) is not empty. Per
+axis, whichever of the two opposing directions the camera faces wins, its face normal checked
+against the camera's own forward vector; the nearer wall breaks a tie. It shares the eye-in-water
+flag `u_PlayerMirrorState` uses.
 
 That check also covers the vec3 trap: `Std140Builder.putVec3` pads a vec3 to a full 16 bytes, while
 GLSL lets a following member with smaller alignment sit at offset+12. Never place a scalar directly

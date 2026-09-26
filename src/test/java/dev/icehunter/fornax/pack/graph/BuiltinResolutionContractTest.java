@@ -106,6 +106,18 @@ class BuiltinResolutionContractTest {
             case "builtin.depth_opaque" -> "OpaqueDepth.NAME";
             case "builtin.waterNormal" -> "WaterSurfaceManager.NORMAL_NAME";
             case "builtin.waterDepth" -> "WaterSurfaceManager.DEPTH_NAME";
+            case "builtin.mirrorNormal" -> "PlayerMirrorTargets.NORMAL_NAME";
+            case "builtin.mirrorAlbedo" -> "PlayerMirrorTargets.ALBEDO_NAME";
+            case "builtin.mirrorMaterial" -> "PlayerMirrorTargets.MATERIAL_NAME";
+            case "builtin.mirrorDepth" -> "PlayerMirrorTargets.DEPTH_NAME";
+            case "builtin.mirrorXNormal" -> "PlayerMirrorTargets.X_NORMAL_NAME";
+            case "builtin.mirrorXAlbedo" -> "PlayerMirrorTargets.X_ALBEDO_NAME";
+            case "builtin.mirrorXMaterial" -> "PlayerMirrorTargets.X_MATERIAL_NAME";
+            case "builtin.mirrorXDepth" -> "PlayerMirrorTargets.X_DEPTH_NAME";
+            case "builtin.mirrorZNormal" -> "PlayerMirrorTargets.Z_NORMAL_NAME";
+            case "builtin.mirrorZAlbedo" -> "PlayerMirrorTargets.Z_ALBEDO_NAME";
+            case "builtin.mirrorZMaterial" -> "PlayerMirrorTargets.Z_MATERIAL_NAME";
+            case "builtin.mirrorZDepth" -> "PlayerMirrorTargets.Z_DEPTH_NAME";
             // A name with no constant spelling must appear as a literal; this sentinel never matches.
             default -> " no-constant-spelling";
         };

@@ -14,8 +14,12 @@ import net.minecraft.client.renderer.ShaderDefines;
 import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
 
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Builds and caches deferred variants of vanilla {@link RenderPipeline}s: faithful clones that write
@@ -63,6 +67,18 @@ public final class DeferredGeometryPipelines {
     private static final Map<RenderPipeline, RenderPipeline> CACHE = new IdentityHashMap<>();
     private static final Map<RenderPipeline, RenderPipeline> SHADOW_CACHE = new IdentityHashMap<>();
     private static final Map<RenderPipeline, RenderPipeline> SHADOW_WORLD_SPACE_CACHE = new IdentityHashMap<>();
+    // Failures are cached too, unlike CACHE/FORWARD_CACHE above. A shadow or mirror pipeline that
+    // fails GPU compilation would otherwise call precompilePipeline again and log an unlimited
+    // error on every single draw, forever, until the next pack load. deferredVariantOf and
+    // forwardVariantOf skip this (see their comments), because their common failure is a draw
+    // landing before the pack's shader sources finish publishing. Caching that as a failure would
+    // pin an entity as unshaded for the rest of the session, a worse outcome than the cost avoided
+    // here. Shadow and mirror variants take the matching risk instead: a caster that hits this same
+    // publishing window stays without a cast until the next reload, since losing one shadow or
+    // reflection for a session is a smaller loss than losing the entity. Cleared alongside the
+    // positive caches in invalidate(), so a pack load always gets a fresh attempt.
+    private static final Set<RenderPipeline> SHADOW_FAILED = Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final Set<RenderPipeline> SHADOW_WORLD_SPACE_FAILED = Collections.newSetFromMap(new IdentityHashMap<>());
 
     /**
      * True while solid features are being re-executed into the shadow map rather than the G-buffer.
@@ -122,6 +138,42 @@ public final class DeferredGeometryPipelines {
         if (value && !shadowPhaseReported) {
             shadowPhaseReported = true;
             FornaxMod.LOGGER.info("[Fornax][diag] entity shadow-casting phase entered for the first time");
+        }
+    }
+
+    @Nullable
+    private static GeometrySlot activeMirrorSlot;
+    private static boolean playerMirrorPhaseReported;
+
+    /** Whether the current draw is part of any {@code PlayerMirrorCaster} instance's submission:
+     * the player, resubmitted under the camera's projection into one of the three {@code
+     * PlayerMirrorTargets} MRTs instead of the entities G-buffer. Same as {@code
+     * activeMirrorSlot() != null}, kept as a separate method because the reentry guard in
+     * {@code FeatureSolidFeaturesGraphMixin} only needs a yes or no answer, never which slot. */
+    public static boolean isPlayerMirrorPhase() {
+        return activeMirrorSlot != null;
+    }
+
+    /** Which slot's {@code PlayerMirrorCaster} instance is submitting right now, or {@code null}
+     * when none is (the usual case, every frame outside the short window each instance's {@code
+     * cast()} raises this for). {@code PreparedRenderTypeDeferredMixin}'s three hooks read this to
+     * pick the matching MRT and pipeline variant: one active slot at a time, never more, since
+     * {@code PlayerMirrorCaster} instances are never nested. Each raises this, draws, and lowers it
+     * inside its {@code cast()}; one slot finishes before {@code
+     * FeatureSolidFeaturesGraphMixin}'s per-slot loop calls the next slot's {@code cast()}. */
+    @Nullable
+    public static GeometrySlot activeMirrorSlot() {
+        return activeMirrorSlot;
+    }
+
+    /** Raises or lowers the active-mirror-slot marker. Render thread only. {@code null} lowers it
+     * no matter which slot raised it last. */
+    public static void setActiveMirrorSlot(@Nullable GeometrySlot slot) {
+        activeMirrorSlot = slot;
+        if (slot != null && !playerMirrorPhaseReported) {
+            playerMirrorPhaseReported = true;
+            FornaxMod.LOGGER.info("[Fornax][diag] player-mirror phase entered for the first time ({})",
+                    slot.token());
         }
     }
 
@@ -228,6 +280,49 @@ public final class DeferredGeometryPipelines {
     }
 
     /**
+     * Whether {@code FeatureSolidFeaturesGraphMixin} should run {@code PlayerMirrorCaster.cast()}
+     * this frame. Pure, argument-based, and checked exhaustively rather than only observed in a
+     * frame, the same way as {@link #wantsDeferredParticleGroup} and {@link
+     * #wantsForwardParticleGroup}.
+     *
+     * <p>{@code probeValid} already carries "eye dry" and "near the plane": {@link WaterPlaneProbe
+     * #shouldProbe} refuses a submerged eye, and its scan only searches {@code SCAN_BOUND_BLOCKS}
+     * below the feet, so a valid read cannot be far from the plane. Neither check is repeated here.
+     * {@link WaterPlaneProbe#scan}'s doc covers the one known cost this brings: a valid probe
+     * over a solid-floored cave lake still runs this whole phase for a reflection nobody can see.
+     *
+     * <p>{@code consumed} stands in for an earlier hardcoded {@code SSR_WATER_MODE > 1} check.
+     * Whether the mirror is worth drawing is a fact about whether {@code
+     * GraphRunner.wantsPlayerMirrorConsumed()} says some compile-enabled pass reads a {@code
+     * builtin.mirror*} input, not about one option's name or threshold. {@code SSR_WATER_MODE}
+     * could change shape, or a second consumer could be added, without this predicate changing.
+     *
+     * <p>Independent of the shadow phase entirely. Unlike the particle predicates above, this one
+     * takes no {@code shadowPhase} argument, because the mirror caster runs whether or not shadow
+     * casting is active this frame: they answer unrelated questions, does the player cast a shadow,
+     * does the player cast a reflection.
+     */
+    public static boolean wantsPlayerMirrorPhase(boolean packActive, boolean slotClaimed,
+                                                 boolean consumed, boolean probeValid) {
+        return packActive && slotClaimed && consumed && probeValid;
+    }
+
+    /**
+     * Whether {@code FeatureSolidFeaturesGraphMixin} should clear {@link PlayerMirrorTargets} this
+     * frame despite not drawing into it: the falling edge of {@link #wantsPlayerMirrorPhase}, true
+     * for one frame per transition. {@code builtin.mirror*} stays bound in the graph no
+     * matter whether the gate is on, so nothing unregisters them when the caster stops drawing.
+     * Without this, a reader keeps sampling last frame's textures forever and the player's
+     * reflection freezes in place, pasted over water that is still moving (step back from a ledge
+     * above a lake: the gate goes false, and a still body would otherwise hang there). Firing only
+     * on the transition, not every frame the gate is off, means a session that never claims the
+     * slot pays this cost zero times.
+     */
+    public static boolean shouldClearMirrorOnFallingEdge(boolean wantsPhaseNow, boolean drewLastFrame) {
+        return !wantsPhaseNow && drewLastFrame;
+    }
+
+    /**
      * The deferred variant of {@code base} for {@code slot}, built on first use and cached by base
      * pipeline identity thereafter. Returns {@code null} when the pack does not supply a fragment
      * program for the slot -- there is nothing to defer to, so the caller keeps vanilla's pipeline.
@@ -294,6 +389,10 @@ public final class DeferredGeometryPipelines {
         FORWARD_CACHE.clear();
         SHADOW_CACHE.clear();
         SHADOW_WORLD_SPACE_CACHE.clear();
+        SHADOW_FAILED.clear();
+        SHADOW_WORLD_SPACE_FAILED.clear();
+        MIRROR_CACHE.clear();
+        MIRROR_FAILED.clear();
         NO_GBUFFER_REPORTED.clear();
         SEEN.clear();
         DEFERRED_PASS_REPORTED.clear();
@@ -303,7 +402,206 @@ public final class DeferredGeometryPipelines {
         SHADOW_SKIPPED_REPORTED.clear();
         FORWARD_REPORTED.clear();
         FORWARD_DECLINED_REPORTED.clear();
+        MIRROR_MISS_REPORTED.clear();
+        MIRROR_GLOBALS_MISSING_REPORTED.clear();
         SlotReachabilityCensus.reset();
+        // A failure logged under the old pack must not silence a fresh attempt under whatever loads
+        // next; see that method's doc. Resets every slot's instance, not only the floor's.
+        dev.icehunter.fornax.pass.mirror.PlayerMirrorCaster.resetAllForNewPack();
+    }
+
+    /** Cache key for the mirror variant families: base pipeline identity (never overridden by any
+     * Blaze3D type, see this field's use below) plus the slot, so the same base pipeline resolves
+     * to three independent cached variants, one per slot. Keying by base alone would hand the
+     * floor's variant to the wall pass reading the identical base pipeline, drawing the player's
+     * reflection with the floor's program instead of the wall's: wrong geometry, no error anywhere.
+     * {@code RenderPipeline} has no {@code equals()}/{@code hashCode()} override (checked against
+     * the game jar's compiled class), so a plain {@code HashMap} keyed on this record already gets
+     * identity comparison on {@code base} for free. An {@code IdentityHashMap} is not needed here
+     * the way {@link #CACHE}/{@link #SHADOW_CACHE} above use one, since the record's generated
+     * {@code equals} calls {@code base.equals(...)}, which is identity, plus {@code GeometrySlot}'s
+     * equals, which is always identity-safe for an enum. */
+    record MirrorCacheKey(RenderPipeline base, GeometrySlot slot) {}
+
+    private static final Map<MirrorCacheKey, RenderPipeline> MIRROR_CACHE = new HashMap<>();
+    // See SHADOW_FAILED's comment for why this differs from CACHE/FORWARD_CACHE.
+    private static final Set<MirrorCacheKey> MIRROR_FAILED = new HashSet<>();
+    private static final Map<MirrorCacheKey, Boolean> MIRROR_MISS_REPORTED = new HashMap<>();
+
+    /**
+     * The player-mirror variant of {@code base} for {@code slot}: a claiming pack's {@code
+     * slot}-named program, targeting that slot's {@link PlayerMirrorTargets} instance's three
+     * colour attachments plus its depth target instead of the entities G-buffer. {@code null} when
+     * the pack ships no program for the slot, in which case the draw is skipped during that slot's
+     * mirror phase and it casts no reflection: the same "nothing to contribute" contract {@link
+     * #shadowVariantOf(RenderPipeline)} documents for the shadow-casting replay.
+     *
+     * <p>One variant family per (base pipeline, slot) pair, like the shadow family per base
+     * pipeline. {@code PlayerMirrorCaster} submits the player under the same camera the replayed
+     * shadow draws use (its javadoc gives the same reasoning: {@code cameraRenderState.pos} is
+     * the player, not the eye), so this variant's vertex stage rebuilds a world position the same
+     * way {@code shadow_entities.vsh} does, then reflects it across the plane {@code slot} names:
+     * the water plane below the player for {@code PLAYER_MIRROR}, the wall beside them on the
+     * matching axis for {@code PLAYER_MIRROR_X}/{@code PLAYER_MIRROR_Z}. A pass-through variant
+     * would draw the player at their own position instead of their reflection.
+     */
+    @Nullable
+    public static synchronized RenderPipeline mirrorVariantOf(RenderPipeline base, GeometrySlot slot) {
+        MirrorCacheKey key = new MirrorCacheKey(base, slot);
+        RenderPipeline cached = MIRROR_CACHE.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        if (MIRROR_FAILED.contains(key)) {
+            return null;
+        }
+        RenderPipeline variant = buildMirror(base, slot);
+        if (variant != null) {
+            MIRROR_CACHE.put(key, variant);
+        } else {
+            MIRROR_FAILED.add(key);
+        }
+        return variant;
+    }
+
+    private static final Map<RenderPipeline, Boolean> MIRROR_GLOBALS_MISSING_REPORTED = new IdentityHashMap<>();
+
+    /**
+     * Marks {@code slot} reached, and substituted when {@code substituted} is true. Called from the
+     * mirror phase's {@code setPipeline} branch in {@code PreparedRenderTypeDeferredMixin} for
+     * whichever slot is active right now.
+     *
+     * <p>None of the three mirror slots are in {@link GeometryPipelineMap} (each is a dedicated-pass
+     * slot, see {@link GeometrySlot#PLAYER_MIRROR}'s doc), so {@link #notePipelineSeen}, the call
+     * every other slot relies on for its reachability census entry, never sees any of them: that
+     * method only looks the pipeline up in {@code GeometryPipelineMap}/{@code ForwardPipelineMap},
+     * and a lookup against either always misses for a mirror draw. Without this call, {@link
+     * SlotReachabilityCensus} would report a claimed mirror slot as claimed but never reached, even
+     * while its {@code PlayerMirrorCaster} instance draws it successfully every frame: the exact
+     * false "looks like the weather bug" signal the census exists to prevent.
+     */
+    public static void noteMirrorPipelineSelected(GeometrySlot slot, boolean substituted) {
+        SlotReachabilityCensus.noteSlotReached(slot);
+        if (substituted) {
+            SlotReachabilityCensus.noteSlotSubstituted(slot);
+        }
+    }
+
+    /**
+     * Logs, once per pipeline, that a mirror draw resolved a real variant but could not bind
+     * {@code u_Globals} because {@code ChunkRenderContextHolder.getUniformBuffer()} returned
+     * {@code null} this frame. The variant's bind group declares {@code u_Globals}, so drawing
+     * without setting it is a bind-group mismatch, not only a dim frame. This would otherwise stay
+     * silent, since the mirror phase, unlike {@code fornax$forwardSubstitute}, has nowhere to fall
+     * back to vanilla from: the render pass is already the mirror MRT by the time {@code
+     * setPipeline} runs.
+     */
+    public static synchronized void noteMirrorGlobalsMissing(RenderPipeline pipeline) {
+        if (MIRROR_GLOBALS_MISSING_REPORTED.putIfAbsent(pipeline, Boolean.TRUE) == null) {
+            FornaxMod.LOGGER.warn("[Fornax] Player-mirror pipeline for {} resolved but"
+                    + " ChunkRenderContextHolder's uniform buffer was unavailable this frame, so the"
+                    + " draw proceeded with u_Globals unset.", pipeline.getLocation());
+        }
+    }
+
+    @Nullable
+    private static RenderPipeline buildMirror(RenderPipeline base, GeometrySlot slot) {
+        Identifier fragment = GeometryProgramSource.replacementIdentifierFor(
+                base, com.mojang.blaze3d.shaders.ShaderType.FRAGMENT, slot);
+        Identifier vertex = GeometryProgramSource.replacementIdentifierFor(
+                base, com.mojang.blaze3d.shaders.ShaderType.VERTEX, slot);
+        if (fragment == null || vertex == null) {
+            // Both stages are required, like the shadow variant: vanilla's vertex shader already
+            // projects through the camera, the right space for the mirror's geometry too, but only
+            // the pack's player_mirror{,_x,_z} vertex stage reflects the player across the matching
+            // plane. Without it the player would draw at their own position, not their reflection.
+            MirrorCacheKey missKey = new MirrorCacheKey(base, slot);
+            if (MIRROR_MISS_REPORTED.putIfAbsent(missKey, Boolean.TRUE) == null) {
+                FornaxMod.LOGGER.warn("[Fornax] No {} program resolved for {} (vsh={}, fsh={}),"
+                        + " so the player casts no reflection for this slot this session. The pack"
+                        + " must declare a geometry pass with slot = \"{}\" and ship both stages.",
+                        slot.token(), base.getLocation(), vertex, fragment, slot.token());
+            }
+            return null;
+        }
+
+        RenderPipeline.Builder b = RenderPipeline.builder()
+                .withLocation(Identifier.fromNamespaceAndPath("fornax",
+                        "pipeline/mirror_" + slot.token() + "_" + base.getLocation().getPath().replace('/', '_')))
+                .withVertexShader(vertex)
+                .withFragmentShader(fragment)
+                // Culling off, not a coordinate trick. Reflecting y in the vertex stage flips the
+                // winding of every triangle, so the base pipeline's cull state (almost always
+                // back-face) would cull every real front face after the reflection. Negating clip.x
+                // instead of reflecting y would mirror the image left-right instead, breaking the
+                // planar reflection identity the whole design relies on: under that identity, a
+                // flat-water pixel's reflection sits at its screen UV only because y alone is
+                // reflected, so no mirror matrix ever has to reach a shader. Turning off culling
+                // fixes the winding flip; it is not a substitute for the reflection itself.
+                .withCull(false)
+                .withPolygonMode(base.getPolygonMode())
+                .withPrimitiveTopology(base.getPrimitiveTopology())
+                // Reversed-Z, matching the main camera's convention (DepthStencilState.DEFAULT), not
+                // the shadow variant's forward-Z ortho substitution: the mirror draws under the
+                // camera's projection (only the vertex stage reflects y), so its depth test must
+                // agree with every other camera-space depth target.
+                .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true))
+                // PlayerMirrorTargets' three colour lanes, formats by reference, never retyped; see
+                // that class's javadoc for why a mismatch here is an empty mirror image with no
+                // error anywhere. No AO, no motion lane: the mirror has no history to reproject
+                // against, and its resolve reads AO from the sampling pixel, not from the mirror.
+                .withColorTargetState(0, new ColorTargetState(
+                        java.util.Optional.empty(), GBufferManager.NORMAL_FORMAT, ColorTargetState.WRITE_ALL))
+                .withColorTargetState(1, new ColorTargetState(
+                        java.util.Optional.empty(), GBufferManager.ALBEDO_FORMAT, ColorTargetState.WRITE_ALL))
+                .withColorTargetState(2, new ColorTargetState(
+                        java.util.Optional.empty(), GBufferManager.MATERIAL_FORMAT, ColorTargetState.WRITE_ALL));
+
+        ShaderDefines defines = base.getShaderDefines();
+        for (String flag : defines.flags()) {
+            b.withShaderDefine(flag);
+        }
+        for (Map.Entry<String, String> e : defines.values().entrySet()) {
+            String raw = e.getValue();
+            try {
+                if (raw.indexOf('.') >= 0 || raw.indexOf('e') >= 0 || raw.indexOf('E') >= 0) {
+                    b.withShaderDefine(e.getKey(), Float.parseFloat(raw));
+                } else {
+                    b.withShaderDefine(e.getKey(), Integer.parseInt(raw));
+                }
+            } catch (NumberFormatException nfe) {
+                return null;
+            }
+        }
+        for (var layout : base.getBindGroupLayouts()) {
+            b.withBindGroupLayout(layout);
+        }
+        b.withBindGroupLayout(BindGroupLayout.builder()
+                .withUniform("u_Globals", UniformType.UNIFORM_BUFFER)
+                .build());
+
+        VertexFormat[] bindings = base.getVertexFormatBindings();
+        for (int i = 0; i < bindings.length; i++) {
+            if (bindings[i] != null) {
+                b.withVertexBinding(i, bindings[i]);
+            }
+        }
+
+        try {
+            RenderPipeline built = b.build();
+            if (!com.mojang.blaze3d.systems.RenderSystem.getDevice().precompilePipeline(built).isValid()) {
+                FornaxMod.LOGGER.error("[Fornax] Player-mirror pipeline for {} failed to compile,"
+                        + " so the player casts no reflection this session.", base.getLocation());
+                return null;
+            }
+            FornaxMod.LOGGER.info("[Fornax] Built player-mirror pipeline {} (from {})",
+                    built.getLocation(), base.getLocation());
+            return built;
+        } catch (RuntimeException e) {
+            FornaxMod.LOGGER.error("[Fornax] Could not build a player-mirror pipeline from {}: {}",
+                    base.getLocation(), e.toString());
+            return null;
+        }
     }
 
     private static final Map<RenderPipeline, RenderPipeline> FORWARD_CACHE = new IdentityHashMap<>();
@@ -448,13 +746,19 @@ public final class DeferredGeometryPipelines {
     @Nullable
     public static synchronized RenderPipeline shadowVariantOf(RenderPipeline base, boolean worldSpaceInput) {
         Map<RenderPipeline, RenderPipeline> cache = worldSpaceInput ? SHADOW_WORLD_SPACE_CACHE : SHADOW_CACHE;
+        Set<RenderPipeline> failed = worldSpaceInput ? SHADOW_WORLD_SPACE_FAILED : SHADOW_FAILED;
         RenderPipeline cached = cache.get(base);
         if (cached != null) {
             return cached;
         }
+        if (failed.contains(base)) {
+            return null;
+        }
         RenderPipeline variant = buildShadow(base, worldSpaceInput);
         if (variant != null) {
             cache.put(base, variant);
+        } else {
+            failed.add(base);
         }
         return variant;
     }

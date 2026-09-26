@@ -220,6 +220,23 @@ public abstract class PreparedRenderTypeDeferredMixin implements PreparedRenderT
             return;
         }
 
+        // PlayerMirrorCaster's submission: unlike the shadow replay above, this storage holds nothing
+        // but the player's draws, so every pipeline arriving here is one the player can be drawn
+        // with. A draw whose base pipeline has no player_mirror variant has nothing to contribute:
+        // cancel it here, before a render pass opens, rather than let it fall through to vanilla's
+        // single-target pass and draw the player to the screen a second time. That is the same
+        // failure mode the shadow-phase branch above guards against.
+        GeometrySlot activeMirrorSlot = DeferredGeometryPipelines.activeMirrorSlot();
+        if (activeMirrorSlot != null) {
+            GeometrySlot pipelineSlot = GeometryPipelineMap.slotOf(pipeline);
+            boolean reflects = pipelineSlot != null
+                    && DeferredGeometryPipelines.mirrorVariantOf(pipeline, activeMirrorSlot) != null;
+            if (!reflects) {
+                ci.cancel();
+            }
+            return;
+        }
+
         if (pipeline == RenderPipelines.ENTITY_SHADOW
                 && FornaxRenderState.isActive()
                 && GraphRunner.isCompileOptionEnabled("HIDE_VANILLA_BLOB_SHADOWS")) {
@@ -262,6 +279,37 @@ public abstract class PreparedRenderTypeDeferredMixin implements PreparedRenderT
             GpuTextureView depth, OptionalDouble depthClear, Operation<RenderPass> original) {
 
         PreparedRenderType self = (PreparedRenderType) (Object) this;
+
+        GeometrySlot renderPassMirrorSlot = DeferredGeometryPipelines.activeMirrorSlot();
+        if (renderPassMirrorSlot != null) {
+            // Draws with no mirror variant were already cancelled at HEAD, so anything arriving here
+            // reflects. All three colour attachments plus depth, matching PlayerMirrorTargets' layout
+            // order (normal, albedo, material). See mirrorVariantOf's ColorTargetState ordering,
+            // which must agree with this attachment order or the pipeline binds the wrong target to
+            // the wrong location. This covers all three slots the same way: forSlot(renderPassMirrorSlot)
+            // picks the right instance, but the attachment order below is the same call shape for
+            // every one of them, so it cannot diverge per slot.
+            var mirrorTargets = dev.icehunter.fornax.pipeline.PlayerMirrorTargets.forSlot(renderPassMirrorSlot);
+            GpuTextureView mirrorNormal = mirrorTargets.getNormalView();
+            GpuTextureView mirrorAlbedo = mirrorTargets.getAlbedoView();
+            GpuTextureView mirrorMaterial = mirrorTargets.getMaterialView();
+            GpuTextureView mirrorDepth = mirrorTargets.getDepthView();
+            if (mirrorNormal == null || mirrorAlbedo == null || mirrorMaterial == null || mirrorDepth == null) {
+                return original.call(encoder, label, color, colorClear, depth, depthClear);
+            }
+            // No clear here: PlayerMirrorCaster.cast() clears explicitly once per phase entry, before
+            // any draw. See PlayerMirrorTargets.clear()'s doc for why a load-op clear on whichever
+            // draw happens to open the pass first is not safe for this MRT.
+            RenderPassDescriptor mirrorDescriptor = RenderPassDescriptor.create(
+                            () -> "Player Mirror (" + renderPassMirrorSlot.token() + ")")
+                    .withColorAttachment(mirrorNormal, Optional.empty())
+                    .withColorAttachment(mirrorAlbedo, Optional.empty())
+                    .withColorAttachment(mirrorMaterial, Optional.empty())
+                    .withDepthAttachment(mirrorDepth, OptionalDouble.empty())
+                    .withRenderArea(new RenderPass.RenderArea(0, 0,
+                            mirrorTargets.getWidth(), mirrorTargets.getHeight()));
+            return encoder.createRenderPass(mirrorDescriptor);
+        }
 
         if (DeferredGeometryPipelines.isShadowPhase() && DeferredGeometryPipelines.isPlayerCastPhase()
                 && DeferredGeometryPipelines.PLAYER_CAST_TO_GBUFFER) {
@@ -312,6 +360,28 @@ public abstract class PreparedRenderTypeDeferredMixin implements PreparedRenderT
             )
     )
     private void fornax$maybeDeferredPipeline(RenderPass pass, RenderPipeline pipeline, Operation<Void> original) {
+        GeometrySlot pipelineMirrorSlot = DeferredGeometryPipelines.activeMirrorSlot();
+        if (pipelineMirrorSlot != null) {
+            // One variant for every draw PlayerMirrorCaster submits; draws with none were already
+            // cancelled at HEAD, so mirrorVariantOf here always resolves.
+            RenderPipeline mirrorVariant = DeferredGeometryPipelines.mirrorVariantOf(pipeline, pipelineMirrorSlot);
+            original.call(pass, mirrorVariant != null ? mirrorVariant : pipeline);
+            // None of the three mirror slots are in GeometryPipelineMap, so notePipelineSeen never
+            // marks any of them reached. Without this call, the census would report a claimed slot
+            // as never reached even while it draws successfully every frame. See
+            // noteMirrorPipelineSelected's doc.
+            DeferredGeometryPipelines.noteMirrorPipelineSelected(pipelineMirrorSlot, mirrorVariant != null);
+            GpuBufferSlice mirrorGlobals = ChunkRenderContextHolder.getUniformBuffer();
+            if (mirrorVariant != null) {
+                if (mirrorGlobals != null) {
+                    pass.setUniform("u_Globals", mirrorGlobals);
+                } else {
+                    DeferredGeometryPipelines.noteMirrorGlobalsMissing(pipeline);
+                }
+            }
+            return;
+        }
+
         if (DeferredGeometryPipelines.isShadowPhase()
                 && !(DeferredGeometryPipelines.isPlayerCastPhase()
                         && DeferredGeometryPipelines.PLAYER_CAST_TO_GBUFFER)) {

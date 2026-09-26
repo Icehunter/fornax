@@ -16,6 +16,8 @@ import dev.icehunter.fornax.pipeline.HeldLight;
 import dev.icehunter.fornax.pipeline.LocalActorFrameState;
 import dev.icehunter.fornax.pipeline.SkyFrameState;
 import dev.icehunter.fornax.pipeline.SkyProbe;
+import dev.icehunter.fornax.pipeline.WallPlaneProbe;
+import dev.icehunter.fornax.pipeline.WaterPlaneProbe;
 import dev.icehunter.fornax.pipeline.WaterSurfaceTracker;
 import dev.icehunter.fornax.pipeline.WaterTransitionTracker;
 import dev.icehunter.fornax.pipeline.WetnessState;
@@ -39,15 +41,17 @@ import org.spongepowered.asm.mixin.injection.At;
 import java.nio.ByteBuffer;
 
 /**
- * Appends Fornax's {@code u_Globals} tail fields (bytes 184..848: two previous-frame camera
+ * Appends Fornax's {@code u_Globals} tail fields (bytes 184..880: two previous-frame camera
  * matrices, current/previous jitter vec2s, {@code u_InvProjModelView}, {@code u_SunViewProj},
  * {@code u_VoxelWindow}, {@code u_CameraAbs}, then the sky tail -- {@code u_SkyColor}, {@code
  * u_SunriseColor}, {@code u_SkyCelestial}, {@code u_SkyState} -- then the one-vec4 water tail,
  * {@code u_WaterState} (Water Round C Task 4), then the one-vec4 shadow tail, {@code
  * u_ShadowMapParams} (the shadow radial-distortion bias), then the one-vec4 camera-sky-light tail,
  * {@code u_CameraSkyLight} (the cave/border-fog enclosure round), the later frame/held-light/
- * weather/camera-motion tails, and finally the four-vec4 generic local-actor ABI) to Sodium's
- * per-frame terrain uniform block.
+ * weather/camera-motion tails, the four-vec4 generic local-actor ABI, the one-vec4 player-mirror
+ * tail {@code u_PlayerMirrorState} (the water plane below the player), and the one-vec4 wall-mirror
+ * tail {@code u_PlayerMirrorWalls} (the vertical wall beside the player on each horizontal axis) to
+ * Sodium's per-frame terrain uniform block.
  *
  * <p>Wraps the terminal {@code Std140Builder.get()} invocation inside {@code GlobalUniforms}'s
  * {@code write(ByteBuffer)} ({@code DynamicUniformStorage.DynamicUniform} contract) so the extra
@@ -75,8 +79,9 @@ import java.nio.ByteBuffer;
  * {@code u_FrameState}, {@code u_HeldLight} and {@code u_WeatherAnchor}, the water-motion-vector
  * round appends {@code u_CameraDelta} at 720. The local-actor ABI then occupies four vec4s at
  * 736/752/768/784, {@code u_WorldClock} sits at 800 and {@code u_WorldBounds} at 816. The camera
- * biome facts occupy the final vec4 at 832, ending the block at 848. All are vec4-tail-safe,
- * matching both
+ * biome facts occupy the vec4 at 832; the player-mirror plane, {@code u_PlayerMirrorState}, follows
+ * at 848, and the wall-mirror planes, {@code u_PlayerMirrorWalls}, follow at 864, ending the block
+ * at 880. All are vec4-tail-safe, matching both
  * {@code UniformBufferManagerMixin}'s widened {@code DynamicUniformStorage} block size and the
  * {@code globals.glsl} override's declared struct.
  */
@@ -217,6 +222,11 @@ public class GlobalUniformsWriteMixin {
         // policy and can choose distortion, droplets, audio-reactive effects, or nothing.
         FogType fluidInCamera = Minecraft.getInstance().gameRenderer.mainCamera().getFluidInCamera();
         boolean eyeInWater = fluidInCamera == FogType.WATER;
+        // Player-mirror plane: the water surface below the player's feet, not the camera's fluid
+        // state above. A mirror pass draws the player's reflection looking at the plane from
+        // outside it, so a submerged eye has nothing to look at, and this shares the same
+        // eye-in-water flag as its guard. See WaterPlaneProbe for the scan and its bound.
+        WaterPlaneProbe.Values playerMirror = WaterPlaneProbe.read(eyeInWater);
         // .y widens the same submersion test into the full enum Iris/OptiFine packs expect from
         // isEyeInWater (0 none, 1 water, 2 lava, 3 powder snow). Written into a lane this block
         // already reserved and zero-filled, so .x keeps its exact previous meaning and no existing
@@ -548,6 +558,21 @@ public class GlobalUniformsWriteMixin {
         BiomeProbe.Values cameraBiome = BiomeProbe.read();
         builder.putVec4(cameraBiome.id(), cameraBiome.baseTemperature(),
                 cameraBiome.localTemperature(), cameraBiome.downfall());
+
+        // Player-mirror plane (bytes 848..864): computed above beside the water tail's own
+        // eye-in-water flag, written here so this method's write order matches globals.glsl's
+        // declared struct order, the same discipline every tail above follows. z/w are the two
+        // candidate planes' own heights (or NO_PLANE); y is the render plane, the standing height
+        // when it validates, else the water height.
+        builder.putVec4(playerMirror.valid(), playerMirror.renderHeight(),
+                playerMirror.waterHeight(), playerMirror.standHeight());
+
+        // Wall-mirror planes (bytes 864..880): guarded on the same eye-in-water flag as the plane
+        // above, since a submerged eye has nothing to look at a wall from either, read right beside
+        // it for that reason. Nothing consumes this lane yet; see WallPlaneProbe for the scan.
+        WallPlaneProbe.Values playerMirrorWalls = WallPlaneProbe.read(eyeInWater);
+        builder.putVec4(playerMirrorWalls.xFacing(), playerMirrorWalls.xPlaneRel(),
+                playerMirrorWalls.zFacing(), playerMirrorWalls.zPlaneRel());
 
         return original.call(builder);
     }

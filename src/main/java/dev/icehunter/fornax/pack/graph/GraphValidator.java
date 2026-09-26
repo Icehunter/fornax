@@ -16,6 +16,7 @@ import dev.icehunter.fornax.pass.shadow.TerrainShadowResult;
 import dev.icehunter.fornax.pass.water.WaterSurfaceManager;
 import dev.icehunter.fornax.pipeline.GeometryInputs;
 import dev.icehunter.fornax.pipeline.OpaqueDepth;
+import dev.icehunter.fornax.pipeline.PlayerMirrorTargets;
 import dev.icehunter.fornax.pipeline.SceneHistory;
 import dev.icehunter.fornax.voxel.BrickGridUpload;
 
@@ -63,7 +64,34 @@ public final class GraphValidator {
             // own SOLID/CUTOUT draws) -- so they are already final-for-frame for every geometry
             // sub-draw AND every fullscreen pass, with no PassType-based restriction below (see
             // WaterSurfaceManager.NORMAL_NAME's own doc for the freshness argument).
-            WaterSurfaceManager.NORMAL_NAME, WaterSurfaceManager.DEPTH_NAME);
+            WaterSurfaceManager.NORMAL_NAME, WaterSurfaceManager.DEPTH_NAME,
+            // The player-mirror MRTs (see PlayerMirrorTargets): three half-resolution, G-buffer-
+            // shaped sets (floor, X-wall, Z-wall), each resolved by GraphInputResolver against that
+            // class's forSlot(...) instance. Unlike the main G-buffer's attachments above, these
+            // exist only while the pack claims the matching slot.
+            // checkPlayerMirrorBuiltinsRequireTheSlot (below) refuses, at load time, a pack that
+            // names one of these without also claiming that family's slot, rather than letting it
+            // resolve to no allocated target every frame.
+            PlayerMirrorTargets.NORMAL_NAME, PlayerMirrorTargets.ALBEDO_NAME,
+            PlayerMirrorTargets.MATERIAL_NAME, PlayerMirrorTargets.DEPTH_NAME,
+            PlayerMirrorTargets.X_NORMAL_NAME, PlayerMirrorTargets.X_ALBEDO_NAME,
+            PlayerMirrorTargets.X_MATERIAL_NAME, PlayerMirrorTargets.X_DEPTH_NAME,
+            PlayerMirrorTargets.Z_NORMAL_NAME, PlayerMirrorTargets.Z_ALBEDO_NAME,
+            PlayerMirrorTargets.Z_MATERIAL_NAME, PlayerMirrorTargets.Z_DEPTH_NAME);
+
+    /** Every player-mirror builtin name, mapped to the one slot that must be claimed for it to
+     * resolve to anything. See {@code checkPlayerMirrorBuiltinsRequireTheSlot} below. This is kept
+     * per family, not as one blanket set: a pack referencing a wall builtin while only the floor
+     * slot is claimed must still be refused, so the required slot is looked up per name, not
+     * treated as "any player-mirror slot." */
+    private static final Map<String, GeometrySlot> PLAYER_MIRROR_BUILTIN_SLOTS = new HashMap<>();
+    static {
+        for (GeometrySlot mirrorSlot : PlayerMirrorTargets.slots()) {
+            for (String name : PlayerMirrorTargets.builtinNamesFor(mirrorSlot)) {
+                PLAYER_MIRROR_BUILTIN_SLOTS.put(name, mirrorSlot);
+            }
+        }
+    }
 
     /**
      * Every buffer-kind target name the ENGINE sizes itself, via its own
@@ -171,6 +199,7 @@ public final class GraphValidator {
                                         + "voxelSectionState and voxelSourceSummary buffer inputs");
                 }
             }
+            checkPlayerMirrorBuiltinsRequireTheSlot(p, graph);
             checkEnabledIf(p.enabledIf(), options, "pass." + p.name() + ".enabled_if");
             // shaders/vanilla/* files are vanilla core-shader overrides (VanillaShaderOverrides),
             // never a pass shader -- they're excluded from the fullscreen-pass preamble splices
@@ -653,6 +682,58 @@ public final class GraphValidator {
         if (ref.endsWith(".history") && !t.history()) {
             throw new FornaxPackError(FILE, "pass." + pass.name() + ".inputs",
                     "'" + ref + "' reads history but target '" + base + "' is not declared history = true");
+        }
+    }
+
+    /**
+     * A pack naming one of {@link #PLAYER_MIRROR_BUILTIN_SLOTS}' keys must also claim that
+     * builtin's required slot with a geometry pass, in the same graph. {@link PlayerMirrorTargets}
+     * is allocated per slot only while that slot is claimed, and an unclaimed reference would
+     * otherwise resolve to null every frame forever: an empty mirror with no error anywhere,
+     * rather than a crash. Modelled on {@code voxelSourceWindow}/{@code voxelEmitterPool}'s
+     * cross-pass requirement checks above: a fact one part of the graph needs from another part
+     * is caught here, at load time, rather than left to a runtime "resolved to no allocated
+     * target" that never stops recurring.
+     *
+     * <p>This check is per family, not "any player-mirror slot claimed." A pack referencing
+     * {@code builtin.mirrorXAlbedo} while only {@code slot = "player_mirror"} (the floor) is
+     * claimed must still be refused: {@link PlayerMirrorTargets#forSlot} keeps three independent
+     * instances, and claiming the floor allocates nothing for the X-wall family. The required
+     * slot is looked up per referenced name via {@link #PLAYER_MIRROR_BUILTIN_SLOTS}, never
+     * treated as "any of the three."
+     *
+     * <p>This requires the claiming pass to exist, not to be compile-enabled alongside the
+     * reader. A pack whose {@code player_mirror} pass carries an {@code enabled_if} that happens
+     * to evaluate false while a reader pass is enabled still passes this check: {@code
+     * GraphRunner.computePackClaimsMirrorSlot} does not consult {@code enabled_if} either, so
+     * {@link PlayerMirrorTargets} is still allocated. What goes missing at runtime in that case
+     * is the program: a compile-disabled geometry pass registers no {@code player_mirror} shader
+     * source, so {@code DeferredGeometryPipelines.mirrorVariantOf} resolves to {@code null} every
+     * draw, and that slot's {@code PlayerMirrorCaster} draws nothing into the MRT that frame. The
+     * reader then samples a cleared, transparent-black target, the same picture as any frame
+     * where nothing happens to reflect. This is not a crash, and it is not caught here on
+     * purpose: catching "claimed but disabled" would require this validator to evaluate {@code
+     * enabled_if} against option values it does not have at load time ({@code checkEnabledIf}
+     * only checks that the expression parses and names real options, it never evaluates truth).
+     * The one case that truly cannot recover at runtime, no pass claims the slot at all, is
+     * exactly what the check below still fails loudly on.
+     */
+    private static void checkPlayerMirrorBuiltinsRequireTheSlot(PassSpec p, GraphSpec graph) {
+        for (String in : p.inputs()) {
+            GeometrySlot requiredSlot = PLAYER_MIRROR_BUILTIN_SLOTS.get(in);
+            if (requiredSlot == null) {
+                continue;
+            }
+            boolean slotClaimed = graph.passes().stream().anyMatch(
+                    other -> other.type() == PassType.GEOMETRY && other.slot() == requiredSlot);
+            if (!slotClaimed) {
+                throw new FornaxPackError(FILE, "pass." + p.name() + ".inputs",
+                        "references a player-mirror builtin (" + in + ") but no geometry pass in this"
+                                + " graph claims slot = \"" + requiredSlot.token() + "\". That"
+                                + " family's targets are never allocated unless its matching slot"
+                                + " is claimed, and this reference would resolve to nothing every"
+                                + " frame.");
+            }
         }
     }
 

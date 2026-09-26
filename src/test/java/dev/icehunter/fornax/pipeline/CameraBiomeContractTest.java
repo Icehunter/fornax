@@ -16,10 +16,9 @@ class CameraBiomeContractTest {
                 "src/main/resources/assets/fornax/shaders/include/globals.glsl"));
         assertTrue(glsl.contains("vec4 u_CameraBiome;"), "the camera biome data lane must exist");
         assertTrue(glsl.indexOf("vec4 u_WorldBounds;") < glsl.indexOf("vec4 u_CameraBiome;"));
-        String manager = Files.readString(Path.of(
-                "src/main/java/dev/icehunter/fornax/mixin/sodium/UniformBufferManagerMixin.java"));
-        // Existing 832-byte block plus one std140 vec4.
-        assertTrue(manager.contains("return 848;"));
+        // GlobalsLayoutContractTest already checks the byte offset of this field, and the size of
+        // the whole block under std140 rules, covering any field appended after it. A hardcoded
+        // total here would go stale each time a new field is added, so this test does not repeat it.
     }
 
     @Test
