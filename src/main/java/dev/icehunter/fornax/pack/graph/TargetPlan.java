@@ -95,7 +95,7 @@ public final class TargetPlan {
                 BufferSize size = t.bufferSize();
                 if (size != null
                         && (t.enabledIf() == null || EnabledIfExpr.parse(t.enabledIf()).evaluate(compileValues))) {
-                    bufferEntries.add(new BufferEntry(t.name(), size.sizeBytes()));
+                    bufferEntries.add(new BufferEntry(t.name(), size.sizeBytes(renderWidth, renderHeight)));
                 }
                 continue;
             }
@@ -139,8 +139,10 @@ public final class TargetPlan {
     }
 
     /** One pack-sized buffer target and the exact byte count {@link TargetRegistry#ensureBufferSize}
-     * must be called with. Resolution-independent by construction: a buffer's size comes from the
-     * pack's own {@code stride_bytes} x {@code count}, never from {@code renderSize * scale}. */
+     * must be called with. A fixed count is resolution-independent by construction: its size is the
+     * pack's own {@code stride_bytes} x {@code count}. A {@code count = "render"} buffer is the one
+     * exception, one element per render pixel, re-sized (and so zero-cleared) with the window like
+     * a texture. */
     public record BufferEntry(String name, long sizeBytes) {
     }
 }

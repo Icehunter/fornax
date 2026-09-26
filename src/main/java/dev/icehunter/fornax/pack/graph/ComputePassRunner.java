@@ -845,21 +845,37 @@ public final class ComputePassRunner implements AutoCloseable {
         } else {
             List<Integer> localSize = spec.localSize();
             if (localSize != null) {
-                TargetInstance out = registry.get(spec.outputs().get(0));
-                if (out == null) {
-                    // registry.get() is the TEXTURE map: a buffer-only-output pass has no
-                    // pixel size to derive groups from. This fails loudly here instead of
-                    // running the dispatch against a target that is not set.
-                    throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
-                            + "' declares local_size but its first output '" + spec.outputs().get(0)
-                            + "' is not a texture target: buffer-only passes need a literal"
-                            + " dispatch or an engine dispatch override (GraphRunner.computeDispatchOverride)");
+                String first = spec.outputs().get(0);
+                TargetInstance out = registry.get(first);
+                if (out != null) {
+                    groupsX = (out.width() + localSize.get(0) - 1) / localSize.get(0);
+                    groupsY = (out.height() + localSize.get(1) - 1) / localSize.get(1);
+                } else {
+                    // registry.get() is the texture map. A count = "render" buffer is the one
+                    // buffer with an extent: a one-dimensional domain, one group column per
+                    // local_size_x elements of what it holds this frame, read off the live buffer
+                    // so a seed writing an element a pixel covers every pixel of any window.
+                    BufferSize size = registry.bufferSizeOf(first);
+                    BufferInstance buffer = registry.getBuffer(first);
+                    if (size == null || !size.perRenderPixel() || buffer == null) {
+                        throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
+                                + "' declares local_size but its first output '" + first
+                                + "' is neither a texture target nor a count = \"render\" buffer:"
+                                + " a fixed-size buffer output needs a literal dispatch or an engine"
+                                + " dispatch override (GraphRunner.computeDispatchOverride)");
+                    }
+                    groupsX = groupsForElements(buffer.sizeBytes() / size.strideBytes(), localSize.get(0));
+                    groupsY = 1;
                 }
-                groupsX = (out.width() + localSize.get(0) - 1) / localSize.get(0);
-                groupsY = (out.height() + localSize.get(1) - 1) / localSize.get(1);
             }
         }
         return new int[] { groupsX, groupsY, groupsZ };
+    }
+
+    /** Group columns covering {@code elements} at {@code localX} threads each; at least one. */
+    static int groupsForElements(long elements, int localX) {
+        long groups = (Math.max(elements, 1L) + localX - 1) / localX;
+        return (int) Math.min(groups, Integer.MAX_VALUE);
     }
 
     /** Records the dispatch directly into Blaze3D's persistent graphics command encoder instead of

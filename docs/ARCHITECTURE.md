@@ -531,9 +531,17 @@ exactly two possible owners, and which one applies is decided by name, against
   A pack declares the target purely so the name is referenceable, and must not give it a size; the
   engine would overwrite it anyway.
 * **Pack-owned**: anything else. It must declare `stride_bytes` (bytes per element, a multiple of
-  4) and `count` (elements); `TargetPlan.compute` emits a `BufferEntry` for it and
-  `TargetRegistry.ensureSize` allocates, resizes and frees it exactly like a texture target,
-  including the `enabled_if` gate and the mandatory zero-clear at allocation.
+  4) and `count` (elements, or the string `"render"` for one element per render pixel);
+  `TargetPlan.compute` emits a `BufferEntry` for it and `TargetRegistry.ensureSize` allocates,
+  resizes and frees it exactly like a texture target, including the `enabled_if` gate and the
+  mandatory zero-clear at allocation. A `"render"` count (`BufferSize.perRenderPixel`) is sized
+  from the plan's render size and so re-sized, and zero-cleared, with the window; a `ray_query`
+  declared `rays = "render"` requires both its buffers on that basis and reads its live count off
+  them each frame (`GraphRunner.liveRayCount`), capped at `RayQueryAbi.MAX_RAYS` (16 Mi). A
+  `local_size` compute pass whose first output is such a buffer dispatches one group column per
+  `local_size_x` elements of the buffer's live byte count (`ComputePassRunner.resolveDispatchGroups`,
+  `TargetRegistry.bufferSizeOf`); `GraphValidator.checkBufferOutputLocalSize` refuses `local_size`
+  over a fixed buffer, which has no extent, and a two-dimensional `local_size` over one.
 
 Both directions are load errors, because both degrade silently otherwise. A pack buffer with no
 size is allocated by nothing at all, and the first pass to bind it throws inside
@@ -545,9 +553,11 @@ pack buffer aborted every runner, every frame.
 The size is expressed as `stride_bytes` × `count` rather than a single `size_bytes`, because the
 element count is the only form in which the engine can check anything against a `particles` pass's
 `instances`, and because the stride is what the pack's own `layout(std430) buffer { Element
-data[]; }` already commits to. The size is resolution-independent by construction, which matters
-for a field that accumulates: a reallocated buffer is a zero-cleared buffer, so sizing one off
-render resolution would wipe its state on every window resize. The product is computed in `long`
+data[]; }` already commits to. A fixed count is resolution-independent by construction, which
+matters for a field that accumulates: a reallocated buffer is a zero-cleared buffer, so sizing one
+off render resolution would wipe its state on every window resize. The `"render"` basis is the
+exception for a per-pixel record, where a fixed count loses the tail of a larger window (see §12).
+The product is computed in `long`
 and capped at `BufferSize.MAX_SIZE_BYTES` (1 GiB) at load; a 4-byte-aligned stride keeps the total
 legal for the `vkCmdFillBuffer` call that performs the allocation-time zero-clear.
 
@@ -2999,6 +3009,14 @@ readback content and driver behavior. The capture frame's timing includes readba
   an explicit `(device const uint*)` cast at the call site, confirmed against this machine's
   `metal_raytracing` header through the real compiler error, not assumed from another ray-tracing
   API's shape.
+- **A per-pixel ray buffer with a fixed count loses the tail of any larger window.** A seed that
+  writes one ray per screen pixel indexes its buffer by pixel; a `count` literal sized to one window
+  covers exactly that window, every pixel past it is never seeded, and the consumer's bounds check
+  falls back to raster there. No error: the traced shadow ends at a straight line across the screen
+  after a maximise or in a 4K still, and only on the machine whose window is larger than the
+  literal. `count = "render"` / `rays = "render"` size the buffers and the query
+  from the render size each frame, and `GraphValidator` refuses a fixed buffer under a
+  `"render"` query.
 - **GLSL `%` on a signed int with a negative left operand is not portable; only feed it
   non-negative operands.** glslang compiles `%` to `OpSMod`, and at least one shipping NVIDIA
   Vulkan driver evaluates that as an unsigned modulo: `-1 % 9` is 3, `-45 % 9` is 4, the residues

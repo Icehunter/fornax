@@ -24,6 +24,8 @@ import java.util.regex.Pattern;
 
 /** Parses the pack manifests into immutable records. Pure over a {@link Reader} for testability. */
 public final class PackTomlLoader {
+    /** The one string a {@code count} or {@code rays} key accepts in place of an integer. */
+    static final String RENDER_BASIS = "render";
     private static final Pattern CATEGORY_NAME = Pattern.compile("[a-z][a-z0-9_]*");
 
     static {
@@ -287,10 +289,23 @@ public final class PackTomlLoader {
                             + "'; expected visibility or closest_hit");
         }
 
-        int rays = TomlSupport.requireInt(spec, "rays", file);
-        if (rays <= 0 || rays > RayQueryAbi.MAX_RAYS) {
-            throw new FornaxPackError(file, key + ".rays",
-                    "rays must be between 1 and " + RayQueryAbi.MAX_RAYS + ", got " + rays);
+        // "render": one ray per render pixel; the live count is read off the buffers each frame.
+        boolean perRenderPixel = false;
+        int rays = 0;
+        Object rawRays = spec.get("rays");
+        if (rawRays instanceof String basis) {
+            if (!basis.equals(RENDER_BASIS)) {
+                throw new FornaxPackError(file, key + ".rays",
+                        "rays must be an integer or \"" + RENDER_BASIS + "\" (one ray per render pixel), got \""
+                                + basis + "\"");
+            }
+            perRenderPixel = true;
+        } else {
+            rays = TomlSupport.requireInt(spec, "rays", file);
+            if (rays <= 0 || rays > RayQueryAbi.MAX_RAYS) {
+                throw new FornaxPackError(file, key + ".rays",
+                        "rays must be between 1 and " + RayQueryAbi.MAX_RAYS + ", got " + rays);
+            }
         }
 
         RayTier minTier = RayTier.NONE;
@@ -314,7 +329,7 @@ public final class PackTomlLoader {
                         "unknown atlas UV encoding '" + value + "'; expected packed_half or texel_u16");
             }
         }
-        return new RayQuerySpec(kind, rays, minTier, encoding);
+        return new RayQuerySpec(kind, rays, minTier, encoding, perRenderPixel);
     }
 
     private static @Nullable RayTracedShadowSpec parseRayTracedShadows(Config root, String file) {
@@ -747,12 +762,25 @@ public final class PackTomlLoader {
                             + " reads as an engine-owned buffer and would never be allocated");
         }
         int stride = requireBufferInt(spec, "stride_bytes", keyPath, file);
-        int count = requireBufferInt(spec, "count", keyPath, file);
+        // "render": one element per render pixel, sized from the render size every frame.
+        boolean perRenderPixel = false;
+        int count = 0;
+        Object rawCount = spec.get("count");
+        if (rawCount instanceof String basis) {
+            if (!basis.equals(RENDER_BASIS)) {
+                throw new FornaxPackError(file, keyPath + ".count",
+                        "count must be an integer or \"" + RENDER_BASIS + "\" (one element per render pixel), got \""
+                                + basis + "\"");
+            }
+            perRenderPixel = true;
+        } else {
+            count = requireBufferInt(spec, "count", keyPath, file);
+        }
         if (stride <= 0) {
             throw new FornaxPackError(file, keyPath + ".stride_bytes",
                     "stride_bytes must be positive, got " + stride);
         }
-        if (count <= 0) {
+        if (!perRenderPixel && count <= 0) {
             throw new FornaxPackError(file, keyPath + ".count",
                     "count must be positive, got " + count);
         }
@@ -763,6 +791,9 @@ public final class PackTomlLoader {
                             + " size argument the Vulkan spec requires to be a multiple of 4. A"
                             + " 4-aligned stride also matches std430's own minimum member alignment,"
                             + " so no legitimate element layout is excluded by this");
+        }
+        if (perRenderPixel) {
+            return BufferSize.perRenderPixel(stride);
         }
         BufferSize size = new BufferSize(stride, count);
         if (size.sizeBytes() > BufferSize.MAX_SIZE_BYTES) {

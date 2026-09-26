@@ -175,7 +175,7 @@ outputs = ["ssaoRaw"]
 | `outputs` | Targets this pass writes. |
 | `target` | For `mipchain` passes: the target whose mip levels are being built. |
 | `enabled_if` | Only run this pass when the expression is true. |
-| `dispatch`, `local_size` | For `compute` passes: the work group counts and size. |
+| `dispatch`, `local_size` | For `compute` passes: the work group counts, or the group size to derive them from the first output's extent (a texture, or a `count = "render"` buffer as a 1-D domain). |
 
 Pass types:
 
@@ -256,7 +256,23 @@ atlas_uv_encoding = "packed_half"   # optional; use "texel_u16" for exact level-
 
 Exactly one input, the request buffer, and one output, the hit buffer. Both must be declared
 `kind = "buffer"` targets: requests need at least `rays * 32` bytes and hits `rays * 36` bytes; a buffer one record short is
-refused at load, because nothing would report it at run time. The request buffer must be written by
+refused at load, because nothing would report it at run time.
+
+**One ray per pixel: `rays = "render"`.** A seed that writes a ray per screen pixel must not size
+its buffers to one window: a literal `count` covers the window it was written against and leaves
+every row past it untraced on a larger one (a maximised window, a 4K still), which reads as the
+traced shadow stopping at a straight line across the screen. Declare the query
+`rays = "render"` and both buffers `count = "render"`; the engine sizes them from the render size
+every frame, re-sizing in place when the window or render scale changes, and traces whatever both
+buffers hold that frame (capped at 16 Mi rays). The three declarations must agree: a fixed buffer
+under a `"render"` query, or a fixed `rays` over a `"render"` buffer, is refused at load. The seed
+that fills the request buffer has to grow with it too: give it `local_size = [x, 1]` (matching the
+shader's `local_size_x`) and the engine dispatches one group per `x` elements of the buffer's live
+count; the mandatory `dispatch` stays a `[1, 1, 1]` placeholder. A literal `dispatch` there stops
+seeding at its own group count, and every request past it is a zero ray the trace answers as a
+miss, so the tail of the screen comes back lit rather than raster. A
+`count = "render"` buffer is zero-cleared whenever it re-sizes, like a texture, so it suits a
+per-pixel record and not an accumulation field. The request buffer must be written by
 an **earlier** pass in the same frame: an unwritten one holds whatever the allocation left there,
 which is finite floats often enough to trace, so the failure would be a frame of plausible wrong
 answers rather than an error.

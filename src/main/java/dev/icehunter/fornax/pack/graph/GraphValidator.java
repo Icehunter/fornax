@@ -278,6 +278,9 @@ public final class GraphValidator {
             if (p.type() == PassType.RAY_QUERY) {
                 checkRayQueryPass(p, graph);
             }
+            if (p.type() == PassType.COMPUTE && p.localSize() != null) {
+                checkBufferOutputLocalSize(p, graph);
+            }
         }
 
         ComputeReuseValidation.validate(graph, options);
@@ -301,7 +304,7 @@ public final class GraphValidator {
                 // for the same reason the engine-injected sceneHistory pair does below: a report that
                 // silently omits real, permanently-held VRAM understates every pack that uses one,
                 // with nothing in the log to say so.
-                total += appendBufferLine(lines, t.name(), size);
+                total += appendBufferLine(lines, t.name(), size, renderWidth, renderHeight);
                 continue;
             }
             total += appendLine(lines, t, renderWidth, renderHeight, outputWidth, outputHeight, "");
@@ -437,10 +440,11 @@ public final class GraphValidator {
      * {@link #appendLine} uses for a texture -- the format column carries the element layout
      * ({@code stride x count}) since a buffer has no {@code GpuFormat}, and the extent column its
      * byte count, since it has no pixel extent either. */
-    private static long appendBufferLine(List<String> lines, String name, BufferSize size) {
-        long bytes = size.sizeBytes();
+    private static long appendBufferLine(List<String> lines, String name, BufferSize size, int width, int height) {
+        long bytes = size.sizeBytes(width, height);
+        String layout = size.strideBytes() + "x" + (size.perRenderPixel() ? "render(" + size.countAt(width, height) + ")" : size.count());
         lines.add(String.format("%-16s %-14s %d bytes (buffer) = %.2f MB",
-                name, size.strideBytes() + "x" + size.count(), bytes, bytes / (1024.0 * 1024.0)));
+                name, layout, bytes, bytes / (1024.0 * 1024.0)));
         return bytes;
     }
 
@@ -872,9 +876,16 @@ public final class GraphValidator {
                     "'" + hits + "' is both the request and the hit buffer; a traversal reads the "
                             + "whole request set while it writes, so one buffer cannot be both");
         }
-        requireRayBuffer(p, graph, requests, "inputs", RayQueryAbi.requestByteSize(spec.rayCount()),
-                "requests");
-        requireRayBuffer(p, graph, hits, "outputs", RayQueryAbi.hitByteSize(spec.rayCount()), "hits");
+        if (spec.perRenderPixel()) {
+            // One ray a pixel: the buffers must follow the render size too, and only the stride can
+            // be checked here, since the count is the window's.
+            requireRenderRayBuffer(p, graph, requests, "inputs", RayQueryAbi.requestByteSize(1), "requests");
+            requireRenderRayBuffer(p, graph, hits, "outputs", RayQueryAbi.hitByteSize(1), "hits");
+        } else {
+            requireRayBuffer(p, graph, requests, "inputs", RayQueryAbi.requestByteSize(spec.rayCount()),
+                    "requests");
+            requireRayBuffer(p, graph, hits, "outputs", RayQueryAbi.hitByteSize(spec.rayCount()), "hits");
+        }
 
         // A request buffer nothing wrote holds whatever the allocation left there. Those are finite
         // floats often enough to trace, so the failure is a frame of plausible wrong answers.
@@ -907,12 +918,70 @@ public final class GraphValidator {
             throw new FornaxPackError(FILE, "pass." + p.name() + "." + key,
                     "'" + name + "' must be kind = \"buffer\" to carry ray " + role);
         }
+        if (target.bufferSize().perRenderPixel()) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + "." + key,
+                    "'" + name + "' is sized by the render size (count = \"render\"), so a fixed ray count "
+                            + "cannot be checked against it; declare rays = \"render\" or give the buffer a count");
+        }
         long have = target.bufferSize().sizeBytes();
         if (have < neededBytes) {
             throw new FornaxPackError(FILE, "pass." + p.name() + "." + key,
                     "'" + name + "' holds " + have + " bytes but " + p.rayQuery().rayCount()
                             + " rays need " + neededBytes + " for " + role
                             + "; a short buffer is written past its end with no error");
+        }
+    }
+
+    /**
+     * A {@code local_size} compute pass derives its dispatch from its first output's extent. A
+     * buffer has one only when it is {@code count = "render"}; a fixed buffer there would throw at
+     * runner build, which is the swallowed-retry abort the rest of this class exists to prevent.
+     * The domain is one-dimensional, so {@code local_size = [x, 1]}.
+     */
+    private static void checkBufferOutputLocalSize(PassSpec p, GraphSpec graph) {
+        if (p.outputs().isEmpty()) {
+            return;
+        }
+        TargetSpec first = graph.targets().get(p.outputs().get(0));
+        if (first == null || first.kind() != TargetKind.BUFFER) {
+            return;
+        }
+        String key = "pass." + p.name() + ".local_size";
+        if (first.bufferSize() == null || !first.bufferSize().perRenderPixel()) {
+            throw new FornaxPackError(FILE, key,
+                    "first output '" + first.name() + "' is a buffer with no render-basis extent to size a dispatch"
+                            + " from; declare it count = \"render\", or drop local_size and give the pass a"
+                            + " literal dispatch");
+        }
+        if (p.localSize().get(1) != 1) {
+            throw new FornaxPackError(FILE, key,
+                    "a count = \"render\" buffer is a one-dimensional domain, so local_size must be [x, 1], got "
+                            + p.localSize());
+        }
+    }
+
+    /** A {@code rays = "render"} query needs both buffers on the render basis with a record-sized stride. */
+    private static void requireRenderRayBuffer(PassSpec p, GraphSpec graph, String name, String key,
+            long recordBytes, String role) {
+        TargetSpec target = graph.targets().get(name);
+        if (target == null) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + "." + key,
+                    "'" + name + "' is not a declared target; a ray_query pass's " + role
+                            + " buffer must be a [targets.*] entry with kind = \"buffer\"");
+        }
+        if (target.kind() != TargetKind.BUFFER || target.bufferSize() == null) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + "." + key,
+                    "'" + name + "' must be kind = \"buffer\" to carry ray " + role);
+        }
+        if (!target.bufferSize().perRenderPixel()) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + "." + key,
+                    "'" + name + "' has a fixed count but the pass declares rays = \"render\"; a fixed buffer "
+                            + "drops the tail of any window larger than its count, so declare count = \"render\" on it");
+        }
+        if (target.bufferSize().strideBytes() < recordBytes) {
+            throw new FornaxPackError(FILE, "pass." + p.name() + "." + key,
+                    "'" + name + "' has stride_bytes " + target.bufferSize().strideBytes() + " but one " + role
+                            + " record is " + recordBytes + " bytes; a short stride is written past its end with no error");
         }
     }
 

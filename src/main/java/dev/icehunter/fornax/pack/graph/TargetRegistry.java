@@ -215,6 +215,13 @@ public final class TargetRegistry implements AutoCloseable {
         return spec == null ? TargetFilter.NEAREST : spec.filter();
     }
 
+    /** The pack-declared size of a buffer target, or null for a texture, an unknown name or an
+     * engine-owned buffer. What a runner needs to turn a buffer's bytes back into elements. */
+    public @Nullable BufferSize bufferSizeOf(String name) {
+        TargetSpec spec = graph.targets().get(name);
+        return spec == null || spec.kind() != TargetKind.BUFFER ? null : spec.bufferSize();
+    }
+
     /** Whether an optional engine-owned buffer was declared and enabled by this graph. */
     public boolean isEnabledBufferTarget(String name) {
         TargetSpec spec = graph.targets().get(name);

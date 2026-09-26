@@ -6,6 +6,8 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import dev.icehunter.fornax.FornaxMod;
+import dev.icehunter.fornax.metalfx.rt.RayQueryAbi;
+import dev.icehunter.fornax.pack.RayQuerySpec;
 import dev.icehunter.fornax.compat.SkyModCompat;
 import dev.icehunter.fornax.config.FornaxConfig;
 import dev.icehunter.fornax.pack.GeometrySlot;
@@ -1489,16 +1491,17 @@ public final class GraphRunner {
                             logMissingRunnerOnce(p.name());
                         } else {
                             try {
+                                int rays = liveRayCount(raySpec, requestBuffer.sizeBytes(), hitBuffer.sizeBytes());
                                 // Before any tier: a declared buffer keeps last frame's tier words,
                                 // and every fill would skip every record, handing the pack a frozen
                                 // answer that looks exactly like a fresh one.
                                 dev.icehunter.fornax.metalfx.rt.RayQueryInterop.clearHits(
-                                        hitBuffer.vkBuffer(), raySpec.rayCount());
+                                        hitBuffer.vkBuffer(), rays);
                                 dev.icehunter.fornax.rt.RayRouter.tierFloor(raySpec.minTier());
                                 dev.icehunter.fornax.rt.RayRouter.answer(
                                         new dev.icehunter.fornax.rt.BufferQuery(raySpec.kind(),
                                                 requestBuffer.vkBuffer(), hitBuffer.vkBuffer(),
-                                                raySpec.rayCount(), p.name(), raySpec.atlasUvEncoding()));
+                                                rays, p.name(), raySpec.atlasUvEncoding()));
                             } catch (RuntimeException e) {
                                 GpuFatalErrors.rethrowIfFatal(e);
                                 logPassRunFailureOnce(p.name(), e);
@@ -2262,6 +2265,20 @@ public final class GraphRunner {
             }
         }
         return false;
+    }
+
+    /**
+     * The rays a query traces this frame: its declared count, or, for a {@code rays = "render"}
+     * query, what both render-sized buffers hold this frame, capped at the ABI's ceiling. Read
+     * off the buffers rather than the render size so a frame where one buffer has not yet grown
+     * traces only what fits, never past an end.
+     */
+    static int liveRayCount(RayQuerySpec spec, long requestBytes, long hitBytes) {
+        if (!spec.perRenderPixel()) {
+            return spec.rayCount();
+        }
+        long fit = Math.min(requestBytes / RayQueryAbi.requestByteSize(1), hitBytes / RayQueryAbi.hitByteSize(1));
+        return (int) Math.max(0L, Math.min(fit, RayQueryAbi.MAX_RAYS));
     }
 
     /** {@link #computeGraphicsWaitStages} against the live compile values. */

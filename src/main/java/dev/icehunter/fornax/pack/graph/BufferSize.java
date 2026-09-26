@@ -22,7 +22,27 @@ package dev.icehunter.fornax.pack.graph;
  * trail -- the very cases this exists for), and it would still need the pack to state the stride,
  * since nothing engine-side knows {@code sizeof} the pack's own element struct.
  */
-public record BufferSize(int strideBytes, int count) {
+public record BufferSize(int strideBytes, int count, boolean perRenderPixel) {
+    /** A fixed count. */
+    public BufferSize(int strideBytes, int count) {
+        this(strideBytes, count, false);
+    }
+
+    public BufferSize {
+        if (perRenderPixel && count != 0) {
+            throw new IllegalArgumentException("a per-render-pixel buffer carries no fixed count, got " + count);
+        }
+    }
+
+    /**
+     * {@code count = "render"}: one element per render pixel, sized from the render size by
+     * {@link TargetPlan} and re-sized in place with the window like a texture target. For an
+     * element that is a pixel: a fixed count drops the tail of any window larger than the literal.
+     */
+    public static BufferSize perRenderPixel(int strideBytes) {
+        return new BufferSize(strideBytes, 0, true);
+    }
+
     /**
      * Hard ceiling on one pack-declared buffer, refused at load rather than passed to
      * {@code vmaCreateBuffer}. 1 GiB is far past any plausible pack structure (the engine's own
@@ -39,6 +59,25 @@ public record BufferSize(int strideBytes, int count) {
      * {@link TargetRegistry#ensureBufferSize}'s positivity check as a confusing runtime failure
      * rather than the load-time refusal {@code PackTomlLoader} gives it here. */
     public long sizeBytes() {
+        if (perRenderPixel) {
+            throw new IllegalStateException("a per-render-pixel buffer has no size until the render size is known");
+        }
         return (long) strideBytes * (long) count;
+    }
+
+    /** The byte count at this render size: the fixed product, or one element per pixel, capped at
+     * {@link #MAX_SIZE_BYTES} so a window past the cap gets a full buffer rather than none. */
+    public long sizeBytes(int renderWidth, int renderHeight) {
+        if (!perRenderPixel) {
+            return sizeBytes();
+        }
+        long pixels = Math.max(1L, (long) renderWidth * (long) renderHeight);
+        long fit = MAX_SIZE_BYTES / strideBytes;
+        return (long) strideBytes * Math.min(pixels, fit);
+    }
+
+    /** Elements at this render size; what a run-time consumer sizes its dispatch by. */
+    public long countAt(int renderWidth, int renderHeight) {
+        return sizeBytes(renderWidth, renderHeight) / strideBytes;
     }
 }
