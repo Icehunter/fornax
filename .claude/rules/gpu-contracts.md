@@ -53,6 +53,14 @@ Related: a builtin name accepted by the graph validator but unresolvable by the 
 loads clean and then silently disables the pass that referenced it for the rest of its lifetime.
 `BuiltinResolutionContractTest` pins the two lists together — extend it when you add a builtin.
 
+## Signed `%` only sees non-negative operands
+
+GLSL `%` becomes `OpSMod`, and at least one shipping NVIDIA driver evaluates that as an unsigned
+modulo when the left operand is negative (`-1 % 9` is 3). `((a % d) + d) % d` therefore wraps
+correctly near the origin and maps every negative coordinate to the wrong slot elsewhere, with no
+error. Write wraps as `a >= 0 ? a % d : d - 1 - ((-1 - a) % d)`, and treat any `%` whose left
+operand can go negative as a bug. `docs/ARCHITECTURE.md` §12 has the measured truth table.
+
 ## Engine-owned shader assets
 
 Under `src/main/resources/assets/fornax/`:
@@ -92,6 +100,8 @@ reads a GPU result the frame it was written is wrong. The profiler grades agains
 90 FPS budget.
 
 ## Checklist
+
+- [ ] No `%` whose left operand can be negative; wraps use the sign-folded form
 
 - [ ] Raster pass is `#version 330`, compute is `450`; no version raised just to reach one function
 - [ ] No scalar added after a vec3 in any std140 block

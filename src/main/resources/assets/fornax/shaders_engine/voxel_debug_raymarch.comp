@@ -56,10 +56,11 @@ uint packRGBA(vec3 c) {
     return (255u << 24) | (q.b << 16) | (q.g << 8) | q.r;
 }
 
-// floorMod: matches VoxelWindow.slotFor's Math.floorMod exactly. GLSL's built-in `%` is
-// truncated (can be negative) for negative operands, so it is NOT used for the toroidal wrap.
+// floorMod: matches VoxelWindow.slotFor's Math.floorMod exactly. `%` only ever sees non-negative
+// operands: what a driver returns for a negative left operand is not portable (see
+// docs/ARCHITECTURE.md, Known laws), so the negative half is folded onto the positive one.
 int floorMod(int a, int m) {
-    return ((a % m) + m) % m;
+    return a >= 0 ? a % m : m - 1 - ((-1 - a) % m);
 }
 
 // The palette-index byte for a voxel, read out of the 4-bytes-per-uint payload buffer.

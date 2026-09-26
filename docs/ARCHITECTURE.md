@@ -2999,6 +2999,20 @@ readback content and driver behavior. The capture frame's timing includes readba
   an explicit `(device const uint*)` cast at the call site, confirmed against this machine's
   `metal_raytracing` header through the real compiler error, not assumed from another ray-tracing
   API's shape.
+- **GLSL `%` on a signed int with a negative left operand is not portable; only feed it
+  non-negative operands.** glslang compiles `%` to `OpSMod`, and at least one shipping NVIDIA
+  Vulkan driver evaluates that as an unsigned modulo: `-1 % 9` is 3, `-45 % 9` is 4, the residues
+  of `2^32 + a`. Positive operands are exact, so the usual `((a % d) + d) % d` wrap reads correctly
+  near the origin and fails only where a section coordinate is negative, which is half the world.
+  For a toroidal window the failure is total and logs nothing: every negative-coordinate section
+  maps to the wrong slot, the owner check in the status and source kernels then fails for all of
+  them, lamps vanish, the analytic light list is empty and voxel lookups return another section's
+  data. Apple's compiler gets `%` right, so macOS never shows it. A wrap that never hands `%` a
+  negative value is exact everywhere: `a >= 0 ? a % d : d - 1 - ((-1 - a) % d)`
+  (`voxel_debug_raymarch.comp`'s `floorMod`). The headless harness under
+  `src/test/java/dev/icehunter/fornax/rt/vulkan/` (`HeadlessVulkan`, `CapturedComputeReplayTest`)
+  replays a captured dispatch on the real device with one construct swapped at a time, which is how
+  such a driver fact is measured.
 
 ### When a voxel section counts as known
 

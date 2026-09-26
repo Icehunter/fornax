@@ -771,6 +771,12 @@ sample between pixels and the result is blocky.
 **Something must write `builtin.output`.** A graph that never writes to the screen loads without
 complaint and renders nothing.
 
+**Never apply `%` to a signed int that can be negative.** Some drivers evaluate it as an unsigned
+modulo (`-1 % 9` gives 3), so the textbook wrap `((a % d) + d) % d` maps every negative section
+coordinate to the wrong voxel slot on those machines, with no error, while reading correctly near
+the world origin and on other machines. Fold the sign first: `a >= 0 ? a % d : d - 1 - ((-1 - a) %
+d)` hands `%` only non-negative operands and is exact everywhere.
+
 **Annotation syntax is matched anywhere in a file, including inside comments.** A comment that
 happens to contain `//[` followed by the annotation shape is parsed as a malformed option and fails
 the load. If you need to write about the syntax in a comment, break it up.
