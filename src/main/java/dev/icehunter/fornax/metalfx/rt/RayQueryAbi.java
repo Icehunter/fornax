@@ -37,11 +37,12 @@ public final class RayQueryAbi {
     public static final int HIT_WORDS = 9;
 
     /**
-     * 4 Mi rays: 128 MiB of request and 64 MiB of hit buffer. Above a one-ray-per-pixel pass at
-     * 1440p (3.7 Mi) and below anything that would exhaust a unified-memory budget by accident. A
-     * caller needing more dispatches more than once rather than growing this.
+     * 16 Mi rays: 512 MiB of request and 576 MiB of hit buffer at the ceiling. Above a
+     * one-ray-per-pixel pass at 4K (8.3 Mi) and 5K (14.7 Mi), which a {@code rays = "render"} query
+     * reaches on a large window, and below anything that would exhaust a unified-memory budget by
+     * accident. A caller needing more dispatches more than once rather than growing this.
      */
-    public static final int MAX_RAYS = 4 * 1024 * 1024;
+    public static final int MAX_RAYS = 16 * 1024 * 1024;
 
     /** Word offset of the hit distance within a hit record. Meaningful only once answered. */
     public static final int HIT_DISTANCE_WORD = 0;

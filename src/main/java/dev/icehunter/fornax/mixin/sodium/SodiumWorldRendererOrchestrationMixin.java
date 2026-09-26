@@ -367,7 +367,7 @@ public class SodiumWorldRendererOrchestrationMixin {
         // last frame's content with nothing marking it stale.
         float rtRadius = Math.max(0f, Math.min(GraphRunner.rayTracedShadowDistanceBlocks(), shadowDistance));
         org.joml.Matrix4f lightViewProj = lightMatrices.viewProj();
-        dev.icehunter.fornax.rt.RayRouter.provider(dev.icehunter.fornax.metalfx.rt.MeshMetalProvider.class)
+        dev.icehunter.fornax.rt.RayRouter.provider(dev.icehunter.fornax.rt.CasterCapture.class)
                 // The caster source is renderer-owned and can only be read here, where this frame's
                 // uploads are complete; it travels by its own type rather than inside the neutral
                 // request, so the coupling is visible at this call site.

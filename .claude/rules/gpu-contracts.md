@@ -83,7 +83,10 @@ Raster passes are `#version 330`, compute passes `#version 450`. 330 has no comp
 SSBOs, no `std430`, no writable storage images, no atomics, no `shared` memory and no real memory
 barriers, so anything touching a buffer or talking between invocations has to be 450. Descriptor
 sets, explicit bindings, push constants, specialization constants and subpass inputs are Vulkan
-GLSL only, in neither version.
+GLSL only, in neither version. The one exception is the engine's own ray kernels under
+`shaders_engine/rt_*.comp`: `GL_EXT_ray_query` and `GL_EXT_buffer_reference` are 4.60 extensions,
+so those are `#version 460` and compile through `ComputeShaderCompiler.SpirvTarget.VULKAN_1_2`;
+nothing a pack writes reaches that path.
 
 A higher version is a different language, not a superset: nothing rewrites new syntax into old, and
 450 buys no speed. Do not raise a raster pass to reach one function. Ask for the function instead:

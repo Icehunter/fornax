@@ -59,6 +59,8 @@ With no pack active, or with shaders disabled in the config, every one of these 
 | `.profile` | GPU per-pass timing (`PassTimer` for graphics-encoder work and `ComputePassTimer` for raw compute-queue dispatches, both ring-buffered across frames-in-flight) feeding a pure-JVM rolling-stats aggregator (`FrameProfiler`); `ProfilerOverlay` (top-left HUD) and `ProfilerLogDump` (full-table log dump) read it, both graded against the 11.1 ms / 90 FPS budget |
 | `.pipeline` | Shared per-frame state: `GBuffer`/`GBufferManager` (the G-buffer is the set of full-screen images, such as surface colour, normal direction, and depth, that the deferred step stores before lighting runs), `FornaxChunkVertex`, the render-state latch, push-constant layout, previous-frame camera transform, per-thread material ID, the engine-guaranteed `SceneHistory` target, `FrameCameraState` (this frame's inverse projection*modelView matrix as a plain float array, for the Metal ray-tracing pass) |
 | `.rt` | Platform-neutral ray vocabulary and the cascade that walks it: `RayTier` (which traversal answered a ray and over what geometry; the ordinal is the wire value carried in a result's G channel and in hit-record word 7), `RayQueryKind` (visibility versus closest hit, which decides how much of a record a provider fills and how early it may stop), `RayProvider`/`RayReadiness` (one traversal, and whether it can answer this frame), `CelestialFill`/`BufferQuery` (the two request shapes) and `RayRouter` (static, render-thread confined: installs providers, sorts them best-first, evaluates readiness once per frame, and runs each over what the tiers above left unanswered). The Metal traversals themselves live in `.metalfx.rt` |
+| `.rt.mesh` | What every mesh tier starts from, with no backend in it: `CasterSource` (one uploaded terrain mesh as a caster: section, pass, mutation stamp, arena range), `TerrainCasterSnapshot` (the render-thread read of the renderer's regions into sources, selected by a light-volume or camera-window box test that includes the [-8, 24) vertex overhang) and `MeshGrid` (the 256-block origin float coordinates are rebased onto). |
+| `.rt.vulkan` | The Vulkan ray-tracing backend. Device level: `VulkanRtRequirements` (the pure decision of whether a device can trace: extensions, features, Vulkan 1.2), `VulkanRtSupport` (the recorded verdict crossed with the setting), `RtAllocator` (a second VMA allocator created with the device-address flag Blaze3D's lacks), `RtBuffer`, `AccelerationStructures` (BLAS over decoded float triangles, TLAS over `InstanceRecord`s, sizing, build commands, barriers). Tier level: `RtTimeline` (the timeline semaphore the two queues hand builds across), `MeshVulkanTracer` (the frame's graphics stream copies changed meshes out of the arena and traces the live structure; decode, every BLAS build with its own scratch region and the TLAS build are submitted on the compute queue and adopted through a GPU-side wait once the host sees the timeline pass; per-revision BLAS cache, solid meshes opaque and cutout meshes not, retirement gated on an encoder fence from the frame that adopted a replacement; nothing in the tier flushes, submits or host-waits mid-frame) and `MeshVulkanProvider`, the `HARDWARE_MESH` tier installed off macOS. Kernels: `rt_mesh_decode.comp`, `rt_mesh_shadow.comp`, `rt_ray_query.comp`. |
 | `.screen` | Pack settings UI: `PackManageScreen` (the pack-agnostic YACL "Manage" entry point, a Shader Options bridge; Import/Export/Defaults live as `mixin.yacl.CategoryTabMixin`-injected chrome, scoped via `PackChromeActions`) and its session-free `PackValuesActions` helper, the legacy bespoke option pages (`PackSettingsScreen`), the YACL-hosted engine-settings factory (`FornaxSettingsScreen`) opened from the pause/title menu, Sodium's video settings, and the open-settings keybind, and its custom Shader Packs tab (`FornaxPacksTab` + the pure `PackListState`) |
 | `.util` | VRAM estimation, renderer-reload request plumbing, sun-direction math |
 
@@ -1507,7 +1509,7 @@ be restated here.
 | `VulkanRenderPipelineMixin` | `VulkanRenderPipeline` | Declare the widened 60-byte push-constant range on every terrain-family Vulkan pipeline layout | WrapOperation |
 | `WindowMixin` | `Window` | Report the supersampled dimensions while a scaled frame is in flight, so downstream size queries stay consistent | ModifyReturnValue x2 |
 
-**Raw-Vulkan-targeting** (6):
+**Raw-Vulkan-targeting** (7):
 
 | Mixin | Target | Purpose | Shape |
 |---|---|---|---|
@@ -1517,6 +1519,7 @@ be restated here.
 | `VulkanGpuBufferSharingMixin` | `VulkanGpuBuffer.Direct` | Give uniform allocations concurrent access to distinct graphics and compute families, including buffers allocated before pack activation | ModifyArg |
 | `VulkanCaptureSamplerStateMixin` | `VulkanGpuSampler` | Retain the exact native sampler creation arguments only with startup capture configuration | ModifyArg, Unique |
 | `VulkanDeviceExtensionMixin` | `VulkanDevice` | Add `VK_EXT_metal_objects` to the requested device-extension set on supported macOS systems | ModifyExpressionValue |
+| `VulkanDeviceRayTracingMixin` | `VulkanBackend` | Off macOS, add `VK_KHR_acceleration_structure`, `VK_KHR_ray_query` and `VK_KHR_deferred_host_operations` to the device-extension set and the `accelerationStructure`, `rayQuery` and `bufferDeviceAddress` features to the `VulkanFeature` set at `createDevice` HEAD, when the device advertises all of them and is Vulkan 1.2+; record the verdict in `VulkanRtSupport` | Inject |
 
 **YACL-targeting** (3):
 
@@ -2379,7 +2382,65 @@ into `MeshMetalProvider`, the cascade's `HARDWARE_MESH` tier. `GraphRunner.rebui
 `RayRouter` wherever `Objc.PLATFORM_SUPPORTED` holds, and `closeCurrent` closes the router rather
 than the provider by name. The engine defaults to automatic backend selection; None and absent or
 disabled subscriptions short-circuit before hardware probing, mesh snapshots or native dispatch.
-Metal RT is the implemented backend. The stored `rayTracing` enum retains compatibility, while UI
+Metal is the ray-tracing backend on macOS. On every other platform `VulkanDeviceRayTracingMixin`
+asks Blaze3D's device for `VK_KHR_acceleration_structure`, `VK_KHR_ray_query` and
+`VK_KHR_deferred_host_operations` plus the `accelerationStructure`, `rayQuery` and
+`bufferDeviceAddress` features at `vkCreateDevice`, the only moment they can be enabled.
+`VulkanRtRequirements.decide` makes that call from the device's advertised extensions, feature query
+and API version (1.2 or newer, because ray query shaders are SPIR-V 1.4), and `VulkanRtSupport`
+records the verdict with its reason. Off macOS `GraphRunner.rebuild` always installs
+`MeshVulkanProvider`, the same `HARDWARE_MESH` tier from the same `CasterCapture` hand-off, and the
+tier's per-frame `readiness()` carries the verdict and the setting: a pack rebuild can run before
+Blaze3D has created the Vulkan device, so an install-time gate would answer "no" once and never be
+asked again. There is no Vulkan voxel tier: a Vulkan structure holds the whole light volume that the
+Metal voxel window exists to reach past.
+
+The tier's frame is one stream on the graphics queue, and nothing in it flushes, submits or
+host-waits mid-frame. `TerrainCasterSnapshot` reads the light-volume casters, unioned with the
+96-block query window when the pack declares buffer queries. `MeshVulkanTracer.schedule` diffs them
+against the live structure's cache and records, in the frame's stream, a copy of each changed mesh's
+packed vertices out of Sodium's arena (the arena is the graphics queue's). The build is
+asynchronous. The decode (`rt_mesh_decode.comp`, descriptorless: three device addresses and a count
+in a push block, into float triangles and 32-byte primitive records), one bottom-level build per
+changed mesh (each with its own scratch region inside a 256 MB budget, so they run side by side) and
+the top-level build over every mesh (an `InstanceRecord` per mesh and a table of primitive-record
+addresses indexed by instance custom index) go into one command buffer on the tier's own
+compute-family pool, recorded at once and submitted on the compute queue under `SHARED_QUEUE_LOCK`
+only after an encoder fence shows the copying frame has completed. That submission waits on the GPU
+for the timeline value the copying frame signalled and signals a later value when done. The host
+polls that value with `vkGetSemaphoreCounterValue`; the first frame that sees it passed places a
+wait for it on its own submission (already satisfied, so free, and what makes the build's writes
+visible to this queue), adopts the structure and queues what it replaced for retirement behind an
+encoder fence that completes with the frame's normal submission. A change that lands while a build
+is in flight is found by the next diff. One build takes at most `BUILD_BUDGET_TRIANGLES` (half a
+million) of changed triangles, nearest section first; a changed mesh past the budget keeps its
+previous structure in the scene and a new one stays out until a later build reaches it, so the slab
+of sections that crosses the window's edge every 16 blocks of travel drains over a few round trips
+instead of landing its allocations and build time in one frame. A mesh the snapshot does not name is
+kept for two seconds (`ABSENCE_GRACE_NANOS`) before it leaves the structure: a section being
+re-meshed is absent for a frame or two, and a structure built without it would hold that hole for a
+whole build round trip, with every lamp ray behind it leaking; kept, the section returns at the same
+revision and rebuilds nothing. Until the first adoption the sun trace publishes a cleared image and
+queries stay unanswered, which the pack reads as raster.
+
+`trace` runs `rt_mesh_shadow.comp` against the live structure, with the camera rebased onto that
+structure's grid origin, into the tier's own RGBA32F storage image, and `publishCelestialVisibility`
+copies that into `TerrainShadowResult` where the pack first reads it. Buffer-form queries run
+`rt_ray_query.comp` against the same structure, bound directly to the pack's request and hit
+buffers: no copy in, no copy out, which is the round trip the Metal tier pays for crossing APIs. The
+kernel is the Metal one's word table byte for byte (ABI 4, nine-word hits, fill mode, both atlas
+encodings); the one structural difference is that Vulkan has no per-primitive data pointer, so a hit
+reaches its mesh's records through the table of primitive addresses. A pack that declares queries
+with ray-traced shadows off gets a structure built from the 96-block camera window, scheduled once
+per frame. Every buffer comes from `RtAllocator`, VMA with device addresses, so a thousand sections
+cost a handful of device allocations, and every `RtBuffer` is `VK_SHARING_MODE_CONCURRENT` across
+the two families where they differ, so no ownership transfer is ever owed. The pack's readers follow
+the trace in the same stream; a reader the graph places on the compute queue waits through
+`ComputeGraphicsWaits`, and `computeGraphicsWaitStages` waits for a request writer at the compute
+stage as well as transfer, since this reader is a dispatch where the Metal reader is a copy. A
+solid-pass mesh is built `VK_GEOMETRY_OPAQUE_BIT_KHR` and a cutout-pass mesh is not, so the hardware
+commits stone without the kernel's loop and only leaves, panes and vines reach the alpha test.
+The stored `rayTracing` enum retains compatibility, while UI
 labels describe backend selection rather than a second pack feature switch.
 
 `SodiumWorldRendererOrchestrationMixin.fornax$renderShadowPass` drives it: `RayRouter.beginFrame()`
@@ -2584,6 +2645,35 @@ readback content and driver behavior. The capture frame's timing includes readba
   pairing structural rather than a convention. The buffer form has the same law with the tier in
   word 7: an untraced hit buffer reads back zero-filled, so the tier word, not the sign of the
   distance, is what separates an answer from memory nothing ever wrote.
+
+- **shaderc's default target is SPIR-V 1.0, and ray query needs 1.4.** `ComputeShaderCompiler`
+  sets no target environment for pack shaders, so every pack compute module is Vulkan 1.0 /
+  SPIR-V 1.0, which is also MoltenVK's comfortable floor. glslang does not refuse
+  `GL_EXT_ray_query` at that target: it emits the capability into a 1.0 module, and the rejection
+  comes from the driver when the pipeline is created, because `VK_KHR_ray_query` requires
+  `VK_KHR_spirv_1_4`. So a ray kernel compiled at the default fails late and looks like a driver
+  fault. The engine's own ray kernels compile through `SpirvTarget.VULKAN_1_2`, a second options
+  object, and `ComputeShaderCompilerTest` pins the version word both ways. Raising the shared
+  default instead would silently change every pack module.
+
+- **Blaze3D's allocator cannot hand out addressable memory.** Its VMA allocator was created without
+  `VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT`, because Blaze3D never enables the feature for
+  itself, and a `vkGetBufferDeviceAddress` on such memory returns 0 rather than failing. Every buffer
+  an acceleration-structure build touches (vertices, instances, scratch, the structure itself) is an
+  `RtBuffer` from `RtAllocator`, a second VMA allocator created with that flag. Sodium's own vertex
+  buffers come from Blaze3D's allocator and can never be a build input directly, which is why the
+  mesh tier copies.
+
+- **An opaque triangle geometry never reaches the alpha test.** `VK_GEOMETRY_OPAQUE_BIT_KHR` on a
+  BLAS geometry, or `FORCE_OPAQUE` on an instance, ends traversal at the first triangle without
+  surfacing it as a candidate, so the ray-query loop's cutout test never runs. For a solid-pass
+  mesh that is the fast path; for a cutout-pass mesh every leaf, pane and vine would block light
+  like stone, and every ray would still return a hit, so nothing would report it. The flag is
+  therefore a per-mesh decision made in one place, `AccelerationStructures.triangleGeometryFlags`,
+  from the caster's pass (`!cutout`), the same decision for sizing and for building, and the ray
+  flags never override it in either direction; `InstanceRecord` refuses the instance flag. The
+  opposite mistake, `gl_RayFlagsNoOpaqueEXT` on every ray, forces every solid triangle through the
+  shader loop and costs the sun trace most of a frame.
 
 - **A ray provider writes only what is still unanswered.** `RayRouter` walks installed providers
   from the highest tier down, so a provider that overwrites an answered texel or record destroys a
@@ -3031,6 +3121,33 @@ readback content and driver behavior. The capture frame's timing includes readba
   graphics stream, and a seed that reads a count of zero or a half-built list aims its rays at
   nothing. Only a device whose compute family differs from graphics can show it; a shared family
   orders the two by submission. Neither edge logs anything.
+- **A caster that is absent from one snapshot is not gone.** Sodium's section storage has no data
+  pointer while a section is re-meshed, so `TerrainCasterSnapshot` omits it for a frame or two;
+  a structure diffed strictly against the snapshot drops the mesh, builds a hole, and with the
+  build asynchronous that hole is live for the round trip: every lamp and bounce ray that should
+  have stopped at that section passes through it, and nothing logs it. `MeshVulkanTracer.schedule`
+  keeps an absent mesh for `ABSENCE_GRACE_NANOS`.
+- **A Blaze3D encoder's `waitSemaphore` closes the current command buffer.** It ends the
+  command buffer being recorded and opens a new submission stage that carries the wait, so it must
+  be called before a frame's recording (`recordIntoStream`) and never inside it: called inside, the
+  commands recorded so far are submitted without the wait and the ones after it cannot see the
+  buffer they were being recorded into. `MeshVulkanProvider.adopt` runs first for that reason.
+  `signalSemaphore` ends the command buffer the same way, so it is placed after the recording,
+  once the copies it covers are in the closed buffer. Neither operation adds a queue submission:
+  Blaze3D's `Submission` collects them into stages of one `vkQueueSubmit2` at the frame's submit, a
+  wait opening a new stage that gates only the command buffers recorded after it.
+- **A compute-queue submission must never wait on a value the current frame's graphics
+  submission signals.** Blaze3D signals what an encoder was asked to signal only when the frame
+  submits, and that frame's submission waits on the graph's compute passes; a compute submission
+  queued ahead of those passes, waiting on that signal, closes the cycle and the first terrain frame
+  never ends, with no error anywhere. `MeshVulkanTracer.submitIfCopiesDone` submits a build only
+  after a fence on the copying frame has passed, so the wait it carries is satisfied before it is
+  queued.
+- **A structure built on one queue family is traversed on another only through a semaphore.**
+  Polling the timeline on the host proves the build finished; it does not make its writes visible
+  to the graphics queue. The adopting frame's submission waits for the same value it polled, which
+  is free by then and is the visibility operation. Skipping it traces a structure that is complete
+  on the compute queue and undefined on the graphics one.
 - **GLSL `%` on a signed int with a negative left operand is not portable; only feed it
   non-negative operands.** glslang compiles `%` to `OpSMod`, and at least one shipping NVIDIA
   Vulkan driver evaluates that as an unsigned modulo: `-1 % 9` is 3, `-45 % 9` is 4, the residues

@@ -29,6 +29,9 @@ they are not compatible with it. A pack is plain-text TOML plus GLSL;
 - Sodium 0.9.1 or 0.9.2 for Minecraft 26.2. Fabric Loader enforces this at launch and will refuse
   to start on a version outside that range. Tested against 0.9.1 and 0.9.2-alpha.4.
 - Java 25 or newer
+- For ray tracing off macOS: a Vulkan 1.2 driver exposing `VK_KHR_acceleration_structure` and
+  `VK_KHR_ray_query` (GeForce RTX, Radeon RX 6000 and newer, Arc). Without it the engine runs the
+  pack's own fallback and the log says which requirement the driver missed.
 - `--enable-native-access=ALL-UNNAMED` in the launcher JVM arguments, required by MetalFX's Java
   FFM bridge. Without it, Java 25 prints the JEP 472 restricted-native-access warning now, and will
   refuse to start on a future JDK.

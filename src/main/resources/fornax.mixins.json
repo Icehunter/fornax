@@ -83,6 +83,7 @@
     "vulkan.VulkanCommandEncoderPartialFlushMixin",
     "vulkan.VulkanConstStorageTextureMixin",
     "vulkan.VulkanDeviceExtensionMixin",
+    "vulkan.VulkanDeviceRayTracingMixin",
     "vulkan.VulkanGpuBufferSharingMixin",
     "vulkan.VulkanGpuTextureStorageSharingMixin",
     "vulkan.VulkanRenderPassCommandBufferAccessor",

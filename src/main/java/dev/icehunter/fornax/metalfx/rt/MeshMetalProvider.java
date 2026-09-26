@@ -59,7 +59,7 @@ import java.util.Set;
  * that GI and lamp queries need. Sun-shadow tracing itself keeps the sun's own receiving distance;
  * only what the structure holds grows.
  */
-public final class MeshMetalProvider implements RayProvider {
+public final class MeshMetalProvider implements dev.icehunter.fornax.rt.CasterCapture {
     private record Source(MeshShadowTracer.Key key, long revision, VulkanGpuBuffer buffer,
                           TerrainMeshSelection.VertexRange range) {}
     private record Copy(Source source, MetalRtGeometry.ExportedBuffer buffer) {}

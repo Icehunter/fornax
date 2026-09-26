@@ -25,6 +25,27 @@ public final class ComputeShaderCompiler {
     // a one-shot render-thread setup, never from a worker thread.
     private static long compiler = 0L;
     private static long options = 0L;
+    // A second options object for shaders that need a newer SPIR-V than the default: same
+    // optimisation policy, plus a target environment. Kept separate rather than toggled on the
+    // shared object so the default path is byte-identical whether or not a ray-query kernel was
+    // ever compiled in this process.
+    private static long vulkan12Options = 0L;
+
+    /**
+     * Which SPIR-V a compile targets. shaderc's default is Vulkan 1.0 / SPIR-V 1.0, and every pack
+     * compute shader stays there: a higher target is a different module, and MoltenVK's translator
+     * has its own ceiling. {@code GL_EXT_ray_query} is only legal in a SPIR-V 1.4 or newer module
+     * ({@code VK_KHR_ray_query} requires {@code VK_KHR_spirv_1_4}), yet glslang will emit it into a
+     * 1.0 module without complaint; the rejection comes from the driver at pipeline creation. So the
+     * engine's own ray kernels ask for {@link #VULKAN_1_2} explicitly, which a device that passed
+     * {@code VulkanRtRequirements} (Vulkan 1.2 or newer) accepts.
+     */
+    public enum SpirvTarget {
+        /** shaderc's default: Vulkan 1.0, SPIR-V 1.0. Every pack shader. */
+        DEFAULT,
+        /** {@code shaderc_env_version_vulkan_1_2}: SPIR-V 1.5, which carries ray query. */
+        VULKAN_1_2
+    }
 
     private static long compilerHandle() {
         if (compiler == 0L) {
@@ -49,9 +70,32 @@ public final class ComputeShaderCompiler {
         return compiler;
     }
 
+    private static long optionsFor(SpirvTarget target) {
+        compilerHandle();
+        if (target == SpirvTarget.DEFAULT) {
+            return options;
+        }
+        if (vulkan12Options == 0L) {
+            long created = Shaderc.shaderc_compile_options_initialize();
+            if (created == 0L) {
+                throw new ComputeShaderCompileException("shaderc_compile_options_initialize (Vulkan 1.2) failed");
+            }
+            Shaderc.shaderc_compile_options_set_optimization_level(created,
+                    Shaderc.shaderc_optimization_level_performance);
+            Shaderc.shaderc_compile_options_set_target_env(created,
+                    Shaderc.shaderc_target_env_vulkan, Shaderc.shaderc_env_version_vulkan_1_2);
+            vulkan12Options = created;
+        }
+        return vulkan12Options;
+    }
+
     /** Releases the shared compiler/options, if created. Best-effort process-shutdown tidiness --
      * not required for correctness, since process exit reclaims everything either way. */
     public static void shutdown() {
+        if (vulkan12Options != 0L) {
+            Shaderc.shaderc_compile_options_release(vulkan12Options);
+            vulkan12Options = 0L;
+        }
         if (compiler != 0L) {
             Shaderc.shaderc_compile_options_release(options);
             Shaderc.shaderc_compiler_release(compiler);
@@ -92,7 +136,17 @@ public final class ComputeShaderCompiler {
      * thing on this path: nothing preprocesses it out of {@code RuntimeShaderPack.sourceOrNull}'s text.
      */
     public static ByteBuffer compileToSpirv(String glslSource, String debugName, int kind) {
+        return compileToSpirv(glslSource, debugName, kind, SpirvTarget.DEFAULT);
+    }
+
+    /**
+     * As {@link #compileToSpirv(String, String, int)}, targeting {@code target}. Only the engine's
+     * own ray kernels pass anything but {@link SpirvTarget#DEFAULT}; see the enum for why the
+     * default is never raised for a pack.
+     */
+    public static ByteBuffer compileToSpirv(String glslSource, String debugName, int kind, SpirvTarget target) {
         long compilerHandle = compilerHandle();
+        long options = optionsFor(target);
         // Heap-allocated (MemoryUtil.memUTF8), not the CharSequence overload: that one auto-encodes
         // its arguments through the calling thread's IMPLICIT MemoryStack frame, which LWJGL sizes
         // small (64 KiB default) for short-lived per-call native arguments. A fully-flattened

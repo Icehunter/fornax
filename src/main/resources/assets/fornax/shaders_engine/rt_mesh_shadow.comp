@@ -1,0 +1,141 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+// Engine-owned: celestial visibility at the exact-mesh tier, traced through a Vulkan ray query
+// against the structure rt_mesh_decode's triangles were built into. One invocation per shadow-map
+// texel. Nothing here is a look: the warp is shadow.vsh's own, the cutout test is the raster shadow
+// pipeline's own, and the record it writes is the RayTier/validity contract every tier shares.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// 176 bytes, std140. Two column-major matrices, the camera, then five scalars. No scalar follows a
+// vec3 here; the camera is a vec4 on purpose. MeshVulkanTracer.CONSTANT_BYTES must agree.
+layout(set = 0, binding = 0, std140) uniform MeshShadowConstants {
+    mat4 inverseLightVp;
+    mat4 lightVp;
+    vec4 camera;
+    float radius;
+    float bias;
+    uint resolution;
+    float filterGuardUv;
+    // RayTier.ordinal() of this traversal. Written into G on a traced texel so a reader can tell
+    // which tier answered without knowing which pass ran.
+    uint tier;
+    // Nonzero: candidates pass the atlas cutout test. Zero (the fornax.rt.vulkan.alphaTest
+    // property) commits every candidate, which tells a structure the rays cannot find from an
+    // atlas sample that rejects everything.
+    uint alphaTest;
+} c;
+
+layout(set = 0, binding = 1) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 2) uniform sampler2D atlas;
+layout(set = 0, binding = 3, rgba32f) uniform writeonly image2D result;
+// One entry per instance, indexed by the instance's custom index: the device address of that
+// mesh's primitive records. Vulkan has no per-primitive data pointer of its own.
+layout(set = 0, binding = 4, std430) readonly buffer MeshTable { uvec2 primitivesAddress[]; };
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Primitives { uint words[]; };
+
+const uint WORDS_PER_PRIMITIVE = 8u;
+// Raster ABI: engine shaders/blocks/shadow.fsh discards alpha below this for BOTH passes. A ray
+// that disagrees with the rasteriser about which texels are holes shadows foliage differently
+// from the way it is drawn.
+const float CUTOUT_ALPHA = 0.1;
+
+vec2 primitiveUv(uint instance, uint primitive, vec2 bary) {
+    Primitives prims = Primitives(primitivesAddress[instance]);
+    uint o = primitive * WORDS_PER_PRIMITIVE;
+    vec2 uv0 = vec2(uintBitsToFloat(prims.words[o + 2u]), uintBitsToFloat(prims.words[o + 3u]));
+    vec2 uv1 = vec2(uintBitsToFloat(prims.words[o + 4u]), uintBitsToFloat(prims.words[o + 5u]));
+    vec2 uv2 = vec2(uintBitsToFloat(prims.words[o + 6u]), uintBitsToFloat(prims.words[o + 7u]));
+    return uv0 * (1.0 - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y;
+}
+
+// A receiver filter can request a neighbouring shadow UV even when that ray's centre misses the
+// cylinder. Bound the displacement of that ray over the declared per-axis UV guard. Differentiating
+// p(q)=(1-b)q/(1-b|q|) gives radial eigenvalue (1-b)/(1-b|q|)^2, which bounds the tangential one.
+// The farthest corner of q +/- 2*guard bounds |q|; sqrt(2)*2*guard bounds the square's displacement.
+bool receiverRayRelevant(vec2 q, vec3 origin, vec3 extent) {
+    float radius = c.radius;
+    if (c.filterGuardUv > 0.0) {
+        vec2 farthest = abs(q) + 2.0 * c.filterGuardUv;
+        float denominator = 1.0 - c.bias * length(farthest);
+        // A warp pole or a non-affine projection has no finite bound from these two columns.
+        // Keep the centre ray; a conservative extra trace cannot remove a receiver's shadow.
+        if (!(denominator > 0.0) || c.inverseLightVp[0].w != 0.0 || c.inverseLightVp[1].w != 0.0
+                || c.inverseLightVp[2].w != 0.0 || c.inverseLightVp[3].w == 0.0) return true;
+        vec2 worldX = c.inverseLightVp[0].xz / c.inverseLightVp[3].w;
+        vec2 worldY = c.inverseLightVp[1].xz / c.inverseLightVp[3].w;
+        // Frobenius norm bounds the world-XZ projection's operator norm, including tilted sun axes.
+        float projectionBound = sqrt(dot(worldX, worldX) + dot(worldY, worldY));
+        float warpBound = (1.0 - c.bias) / (denominator * denominator);
+        radius += projectionBound * warpBound * length(vec2(2.0 * c.filterGuardUv));
+        if (isinf(radius) || isnan(radius)) return true;
+    }
+    // Closest point on the FULL near/far segment to the infinite vertical receiver cylinder.
+    // Vertical light rays have no horizontal extent and keep their constant XZ distance.
+    float horizontalLengthSquared = dot(extent.xz, extent.xz);
+    if (isinf(horizontalLengthSquared) || isnan(horizontalLengthSquared)) return true;
+    float t = horizontalLengthSquared > 0.0
+        ? clamp(-dot(origin.xz, extent.xz) / horizontalLengthSquared, 0.0, 1.0) : 0.0;
+    vec2 closest = origin.xz + t * extent.xz;
+    if (any(isinf(closest)) || any(isnan(closest))) return true;
+    return dot(closest, closest) <= radius * radius;
+}
+
+bool finite3(vec3 v) {
+    return !(any(isinf(v)) || any(isnan(v)));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(c.resolution) || pixel.y >= int(c.resolution)) return;
+    float depth = 1.0;
+    // Inverse of shadow.vsh's radial warp q = p / (|p| * bias + 1 - bias).
+    vec2 q = (vec2(pixel) + 0.5) / float(c.resolution) * 2.0 - 1.0;
+    float denominator = 1.0 - length(q) * c.bias;
+    if (!(denominator > 0.0)) { imageStore(result, pixel, vec4(depth, 0.0, 0.0, 0.0)); return; }
+    vec2 p = q * ((1.0 - c.bias) / denominator);
+    // The caller captured the unwarped light volume only; never certify its exterior as a miss.
+    if (any(greaterThan(abs(p), vec2(1.0)))) { imageStore(result, pixel, vec4(depth, 0.0, 0.0, 0.0)); return; }
+    vec4 nearPoint = c.inverseLightVp * vec4(p, 0.0, 1.0);
+    vec4 farPoint = c.inverseLightVp * vec4(p, 1.0, 1.0);
+    vec3 relativeOrigin = nearPoint.xyz / nearPoint.w;
+    vec3 origin = relativeOrigin + c.camera.xyz;
+    vec3 extent = farPoint.xyz / farPoint.w - relativeOrigin;
+    float rayLength = length(extent);
+    if (!finite3(origin) || !finite3(extent) || isinf(rayLength) || isnan(rayLength) || !(rayLength > 0.0)
+            || !receiverRayRelevant(q, relativeOrigin, extent)) {
+        imageStore(result, pixel, vec4(depth, 0.0, 0.0, 0.0));
+        return;
+    }
+    vec3 direction = extent / rayLength;
+
+    // No opacity override: a solid mesh is built opaque and commits in hardware, a cutout mesh is
+    // built non-opaque so every candidate reaches this loop and the cutout test can run. No cull
+    // flag: raster shadow pipelines disable face culling, so both sides of a triangle block light.
+    // Cylinder membership only selects rays; clipping this interval would discard distant blockers
+    // that cast shadows on nearby receivers, especially when the sun is low.
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, scene, gl_RayFlagsNoneEXT, 0xFFu, origin, 0.0, direction, rayLength);
+    while (rayQueryProceedEXT(query)) {
+        if (rayQueryGetIntersectionTypeEXT(query, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+        uint instance = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, false));
+        uint primitive = uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, false));
+        vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, false);
+        // Level zero explicitly: a compute stage has no derivatives to pick a level from.
+        if (c.alphaTest == 0u || textureLod(atlas, primitiveUv(instance, primitive, bary), 0.0).a >= CUTOUT_ALPHA) {
+            rayQueryConfirmIntersectionEXT(query);
+        }
+    }
+    if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+        vec3 hit = origin + direction * rayQueryGetIntersectionTEXT(query, true);
+        vec4 clip = c.lightVp * vec4(hit - c.camera.xyz, 1.0);
+        depth = clamp(clip.z / clip.w, 0.0, 1.0);
+    }
+    // A traced miss is valid; skipped rays and empty scenes require raster fallback. G names the
+    // answering tier and is written in the same store as validity, so G is never nonzero with A zero.
+    imageStore(result, pixel, vec4(depth, float(c.tier), 0.0, 1.0));
+}

@@ -815,6 +815,12 @@ public final class GraphRunner {
         if (dev.icehunter.fornax.metalfx.objc.Objc.PLATFORM_SUPPORTED) {
             rayProviders.add(new MeshMetalProvider());
             rayProviders.add(new dev.icehunter.fornax.metalfx.rt.VoxelMetalProvider());
+        } else {
+            // Off macOS: the exact-mesh tier alone, with no voxel tier, since a Vulkan structure
+            // holds the whole light volume. Whether the device can trace is the tier's per-frame
+            // readiness, not an install-time gate: this rebuild can run before Blaze3D has created
+            // the Vulkan device, and a gate read here would answer "no" once and never be asked again.
+            rayProviders.add(new dev.icehunter.fornax.rt.vulkan.MeshVulkanProvider());
         }
         RayRouter.install(rayProviders);
         RayRouter.setQueryDemand(pack.graph().passes().stream()
@@ -1369,8 +1375,11 @@ public final class GraphRunner {
             dev.icehunter.fornax.rt.RayRouter
                     .provider(dev.icehunter.fornax.metalfx.rt.VoxelMetalProvider.class)
                     .ifPresent(provider -> provider.captureScreen(gbuffer));
-            dev.icehunter.fornax.rt.RayRouter.publish();
         }
+        // Every platform: whichever tier traced this frame delivers here. Only the voxel tier's
+        // G-buffer hand-off above is Metal's; a publish gated on the platform leaves a Vulkan
+        // tier tracing into an image nothing reads.
+        dev.icehunter.fornax.rt.RayRouter.publish();
 
         int width = gbuffer.getWidth();
         int height = gbuffer.getHeight();

@@ -88,7 +88,10 @@ can cause individual filter taps to fall back near the RT boundary. Unknown fiel
 A declaration, an enabled consumer of `rtTerrainShadowDepth`, and an available selected backend are
 all required before terrain copies or tracing start. Consumer compile and per-frame gates apply.
 Automatic is the default engine backend policy; None disables RT, and the UI offers only supported,
-implemented explicit backends. GPU vendors are not separate RT APIs.
+implemented explicit backends. GPU vendors are not separate RT APIs. Two backends exist: Metal ray
+tracing on macOS, and Vulkan ray query (`VK_KHR_ray_query`, Vulkan 1.2 or newer) everywhere else. A
+pack sees the same tiers from both; the Vulkan backend installs the exact-mesh tier only, so
+`FORNAX_RAY_TIER_HARDWARE_VOXEL` never appears there.
 
 `rtTerrainShadowDepth` is a read-only RGBA32F builtin at shadow-map resolution: R is nearest forward
 light depth (1 for a miss), G is the tier that answered, A is current valid trace coverage, and B is

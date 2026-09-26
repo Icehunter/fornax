@@ -1,0 +1,197 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+// Engine-owned general ray query on Vulkan: one invocation per submitted ray, intersects the mesh
+// tier's top-level structure and writes the closest hit into the pack's own hit buffer, in place.
+// Unlike rt_mesh_shadow, nothing here is tied to the sun: origin and direction come from the
+// caller's request buffer.
+//
+// Cutout alpha is tested against the block atlas for every record, at the same 0.1 cutoff the
+// raster shadow pipeline uses, so leaves and glass are see-through to a ray query the same way
+// they are to a shadow. Every record this tier's structure holds is an uploaded chunk mesh (a
+// MeshShadowPrimitive: bit 30 set, six UV floats at byte 8); the voxel tiers' one-word records
+// never occur on Vulkan.
+//
+// The record it writes is RayQueryAbi's word table, byte for byte the Metal kernel's.
+
+layout(local_size_x = 64) in;
+
+// 32 bytes: four words, the camera in the structure's frame, the atlas encoding.
+layout(push_constant) uniform Push {
+    uint abiVersion;
+    uint rayCount;
+    // RayTier.ordinal() of this traversal. Copied into every record, hit and miss alike, so a
+    // reader can tell an answer from an untouched buffer without a second flag.
+    uint tier;
+    // Nonzero: this dispatch fills a buffer another tier may already have written, so it reads
+    // each record's tier first and leaves answered ones alone. Zero: it owns the buffer.
+    uint fillMode;
+    // The caller's origin is camera-relative; the structure is built rebased onto a grid origin.
+    // Adding this puts a camera-relative ray where the geometry is.
+    vec3 originOffset;
+    // AtlasUvEncoding wire values: 0 packed half2, 1 exact x/y unsigned 16-bit texels.
+    uint atlasUvEncoding;
+} c;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+// Two vec4 a ray: origin xyz + tMin, direction xyz + tMax.
+layout(set = 0, binding = 1, std430) readonly buffer Requests { vec4 requests[]; };
+// Nine words a ray: distance, flags, surface, atlasUv, normal xyz, tier, tint.
+layout(set = 0, binding = 2, std430) buffer Hits { uint hits[]; };
+layout(set = 0, binding = 3) uniform sampler2D atlas;
+// One entry per instance, indexed by instance custom index: that mesh's primitive records.
+layout(set = 0, binding = 4, std430) readonly buffer MeshTable { uvec2 primitivesAddress[]; };
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Primitives { uint words[]; };
+
+const uint ABI_VERSION = 4u;
+const uint HIT_WORDS = 9u;
+const uint WORDS_PER_PRIMITIVE = 8u;
+const float CUTOUT_ALPHA = 0.1;
+// Flag bits, mirroring RayQueryAbi's FLAG_ constants.
+const uint FLAG_FRONT_FACING = 1u;
+const uint FLAG_FACE_SHIFT = 8u;
+const uint FACE_UNKNOWN = 0xFu;
+const uint FLAG_UV_KNOWN = 1u << 12;
+const uint FLAG_ATLAS_TEXEL_U16 = 1u << 13;
+const uint SURFACE_UV_AT_BYTE_8 = 1u << 30;
+// What word 0 reads as when the ray met nothing along its whole interval.
+const float MISS_DISTANCE = -1.0;
+// White and unlit: a miss met no block, so it has neither a tint nor a light of its own.
+const uint MISS_TINT = 0x00FFFFFFu;
+
+// Face order is Minecraft's Direction order: 0 down, 1 up, 2 north, 3 south, 4 west, 5 east. A
+// field outside 0..5 returns the ZERO vector, not a guess; callers must not normalise it.
+vec3 faceNormal(uint surface) {
+    uint face = (surface >> 12u) & 0xFu;
+    switch (face) {
+        case 0u: return vec3(0.0, -1.0, 0.0);
+        case 1u: return vec3(0.0, 1.0, 0.0);
+        case 2u: return vec3(0.0, 0.0, -1.0);
+        case 3u: return vec3(0.0, 0.0, 1.0);
+        case 4u: return vec3(-1.0, 0.0, 0.0);
+        case 5u: return vec3(1.0, 0.0, 0.0);
+        default: return vec3(0.0);
+    }
+}
+
+// Nearest normalised coordinates select floor(uv * extent), clamped at the atlas edges. Both the
+// exact-mode alpha test and the returned address use this, so they cannot name different texels.
+ivec2 atlasTexel(vec2 uv) {
+    ivec2 size = textureSize(atlas, 0);
+    return clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - ivec2(1));
+}
+
+vec2 primitiveUv(uint instance, uint primitive, vec2 bary) {
+    Primitives prims = Primitives(primitivesAddress[instance]);
+    uint o = primitive * WORDS_PER_PRIMITIVE;
+    vec2 uv0 = vec2(uintBitsToFloat(prims.words[o + 2u]), uintBitsToFloat(prims.words[o + 3u]));
+    vec2 uv1 = vec2(uintBitsToFloat(prims.words[o + 4u]), uintBitsToFloat(prims.words[o + 5u]));
+    vec2 uv2 = vec2(uintBitsToFloat(prims.words[o + 6u]), uintBitsToFloat(prims.words[o + 7u]));
+    return uv0 * (1.0 - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y;
+}
+
+bool cutoutAccepts(vec2 uv) {
+    if (c.atlasUvEncoding == 1u) {
+        return texelFetch(atlas, atlasTexel(uv), 0).a >= CUTOUT_ALPHA;
+    }
+    return textureLod(atlas, uv, 0.0).a >= CUTOUT_ALPHA;
+}
+
+void writeRecord(uint base, float distance, uint flags, uint surface, uint atlasUv, vec3 normal, uint tier, uint tint) {
+    hits[base] = floatBitsToUint(distance);
+    hits[base + 1u] = flags;
+    hits[base + 2u] = surface;
+    hits[base + 3u] = atlasUv;
+    hits[base + 4u] = floatBitsToUint(normal.x);
+    hits[base + 5u] = floatBitsToUint(normal.y);
+    hits[base + 6u] = floatBitsToUint(normal.z);
+    hits[base + 7u] = tier;
+    hits[base + 8u] = tint;
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= c.rayCount) return;
+    uint base = index * HIT_WORDS;
+
+    // A higher tier may already own this record. One word read per ray is what makes the buffer
+    // form cascade the same way the image form does. This rests on the engine clearing the hit
+    // buffer at the start of every ray_query pass.
+    if (c.fillMode != 0u && hits[base + 7u] != 0u) return;
+
+    // A caller built for other offsets gets an unanswered record rather than a buffer read at the
+    // wrong stride: tier zero, not the miss below, since an all-zero record reads as unanswered
+    // under every layout this kernel has had.
+    ivec2 atlasSize = textureSize(atlas, 0);
+    if (c.abiVersion != ABI_VERSION || c.atlasUvEncoding > 1u
+            || (c.atlasUvEncoding == 1u && (atlasSize.x > 65536 || atlasSize.y > 65536))) {
+        writeRecord(base, 0.0, 0u, 0u, 0u, vec3(0.0), 0u, 0u);
+        return;
+    }
+
+    vec4 originAndMin = requests[index * 2u];
+    vec4 directionAndMax = requests[index * 2u + 1u];
+    vec3 direction = directionAndMax.xyz;
+    float lengthSquared = dot(direction, direction);
+    // A zero-length direction is a caller bug, not a miss to trace: normalising would produce NaN
+    // and a NaN ray is undefined to the traversal.
+    if (!(lengthSquared > 0.0)) {
+        writeRecord(base, MISS_DISTANCE, FACE_UNKNOWN << FLAG_FACE_SHIFT, 0u, 0u, vec3(0.0), c.tier, MISS_TINT);
+        return;
+    }
+    vec3 origin = originAndMin.xyz + c.originOffset;
+    direction *= inversesqrt(lengthSquared);
+
+    // No opacity override: a solid mesh is built opaque and the hardware commits it, a cutout mesh
+    // is built non-opaque and every one of its candidates reaches this loop, because a leaf or a
+    // pane of glass is a triangle the ray has to see through and the atlas is the only thing that
+    // knows which texels are holes. No cull flag: both faces of an uploaded triangle are real surfaces.
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, scene, gl_RayFlagsNoneEXT, 0xFFu, origin, originAndMin.w, direction, directionAndMax.w);
+    while (rayQueryProceedEXT(query)) {
+        if (rayQueryGetIntersectionTypeEXT(query, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+        uint instance = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, false));
+        uint primitive = uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, false));
+        vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, false);
+        if (cutoutAccepts(primitiveUv(instance, primitive, bary))) {
+            rayQueryConfirmIntersectionEXT(query);
+        }
+    }
+    if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+        writeRecord(base, MISS_DISTANCE, FACE_UNKNOWN << FLAG_FACE_SHIFT, 0u, 0u, vec3(0.0), c.tier, MISS_TINT);
+        return;
+    }
+
+    uint instance = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true));
+    uint primitive = uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true));
+    Primitives prims = Primitives(primitivesAddress[instance]);
+    uint o = primitive * WORDS_PER_PRIMITIVE;
+    uint surface = prims.words[o];
+    uint face = (surface >> 12u) & 0xFu;
+    uint flags = (rayQueryGetIntersectionFrontFaceEXT(query, true) ? FLAG_FRONT_FACING : 0u)
+            | (face << FLAG_FACE_SHIFT);
+    // A mesh triangle has no palette entry, so its surface word carries nothing a caller can look
+    // up: its identity is the atlas UV below, and the surface word it reports is zero.
+    uint reportedSurface = (surface & SURFACE_UV_AT_BYTE_8) != 0u ? 0u : surface;
+    uint tint = (surface & SURFACE_UV_AT_BYTE_8) != 0u ? prims.words[o + 1u] : MISS_TINT;
+
+    vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, true);
+    vec2 uv = primitiveUv(instance, primitive, bary);
+    uint atlasUv;
+    if (c.atlasUvEncoding == 1u) {
+        ivec2 texel = atlasTexel(uv);
+        atlasUv = uint(texel.x) | (uint(texel.y) << 16u);
+        flags |= FLAG_ATLAS_TEXEL_U16;
+    } else {
+        // Packed half2, the default. Above 2048 texels a binary16 UV can round across atlas
+        // texels; exact consumers use texel_u16.
+        atlasUv = packHalf2x16(uv);
+    }
+    flags |= FLAG_UV_KNOWN;
+
+    writeRecord(base, rayQueryGetIntersectionTEXT(query, true), flags, reportedSurface, atlasUv,
+            faceNormal(surface), c.tier, tint);
+}

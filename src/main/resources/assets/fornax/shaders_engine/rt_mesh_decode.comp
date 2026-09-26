@@ -1,0 +1,98 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+// Engine-owned: turns one uploaded terrain mesh's packed FornaxChunkVertex quads into what an
+// acceleration-structure build and the ray kernels read. One invocation per triangle.
+//
+// Every buffer is reached by device address rather than by descriptor, so a rebuild that touches a
+// thousand meshes is a thousand push-constant writes and dispatches against one descriptor-less
+// pipeline, not a thousand descriptor sets.
+//
+// The uploaded quad index ABI is (0,1,2),(2,3,0): triangle t of quad q reads corners
+// corner[(t%2)*3 + v]. The selected diagonal and winding are preserved so a front-facing answer
+// here means what it means in the raster shadow pass.
+//
+// FornaxChunkVertex is 24 bytes, read here as six little-endian words:
+//   word 0: x | y << 16      (16-bit UNORM fixed-point positions, block = 2048, origin at -8)
+//   word 1: z | facts << 16  (facts bits 0..3 are the block's own light level)
+//   word 2: u | v << 16      (16-bit UNORM atlas UV)
+//   word 3: RGBA8 colour     (alpha is baked ambient occlusion, not tint, and is left out)
+//   word 4: light data
+//   word 5: low byte is Direction.ordinal() for the whole quad, 0..5
+
+layout(local_size_x = 64) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Packed { uint words[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Positions { float xyz[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Primitives { uint words[]; };
+
+// 32 bytes, the pipeline layout's whole push range; the tail word is padding.
+layout(push_constant) uniform Push {
+    uvec2 packedAddress;
+    uvec2 positionsAddress;
+    uvec2 primitivesAddress;
+    uint triangleCount;
+    uint pad;
+} push;
+
+// A mesh record's surface word: bit 30 says six UV floats follow at byte 8, which is how the ray
+// kernel tells an uploaded mesh's record from a voxel tier's without knowing which tier built it.
+const uint MESH_SURFACE_BIT = 1u << 30;
+const uint FACE_UNKNOWN = 0xFu;
+const uint WORDS_PER_VERTEX = 6u;
+const uint WORDS_PER_PRIMITIVE = 8u;
+
+uint ushortAt(Packed packed, uint ushortIndex) {
+    uint word = packed.words[ushortIndex >> 1u];
+    return (ushortIndex & 1u) == 0u ? (word & 0xFFFFu) : (word >> 16u);
+}
+
+void main() {
+    uint triangle = gl_GlobalInvocationID.x;
+    if (triangle >= push.triangleCount) return;
+
+    Packed packed = Packed(push.packedAddress);
+    Positions positions = Positions(push.positionsAddress);
+    Primitives primitives = Primitives(push.primitivesAddress);
+
+    const uint corner[6] = uint[6](0u, 1u, 2u, 2u, 3u, 0u);
+    uint quad = triangle / 2u;
+    uint firstVertex = quad * 4u;
+    vec2 uv[3];
+    for (uint v = 0u; v < 3u; ++v) {
+        uint vertex = firstVertex + corner[(triangle % 2u) * 3u + v];
+        uint s = vertex * 12u; // twelve 16-bit lanes a vertex
+        vec3 p = vec3(float(ushortAt(packed, s)), float(ushortAt(packed, s + 1u)), float(ushortAt(packed, s + 2u)))
+                / 2048.0 - 8.0;
+        uint d = triangle * 9u + v * 3u;
+        positions.xyz[d] = p.x;
+        positions.xyz[d + 1u] = p.y;
+        positions.xyz[d + 2u] = p.z;
+        uv[v] = vec2(float(ushortAt(packed, s + 4u)), float(ushortAt(packed, s + 5u))) / 65535.0;
+    }
+
+    // The face comes from the quad's first vertex: 16-bit lane 10, low byte. A value outside
+    // 0..5 names no direction this engine knows and writes 15, so a reader returns the zero
+    // vector rather than a plausible wrong axis.
+    uint first = firstVertex * 12u;
+    uint face = ushortAt(packed, first + 10u) & 0xFFu;
+    if (face > 5u) face = FACE_UNKNOWN;
+
+    // Tint: RGB from the colour word's low three bytes, the block's own light level from the
+    // facts lane (16-bit lane 3, low four bits) in the top byte. Grass and leaves are grey in the
+    // atlas and take their colour from this; a glowing block's light is in neither.
+    uint colour = packed.words[firstVertex * WORDS_PER_VERTEX + 3u];
+    uint emission = ushortAt(packed, first + 3u) & 15u;
+    uint tint = (colour & 0x00FFFFFFu) | (emission << 24u);
+
+    uint o = triangle * WORDS_PER_PRIMITIVE;
+    primitives.words[o] = MESH_SURFACE_BIT | (face << 12u);
+    primitives.words[o + 1u] = tint;
+    primitives.words[o + 2u] = floatBitsToUint(uv[0].x);
+    primitives.words[o + 3u] = floatBitsToUint(uv[0].y);
+    primitives.words[o + 4u] = floatBitsToUint(uv[1].x);
+    primitives.words[o + 5u] = floatBitsToUint(uv[1].y);
+    primitives.words[o + 6u] = floatBitsToUint(uv[2].x);
+    primitives.words[o + 7u] = floatBitsToUint(uv[2].y);
+}

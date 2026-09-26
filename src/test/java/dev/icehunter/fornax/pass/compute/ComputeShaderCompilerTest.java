@@ -1,6 +1,7 @@
 package dev.icehunter.fornax.pass.compute;
 
 import org.junit.jupiter.api.Test;
+import org.lwjgl.util.shaderc.Shaderc;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -69,5 +70,49 @@ class ComputeShaderCompilerTest {
 
         assertTrue(source.contains("shaderc_compile_options_set_optimization_level(options,"));
         assertTrue(source.contains("shaderc_optimization_level_performance"));
+    }
+
+    // The smallest shader that needs SPIR-V 1.4: GL_EXT_ray_query's declaration alone is enough
+    // for glslang to refuse a lower target, no acceleration structure has to be bound.
+    private static final String RAY_QUERY_COMPUTE_SHADER = """
+            #version 460
+            #extension GL_EXT_ray_query : require
+            layout(local_size_x = 1) in;
+            layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+            layout(set = 0, binding = 1, std430) buffer Out { uint hit[]; };
+            void main() {
+                rayQueryEXT q;
+                rayQueryInitializeEXT(q, scene, gl_RayFlagsNoOpaqueEXT, 0xFFu, vec3(0.0), 0.0, vec3(0.0, 1.0, 0.0), 100.0);
+                while (rayQueryProceedEXT(q)) { rayQueryConfirmIntersectionEXT(q); }
+                hit[gl_GlobalInvocationID.x] = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 0u : 1u;
+            }
+            """;
+
+    @Test
+    void aRayQueryKernelCompilesAtTheVulkan12Target() {
+        ByteBuffer spirv = ComputeShaderCompiler.compileToSpirv(RAY_QUERY_COMPUTE_SHADER, "rq.comp",
+                Shaderc.shaderc_glsl_compute_shader, ComputeShaderCompiler.SpirvTarget.VULKAN_1_2);
+        assertEquals(0x07230203, spirv.getInt(spirv.position()));
+        // Word 1 is the SPIR-V version, major in byte 2 and minor in byte 1: 1.5 for a Vulkan 1.2
+        // target, and ray query needs at least 1.4. Pins that the target took.
+        int version = spirv.getInt(spirv.position() + 4);
+        int major = (version >> 16) & 0xFF;
+        int minor = (version >> 8) & 0xFF;
+        assertEquals(1, major);
+        assertTrue(minor >= 4, "SPIR-V 1." + minor + " cannot carry ray query");
+    }
+
+    @Test
+    void theDefaultTargetStaysWhereItWasSoAPackShaderNeverGetsANewerSpirv() {
+        // glslang does not refuse ray query at the default target: it emits the capability into a
+        // SPIR-V 1.0 module, and the driver rejects that module, because VK_KHR_ray_query requires
+        // SPIR-V 1.4. So the version word is the fact to pin, in both directions: the default stays
+        // at 1.0 with the second target present, and a ray kernel compiled without asking for the
+        // target is a module a ray-query device will not load.
+        ByteBuffer rayAtDefault = ComputeShaderCompiler.compileToSpirv(RAY_QUERY_COMPUTE_SHADER, "rq-default.comp");
+        assertEquals(0x00010000, rayAtDefault.getInt(rayAtDefault.position() + 4),
+                "the default target must stay SPIR-V 1.0 even for a source that uses ray query");
+        ByteBuffer spirv = ComputeShaderCompiler.compileToSpirv(TRIVIAL_COMPUTE_SHADER, "trivial-again.comp");
+        assertEquals(0x00010000, spirv.getInt(spirv.position() + 4));
     }
 }
