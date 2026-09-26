@@ -114,18 +114,48 @@ class ParticlePassBindingTest {
     }
 
     @Test
-    void computeBufferFeedingARayQueryWaitsAtTransferStage() {
-        // RayQueryInterop.answer reads a compute output by copying it with vkCmdCopyBuffer on the
-        // graphics encoder before the Metal trace runs, the same TRANSFER stage a COPY reader waits
-        // at. A RAY_QUERY reader with no branch here contributes 0, leaving the trace unsynchronized
-        // against the compute write and reading last frame's requests.
+    void computeBufferFeedingARayQueryWaitsAtTransferAndComputeStages() {
+        // Two consumers of the request buffer, both on the graphics encoder. The Metal tier
+        // (RayQueryInterop.answer) copies it with vkCmdCopyBuffer ahead of its trace, the same
+        // TRANSFER stage a COPY reader waits at; the Vulkan tier (MeshVulkanTracer.answerQuery)
+        // reads it straight from a ray-query dispatch, at COMPUTE_SHADER. A wait at transfer alone
+        // does not order a compute-stage read behind the compute write, and a RAY_QUERY reader with
+        // no branch here contributes 0, leaving either trace reading last frame's requests.
         PassSpec compute = computePass("shadow_rays", List.of("sunShadowRequests"), null);
         PassSpec rayQuery = new PassSpec("trace_sun", PassType.RAY_QUERY, null, null, null,
                 List.of("sunShadowRequests"), List.of("sunShadowHits"), null, null, List.of(), null, null,
                 null, null, null, new RayQuerySpec(RayQueryKind.CLOSEST_HIT, 1024, RayTier.NONE));
         GraphSpec graph = new GraphSpec(Map.of(), List.of(compute, rayQuery));
-        assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT
+                        | org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 GraphRunner.computeGraphicsWaitStages(compute, graph, Map.of()));
+    }
+
+    @Test
+    void computeBufferFeedingAGraphicsStreamComputeReaderWaitsAtTheComputeStage() {
+        // light_list_build (compute queue) feeds gi_light_seed, a compute pass that reads
+        // builtin.depth and so runs in the graphics stream. With no branch for a COMPUTE reader
+        // the producer signals nothing and the seed dispatches while the list is being rebuilt,
+        // reading a count of zero; only a device whose compute family differs from graphics shows it.
+        PassSpec producer = computePass("light_list_build", List.of("analyticLightList"), null);
+        PassSpec seed = new PassSpec("gi_light_seed", PassType.COMPUTE, null, null, "shaders/compute/gi_light_seed.comp",
+                List.of("analyticLightList", "builtin.depth"), List.of("giLightRequests"), null, null,
+                List.of(64, 1, 1), null, null, null);
+        GraphSpec graph = new GraphSpec(Map.of(), List.of(producer, seed));
+        assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                GraphRunner.computeGraphicsWaitStages(producer, graph, Map.of()));
+    }
+
+    @Test
+    void computeBufferFeedingAComputeQueueReaderNeedsNoGraphicsHandoff() {
+        // Same queue, submission order and the producer's own release barrier already order it;
+        // a graphics-queue wait for it would stall the frame for nothing.
+        PassSpec producer = computePass("voxel_local_sources", List.of("voxelLocalRadiance"), null);
+        PassSpec reader = new PassSpec("light_list_build", PassType.COMPUTE, null, null, "shaders/compute/light_list_build.comp",
+                List.of("voxelLocalRadiance"), List.of("analyticLightList"), null, null,
+                List.of(1, 1, 1), null, null, null);
+        GraphSpec graph = new GraphSpec(Map.of(), List.of(producer, reader));
+        assertEquals(0L, GraphRunner.computeGraphicsWaitStages(producer, graph, Map.of()));
     }
 
     @Test

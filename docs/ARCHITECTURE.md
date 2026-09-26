@@ -3017,6 +3017,20 @@ readback content and driver behavior. The capture frame's timing includes readba
   literal. `count = "render"` / `rays = "render"` size the buffers and the query
   from the render size each frame, and `GraphValidator` refuses a fixed buffer under a
   `"render"` query.
+- **A compute pass in the graphics stream is a cross-queue reader, on both edges.** A reader of
+  type `compute` that reads a G-buffer, shadow or ray-query input is recorded on the graphics
+  encoder (`GraphicsInputDependency.requiredBy`) and so runs on the other queue from a compute-queue
+  producer, exactly like a fragment reader. Both predicates that decide cross-queue edges by reader
+  type must count it: `computeGraphicsWaitStages` (the producer's signal the graphics queue waits
+  for this frame) and `computeStorageWriteNeedsGraphicsCompletion` (the producer's wait for last
+  frame's graphics readers before it writes the buffer again). Left out of the first, the reader
+  dispatches against whatever the compute queue has written so far; left out of the second, the
+  producer's next dispatch on the idle compute queue lands while the previous frame's graphics
+  submission, reader included, is still executing. The pack's lamp chain is the shape that finds
+  both: `light_list_reset`/`light_list_build` on the compute queue feed `gi_light_seed` in the
+  graphics stream, and a seed that reads a count of zero or a half-built list aims its rays at
+  nothing. Only a device whose compute family differs from graphics can show it; a shared family
+  orders the two by submission. Neither edge logs anything.
 - **GLSL `%` on a signed int with a negative left operand is not portable; only feed it
   non-negative operands.** glslang compiles `%` to `OpSMod`, and at least one shipping NVIDIA
   Vulkan driver evaluates that as an unsigned modulo: `-1 % 9` is 3, `-45 % 9` is 4, the residues
@@ -3539,8 +3553,9 @@ graphics stream first. Its old wait path (signal at `ALL_COMMANDS`, flush with
 removed.
 
 Two other cross-queue waits are separate and stay. `computeStorageWriteNeedsGraphicsCompletion`
-makes a compute pass wait for last frame's graphics readers before it writes over a buffer.
-`ComputeGraphicsWaits` makes a later graphics pass wait for a compute pass's output.
+makes a compute pass wait for last frame's graphics readers before it writes over a buffer; a
+compute pass in the graphics stream is one of those readers. `ComputeGraphicsWaits` makes a later
+graphics pass wait for a compute pass's output.
 
 Tests pin which input names pick the graphics stream, and the compute queue path's wait list and
 signal order.

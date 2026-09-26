@@ -10,6 +10,7 @@ import dev.icehunter.fornax.rt.RayQueryKind;
 import dev.icehunter.fornax.rt.RayTier;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -84,6 +85,43 @@ class GraphRunnerTest {
                     List.of("field"), List.of(), null, null, List.of(1, 1, 1), null, null, null);
             assertFalse(GraphRunner.computeStorageWriteNeedsGraphicsCompletion(readOnly, graph, Map.of()));
         }
+    }
+
+    /**
+     * A compute reader in the graphics stream reads the writer's buffer on the graphics queue, and
+     * the writer's next-frame dispatch on the compute queue can land while that read is still
+     * executing: a list reset lands under a seed and the seed sees a count of zero. That reader
+     * needs the same reverse edge a fragment reader gets. A reader on the compute queue is ordered
+     * by submission and must not cost one, or every lighting chain would wait on the previous
+     * frame's graphics work for nothing.
+     */
+    @Test
+    void aGraphicsStreamComputeReaderOfABufferNeedsGraphicsCompletionButAComputeQueueReaderDoesNot() {
+        var reset = new PassSpec("light_list_reset", PassType.COMPUTE, null, null, "shaders/reset.comp",
+                List.of("globals"), List.of("lightList"), null, null, List.of(1, 1, 1), null, null, null);
+        var seed = new PassSpec("gi_light_seed", PassType.COMPUTE, null, null, "shaders/seed.comp",
+                List.of("lightList", "builtin.depth"), List.of("requests"), null, null,
+                List.of(1024, 1, 1), null, null, null);
+        var probe = new PassSpec("gi_probe", PassType.COMPUTE, null, null, "shaders/probe.comp",
+                List.of("lightList"), List.of("probes"), null, null, List.of(64, 1, 1), null, null, null);
+        var targets = new LinkedHashMap<String, TargetSpec>();
+        targets.put("lightList", TargetSpec.buffer("lightList", null, new BufferSize(4, 16)));
+        targets.put("requests", TargetSpec.buffer("requests", null, new BufferSize(32, 16)));
+        targets.put("probes", TargetSpec.buffer("probes", null, new BufferSize(16, 16)));
+        assertTrue(GraphRunner.computeStorageWriteNeedsGraphicsCompletion(reset,
+                new GraphSpec(targets, List.of(reset, seed)), Map.of()),
+                "a G-buffer input puts the seed on the graphics queue; its read of the list is a graphics read");
+        assertFalse(GraphRunner.computeStorageWriteNeedsGraphicsCompletion(reset,
+                new GraphSpec(targets, List.of(reset, probe)), Map.of()),
+                "a compute-queue reader is ordered behind the writer by submission");
+        // The ray-query hit buffer is graphics-written too, so a reader of one is on the graphics queue.
+        var trace = new PassSpec("trace", PassType.RAY_QUERY, null, null, null, List.of("requests"),
+                List.of("hits"), null, null, List.of(), null, null, null);
+        var resolve = new PassSpec("resolve", PassType.COMPUTE, null, null, "shaders/resolve.comp",
+                List.of("lightList", "hits"), List.of("probes"), null, null, List.of(64, 1, 1), null, null, null);
+        targets.put("hits", TargetSpec.buffer("hits", null, new BufferSize(36, 16)));
+        assertTrue(GraphRunner.computeStorageWriteNeedsGraphicsCompletion(reset,
+                new GraphSpec(targets, List.of(reset, trace, resolve)), Map.of()));
     }
 
     /**

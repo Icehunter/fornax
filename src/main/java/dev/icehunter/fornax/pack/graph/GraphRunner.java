@@ -2333,6 +2333,7 @@ public final class GraphRunner {
         for (String output : p.outputs()) {
             outputBaseNames.add(targetBaseName(output));
         }
+        Set<String> graphicsWritten = rayQueryOutputs(graph, compileValues);
         long stages = 0;
         for (PassSpec reader : graph.passes()) {
             if (!isEnabledAtCompile(reader, compileValues)) {
@@ -2340,18 +2341,30 @@ public final class GraphRunner {
             }
             for (String in : reader.inputs()) {
                 if (outputBaseNames.contains(targetBaseName(in))) {
-                    if (reader.type() == PassType.PARTICLES) {
+                    if (reader.type() == PassType.COMPUTE) {
+                        // A compute reader in the graphics stream (it reads a G-buffer, shadow or
+                        // ray-query input, so it is recorded on the graphics encoder) is as
+                        // cross-queue as a fragment reader: without a wait it dispatches while the
+                        // producer is still running on the compute queue. A reader on the compute
+                        // queue is ordered by submission and needs nothing here.
+                        if (GraphicsInputDependency.requiredBy(reader.inputs(), graphicsWritten)) {
+                            stages |= VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                        }
+                    } else if (reader.type() == PassType.PARTICLES) {
                         stages |= VK13.VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
                     } else if (reader.type() == PassType.FULLSCREEN || reader.type() == PassType.GEOMETRY
                             || reader.type() == PassType.TEMPORAL || reader.type() == PassType.MIPCHAIN) {
                         stages |= VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-                    } else if (reader.type() == PassType.COPY || reader.type() == PassType.CONSOLIDATE
-                            || reader.type() == PassType.RAY_QUERY) {
+                    } else if (reader.type() == PassType.COPY || reader.type() == PassType.CONSOLIDATE) {
                         // CONSOLIDATE's copy is ArrayTextures.copyLayer's own vkCmdCopyImage, same
-                        // transfer stage COPY's copyTextureToTexture runs at. RAY_QUERY's is
-                        // RayQueryInterop.answer's vkCmdCopyBuffer of the request buffer, on the
-                        // graphics encoder ahead of the Metal trace.
+                        // transfer stage COPY's copyTextureToTexture runs at.
                         stages |= VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+                    } else if (reader.type() == PassType.RAY_QUERY) {
+                        // Two consumers, one per backend, both on the graphics encoder: the Metal
+                        // tier copies the request buffer with vkCmdCopyBuffer ahead of its trace
+                        // (transfer), the Vulkan tier reads it straight from a ray-query dispatch
+                        // (compute). Waiting at both costs nothing and misses neither.
+                        stages |= VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
                     }
                 }
             }
@@ -2395,6 +2408,7 @@ public final class GraphRunner {
         if (writer.type() != PassType.COMPUTE) {
             return false;
         }
+        Set<String> graphicsWritten = rayQueryOutputs(graph, compileValues);
         for (String output : writer.outputs()) {
             String base = targetBaseName(output);
             TargetSpec target = graph.targets().get(base);
@@ -2402,8 +2416,16 @@ public final class GraphRunner {
                 continue;
             }
             for (PassSpec graphicsPass : graph.passes()) {
+                if (!isEnabledAtCompile(graphicsPass, compileValues)) {
+                    continue;
+                }
+                // A compute reader in the graphics stream (it reads a G-buffer, shadow or
+                // ray-query input) reads this writer's output on the graphics queue, so the
+                // writer's next dispatch on the idle compute queue can land while the previous
+                // frame's graphics submission, reader included, is still executing. A reader on
+                // the compute queue is ordered by submission and needs no edge.
                 if (graphicsPass.type() == PassType.COMPUTE
-                        || !isEnabledAtCompile(graphicsPass, compileValues)) {
+                        && !GraphicsInputDependency.requiredBy(graphicsPass.inputs(), graphicsWritten)) {
                     continue;
                 }
                 for (String ref : graphicsPass.inputs()) {
