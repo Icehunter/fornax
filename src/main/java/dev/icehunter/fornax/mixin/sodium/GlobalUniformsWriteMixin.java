@@ -96,8 +96,6 @@ public class GlobalUniformsWriteMixin {
     private static final WaterSurfaceTracker fornax$waterSurface = new WaterSurfaceTracker();
     @Unique
     private static final WaterTransitionTracker fornax$waterTransition = new WaterTransitionTracker();
-    /** Last eye-in-water flag written, so a flip logs once with the numbers behind it. */
-    private static boolean fornax$lastEyeInWater;
     @Unique
     private static Object fornax$smoothedWaterLevel = null;
 
@@ -326,20 +324,6 @@ public class GlobalUniformsWriteMixin {
         float waterTransition = fornax$waterTransition.update(
                 Minecraft.getInstance().level, eyeInWater, System.nanoTime() * 1.0e-9);
         builder.putVec4(eyeInWater ? 1.0f : 0.0f, fluidKind, waterSurfaceAltitude, waterTransition);
-        // One line per flip of the flag: the eye height, the camera block and the fluid there, and
-        // the surface altitude the packs receive. A frame drawn dry with the eye under water shows
-        // up here as a flip the numbers do not justify.
-        if (eyeInWater != fornax$lastEyeInWater) {
-            fornax$lastEyeInWater = eyeInWater;
-            var camera = Minecraft.getInstance().gameRenderer.mainCamera();
-            var cameraBlock = camera.blockPosition();
-            var fluid = Minecraft.getInstance().level.getFluidState(cameraBlock);
-            dev.icehunter.fornax.FornaxMod.LOGGER.info(String.format(java.util.Locale.ROOT,
-                    "[Fornax][water] eyeInWater=%s eyeY=%.3f cameraBlockY=%d fluidTop=%.3f surface=%.3f transition=%.2f",
-                    eyeInWater, camera.position().y, cameraBlock.getY(),
-                    fluid.isEmpty() ? 0.0 : cameraBlock.getY() + fluid.getHeight(Minecraft.getInstance().level, cameraBlock),
-                    waterSurfaceAltitude, waterTransition));
-        }
 
         // Shadow-map tail (bytes 576..592): x = the shared radial-distortion bias, committed by
         // SodiumWorldRendererOrchestrationMixin alongside u_SunViewProj (same "Ordering guarantee"
