@@ -308,9 +308,9 @@ public final class EnvSpecularRatioReadback {
                                 + "  (needs u_AlbedoIdentityDebug ON)  (crosshair px %d,%d, %dx%d window)",
                         r, g, b, a, tintLuma, x, y, w, h);
             };
-            // The closure is plagueGetWaterFog (Beer-Lambert, asymptotic, no boundary anywhere),
-            // which takes a single scale rather than a near/far pair, so two of the four channels
-            // here go unused. A smoothstep boundary keyed on length(worldPos) would draw its
+            // A pack whose underwater fog is Beer-Lambert along the ray (asymptotic, no boundary
+            // anywhere) has no separate closure, and its fog pass passes the scene through on this
+            // view. A smoothstep boundary keyed on length(worldPos) would draw its
             // transition as a sphere centred on the eye -- a curved, camera-following edge across
             // the view -- which is exactly what this asymptotic model avoids. Pinned literal:
             // gbuffer_resolve.fsh's vec4(uwClosureScale, uwClosureDist, horizonClosure, uwVisibilityMult).

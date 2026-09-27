@@ -121,7 +121,7 @@ public abstract class QuadParticleDeferredMixin {
      * not be representative; and a route that CHANGES mid-session -- a pack reload, a G-buffer rebuild,
      * or the user toggling the very video setting the reason names -- is then never reported at all,
      * which is precisely the state a user acts on. Keying on the inputs keeps the steady-state output
-     * at one line per arm while making a changed answer visible.
+     * at one line per arm and phase while making a changed answer visible.
      *
      * <p><b>An int rather than the composed line, because this method runs per group per frame.</b>
      * Comparing formatted strings would build one on every call and discard it, which is per-frame
@@ -129,7 +129,7 @@ public abstract class QuadParticleDeferredMixin {
      * composed only once the key has already said it differs.
      */
     @Unique
-    private static final int[] fornax$lastReport = {-1, -1};
+    private static final int[] fornax$lastReport = {-1, -1, -1, -1};
 
     @Inject(method = "executeGroup", at = @At("HEAD"))
     private void fornax$decideGroupRoute(FeatureFrameContext context, int groupIndex,
@@ -185,11 +185,15 @@ public abstract class QuadParticleDeferredMixin {
                 | (allLayersTranslucent ? 4 : 0) | (packActive ? 8 : 0)
                 | (shadowPhase ? 16 : 0) | (gBufferPresent ? 32 : 0)
                 | (separateParticlesTarget ? 64 : 0) | (route.ordinal() << 7);
-        int arm = groupTranslucent ? 1 : 0;
-        if (fornax$lastReport[arm] == key) {
+        // One slot per arm and per phase. The shadow pass runs every frame, so a slot shared by
+        // both phases sees two keys in turn and logs both every frame: two lines a frame and a
+        // blocking stdout write on the render thread each time. A slot per phase logs each state
+        // once.
+        int slot = (groupTranslucent ? 1 : 0) | (shadowPhase ? 2 : 0);
+        if (fornax$lastReport[slot] == key) {
             return;
         }
-        fornax$lastReport[arm] = key;
+        fornax$lastReport[slot] = key;
 
         // Every input of the rule that was tested, ALWAYS, plus the first condition that refused.
         // Logging the decision without its inputs makes `route=VANILLA` unattributable in the field;

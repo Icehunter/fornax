@@ -108,13 +108,13 @@ public final class PbrSettingsLayout {
             new Member("u_WaveStrength", 1.0f),
             new Member("u_SnowAmount", 1.0f),
             new Member("u_SplashDensity", 0.6f),
-            // --- Underwater depth-darkening floor, bridged for the same reason as the fog pair
-            // above: the pack's underwater include takes it as a parameter, and terrain's
-            // translucent forward arm (the glass fog site) is a deferred-family program with no
-            // u_PackOptions block, so the value must ride here or the identifier is undefined at
-            // the first terrain draw. APPENDED, per this class's own rule. Fallback matches the
-            // pack's shipped default; unreachable without a pack loaded, like the members above.
-            new Member("u_DepthDarkness", 0.10f),
+            // --- Water Clarity, bridged for the same reason as the fog pair above: the pack's
+            // underwater include takes it as a parameter, and terrain's translucent forward arm
+            // (the glass fog site) is a deferred-family program with no u_PackOptions block, so the
+            // value must ride here or the identifier is undefined at the first terrain draw. This
+            // slot once carried the pack's depth-darkening floor; the name changed in place so no
+            // later member moved. Fallback is the neutral scale, one water as published.
+            new Member("u_WaterClarity", 1.0f),
             // LabPBR decode audit (2026-08-09) Round 10 instrument: gates terrain.fsh's gAlbedoOut
             // diagnostic repaint (see GBufferDebugView#ENV_DECOMP_ALBEDO_IDENTITY_INPUTS). Off (0)
             // is inert -- terrain writes its normal composited albedo, unchanged. APPENDED LAST, per

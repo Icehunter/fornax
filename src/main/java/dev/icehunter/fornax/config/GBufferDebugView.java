@@ -304,10 +304,10 @@ public enum GBufferDebugView {
      * <p>The closure keys on {@code length(worldPos)} -- radial distance from a camera-relative
      * origin -- which makes the {@code smoothstep}'s transition surface a SPHERE centred on the eye;
      * a sphere intersecting the view frustum draws a curved, camera-following edge. Retuning
-     * near/far/width only slides that sphere in and out; it cannot remove the edge. The closure is
-     * {@code plagueGetWaterFog} (Beer-Lambert, asymptotic, no boundary anywhere by construction),
-     * which takes one scale instead of a near/far pair, so two of the original four channels no
-     * longer exist.
+     * near/far/width only slides that sphere in and out; it cannot remove the edge. A pack whose
+     * underwater fog is Beer-Lambert along the ray (asymptotic, no boundary anywhere by
+     * construction) has no separate closure to show here, and this view then passes the scene
+     * through.
      *
      * <p>Channels now: R = {@code uwClosureScale} (the exponential's scale distance, blocks),
      * G = {@code uwClosureDist} ({@code length(worldPos)}, radial distance from the eye, blocks),
