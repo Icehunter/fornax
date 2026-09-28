@@ -57,9 +57,21 @@ class ArchitectureDocConstantsContractTest {
                         + " too high resolves onto a slot the bind group never appended.");
 
         assertTrue(doc.contains("`u_GeomInput0.." + (GeometryInputs.RESERVED - 1) + "`"),
-                "ARCHITECTURE.md's geometry-input heading does not name the range u_GeomInput0.."
+                "ARCHITECTURE.md does not name the geometry texture range u_GeomInput0.."
                         + (GeometryInputs.RESERVED - 1) + ", which is what RESERVED == "
                         + GeometryInputs.RESERVED + " actually exposes");
+    }
+
+    @Test
+    void documentedGeometryBufferBankMatchesItsSeparateReservation() throws IOException {
+        String doc = read(ARCHITECTURE);
+        int documented = matchOne(doc,
+                Pattern.compile("`GeometryInputs\\.BUFFER_RESERVED == (\\d+)`"),
+                "the documented GeometryInputs.BUFFER_RESERVED value");
+        assertEquals(GeometryInputs.BUFFER_RESERVED, documented,
+                "the separate texel-buffer bank must match the actual reserved binding count");
+        assertTrue(doc.contains("`u_GeomBuffer0.." + (GeometryInputs.BUFFER_RESERVED - 1) + "`"),
+                "ARCHITECTURE.md must name the full geometry texel-buffer range");
     }
 
     @Test

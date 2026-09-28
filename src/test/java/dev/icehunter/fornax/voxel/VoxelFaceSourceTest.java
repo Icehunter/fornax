@@ -49,8 +49,9 @@ class VoxelFaceSourceTest {
                     new BakedQuad.MaterialInfo(sprite, ChunkSectionLayer.TRANSLUCENT, null, -1, true, 0));
             var faces = VoxelFaceTexture.packSources(List.of(part(List.of(glass))),
                     VoxelShapeKind.FULL, -1, index(sprite, 0));
-            // NORTH's exact UV is usable, but neither opaque-coverage nor alpha-test is claimed.
-            assertEquals(0x01ffffff, faces.textureWords()[2 * VoxelFaceTexture.FACE_WORDS]);
+            // NORTH gets a boundary-only mapping (bit 5) and the translucent-layer fact (bit 7),
+            // never the legacy usable-UV bit -- see VoxelFaceTexture.mapping().
+            assertEquals(0xa0ffffff, faces.textureWords()[2 * VoxelFaceTexture.FACE_WORDS]);
             var summary = faces.summaries().get(Direction.NORTH.get3DDataValue());
             assertTrue(summary.authoredCandidate(), "raw authored emission evidence is retained");
             assertEquals(MaterialSourceIndex.UNSUPPORTED_GEOMETRY, summary.flags());

@@ -85,7 +85,9 @@ class RtRayQueryKernelContractTest {
                 "one tier-word read per ray is what makes the buffer form cascade");
         assertTrue(k.contains("writeRecord(base, 0.0, 0u, 0u, 0u, vec3(0.0), 0u, 0u);"),
                 "an ABI mismatch leaves an all-zero record, which reads as unanswered under any layout");
-        assertTrue(k.indexOf("c.abiVersion != ABI_VERSION") < k.indexOf("vec4 originAndMin"),
+        int requestRead = k.indexOf("vec4 originAndMin = requests[index * 2u];");
+        assertTrue(requestRead >= 0, "the request-buffer read must be found, not a helper parameter");
+        assertTrue(k.indexOf("c.abiVersion != ABI_VERSION") < requestRead,
                 "the ABI is checked before any request is read at the wrong stride");
     }
 
@@ -111,6 +113,53 @@ class RtRayQueryKernelContractTest {
         assertTrue(k.contains("gl_RayFlagsNoneEXT"), "opacity is the geometry's, not the ray's");
         assertFalse(k.contains("gl_RayFlagsNoOpaqueEXT"));
         assertFalse(k.contains("gl_RayFlagsOpaqueEXT"));
+    }
+
+    @Test
+    void invalidOrInactiveRequestsStayUnansweredBeforeTraversal() throws IOException {
+        // A source contract pins the validation before the hardware instruction; shaderc alone
+        // cannot reject data-dependent NaNs or the inactive request's zero-length interval.
+        String k = kernel();
+        int validator = k.indexOf("bool validQueryInput(");
+        assertTrue(validator >= 0, "the request validator must ship in the kernel");
+        String validation = k.substring(validator, k.indexOf("\n}", validator));
+        assertTrue(validation.contains("any(isnan(originAndMin))")
+                && validation.contains("any(isinf(originAndMin))"), "finite origin and minimum");
+        assertTrue(validation.contains("any(isnan(directionAndMax))")
+                && validation.contains("any(isinf(directionAndMax))"), "finite direction and maximum");
+        assertTrue(validation.contains("any(isnan(origin))")
+                && validation.contains("any(isinf(origin))"), "rebasing must also remain finite");
+        assertTrue(validation.contains("originAndMin.w < 0.0"), "negative minima are invalid");
+        assertTrue(validation.contains("directionAndMax.w <= 0.0"), "zero maximum is an inactive request");
+        assertTrue(validation.contains("directionAndMax.w < originAndMin.w"),
+                "Vulkan requires Tmin <= Tmax; a positive equal interval remains valid");
+        assertTrue(validation.contains("any(notEqual(directionAndMax.xyz, vec3(0.0)))"),
+                "zero direction cannot be normalized");
+
+        int guard = k.indexOf("if (!validQueryInput(originAndMin, directionAndMax, origin)) {");
+        int traversal = k.indexOf("rayQueryInitializeEXT(");
+        assertTrue(guard > validator && guard < traversal, "validation precedes hardware traversal");
+        String rejection = k.substring(guard, k.indexOf("\n    }", guard));
+        assertTrue(rejection.contains("writeRecord(base, 0.0, 0u, 0u, 0u, vec3(0.0), 0u, 0u);"),
+                "invalid inputs certify neither visibility nor an answering tier");
+        assertTrue(rejection.contains("return;"));
+        assertFalse(rejection.contains("MISS_DISTANCE"));
+    }
+
+    @Test
+    void finiteNonzeroDirectionsNormalizeWithoutSquaringTheirOriginalMagnitude() throws IOException {
+        String k = kernel();
+        int guard = k.indexOf("if (!validQueryInput(originAndMin, directionAndMax, origin)) {");
+        assertTrue(guard >= 0, "normalization requires a validated nonzero finite direction");
+        int traversal = k.indexOf("rayQueryInitializeEXT(");
+        String preparation = k.substring(guard, traversal);
+        assertTrue(preparation.contains("float directionScale = max(abs(direction.x), max(abs(direction.y), abs(direction.z)));"));
+        assertTrue(preparation.contains("direction /= directionScale;"),
+                "scaling keeps the squared norm finite for large and small finite directions");
+        assertTrue(preparation.indexOf("direction /= directionScale;")
+                < preparation.indexOf("direction *= inversesqrt(dot(direction, direction));"));
+        assertTrue(k.contains("originAndMin.w, direction, directionAndMax.w)"),
+                "valid requests retain their original interval");
     }
 
     @Test

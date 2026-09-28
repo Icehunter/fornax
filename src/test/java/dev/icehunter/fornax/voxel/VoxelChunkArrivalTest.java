@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -282,13 +283,13 @@ class VoxelChunkArrivalTest {
                 "an unsubmitted replacement must not erase the previous owner's light-clear requirement");
     }
 
-    /** The real uploadSlots entry checks isEmpty before resolving GPU buffers. Observe the
-     * actual list passed across that boundary; the empty registry still performs no GPU transfer. */
+    /** The real uploadSlots entry iterates the submitted batch before queueing immutable data.
+     * Observe that input; the empty registry still performs no GPU transfer. */
     private static final class UploadProbe extends ArrayList<BrickGridUpload.SlotUpload> {
         private List<BrickGridUpload.SlotUpload> atUpload;
-        @Override public boolean isEmpty() {
+        @Override public Iterator<BrickGridUpload.SlotUpload> iterator() {
             atUpload = new ArrayList<>(this);
-            return super.isEmpty();
+            return super.iterator();
         }
     }
 

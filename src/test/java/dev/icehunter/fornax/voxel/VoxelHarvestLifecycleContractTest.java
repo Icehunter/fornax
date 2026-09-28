@@ -32,12 +32,23 @@ class VoxelHarvestLifecycleContractTest {
         String upload = Files.readString(Path.of(
                 "src/main/java/dev/icehunter/fornax/voxel/BrickGridUpload.java"));
         int single = upload.indexOf("public static void uploadSlot(");
-        int singleLock = upload.indexOf("synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK)", single);
-        int singleGuard = upload.indexOf("if (!VoxelWindow.hasCurrentSourceSummary(result))", singleLock);
-        int singleBuffer = upload.indexOf("BufferInstance occupancy = registry.getBuffer", singleLock);
-        assertTrue(singleGuard > singleLock && singleGuard < singleBuffer);
-        assertTrue(upload.contains("if (!VoxelWindow.hasCurrentSourceSummary(item.result())\n"
-                + "                            || (item.sectionState() != null"));
+        int singleEnd = upload.indexOf("\n    }", single);
+        assertTrue(single >= 0 && singleEnd > single);
+        assertTrue(upload.substring(single, singleEnd).contains(
+                "uploadSlots(registry, List.of(new SlotUpload(slot, result, false)))"),
+                "single uploads must use the same guarded queue as batches");
+        int batch = upload.indexOf("public static void uploadSlots(");
+        int batchLock = upload.indexOf("synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK)", batch);
+        int batchGuard = upload.indexOf("!VoxelWindow.hasCurrentSourceSummary(item.result())", batchLock);
+        int enqueue = upload.indexOf("queue(registry).publish(", batchLock);
+        assertTrue(batch >= 0 && batchLock > batch && batchGuard > batchLock && enqueue > batchGuard,
+                "retired data must be rejected before it enters the frame queue");
+        int record = upload.indexOf("private static void uploadBatchLocked(");
+        int recordGuard = upload.indexOf("!VoxelWindow.hasCurrentSourceSummary(item.result())", record);
+        int optionalStateGuard = upload.indexOf("|| (item.sectionState() != null", recordGuard);
+        int transfer = upload.indexOf("VK13.vkCmdUpdateBuffer(", record);
+        assertTrue(record >= 0 && recordGuard > record && optionalStateGuard > recordGuard && transfer > optionalStateGuard,
+                "the drain must recheck lifetime independently of optional metadata before recording writes");
         String window = Files.readString(Path.of(
                 "src/main/java/dev/icehunter/fornax/voxel/VoxelWindow.java"));
         assertTrue(window.contains("previous.withLightmap(sample.getValue())"));

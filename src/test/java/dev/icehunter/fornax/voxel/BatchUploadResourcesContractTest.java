@@ -11,7 +11,7 @@ class BatchUploadResourcesContractTest {
     @Test
     void batchesReuseRegistryOwnedResourcesInsteadOfAllocatingEachTime() throws Exception {
         String source = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/BrickGridUpload.java"));
-        int start = source.indexOf("public static void uploadSlots(");
+        int start = source.indexOf("private static void uploadSlotsNow(");
         String body = source.substring(start, source.indexOf("\n    }", start));
         assertTrue(body.contains("registry.voxelUploadResources()"));
         assertFalse(body.contains("MemoryUtil.memAlloc"));

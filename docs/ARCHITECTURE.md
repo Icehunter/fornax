@@ -881,23 +881,19 @@ kernel does not add a fake zero-time sample. A kernel that reuses often will sim
 timing samples than the rolling window holds. This saves the kernel's own GPU work, not the cost
 of submitting it.
 
-### Geometry-pass inputs (`u_GeomInput0..7`) and `builtin.depth_opaque`
+### Geometry-pass inputs and `builtin.depth_opaque`
 
-A `GEOMETRY`-typed pass, previously a pure placeholder for Sodium's own opaque/cutout terrain draw
-(see §3), can declare `inputs = [...]` like any other pass type, resolved onto a small, fixed set of
-sampler slots appended to Sodium's shared terrain bind group (descriptor set 0):
-`u_GeomInput0..GeometryInputs.RESERVED-1` (`GeometryInputs.RESERVED == 8`). The slot count is fixed
-at class-init, before any pack loads, because `ShaderChunkRenderer.BIND_GROUP` is a process-wide
-static built once (`ShaderChunkRendererBindGroupMixin` appends the eight slots there); it cannot vary
-per pack the way a `TargetRegistry` allocation can.
+Terrain geometry accepts up to eight texture inputs followed by up to eight buffer inputs.
+The texture bank is `u_GeomInput0..7` (`GeometryInputs.RESERVED == 8`); the separate read-only
+`R32_UINT` texel-buffer bank is `u_GeomBuffer0..7` (`GeometryInputs.BUFFER_RESERVED == 8`). A buffer consumes no sampler slot. Both banks are reserved in Sodium's shared
+terrain bind group at class initialization, before a pack loads.
 
-- **Slot mapping is declaration order.** A geometry pass's *i*-th declared input resolves onto
-  `u_GeomInput{i}` (`GraphRunner.refreshGeometryInputViews`, called once per frame from `prepare()`,
-  before Sodium's own opaque terrain draw, the mixin bind site's only consumer). An undeclared
-  trailing slot, including every slot when no pack or no geometry pass is active, is bound to
-  `builtin.noise` as a safe, non-garbage default, never a null or stale view. A slot whose declared
-  input transiently fails to resolve (a compile-disabled target, a registry mid-rebuild) falls back
-  to noise for that frame the same way rather than propagating the failure.
+- **Slot mapping follows declaration order within each bank.** Texture inputs precede the buffer
+  tail. `GraphRunner.refreshGeometryInputViews` refreshes the texture views before terrain drawing;
+  undeclared or temporarily unavailable textures bind `builtin.noise`. Buffer bindings resolve
+  current registry handles at each draw and substitute one zero word when unavailable, allowing
+  shaders to reject missing data with `textureSize`. The empty buffer and cached views are released
+  at the device-idle pack teardown boundary.
 - **`runtime_enabled_if` gates a pass per frame.** Same grammar as `enabled_if`, checked each frame
   against the world rather than the pack's compile options. One name, `dimension`, whose numbers
   come from `util/DimensionId` and reach a shader as `u_WorldBounds.w`, so a gate and a shader
@@ -914,12 +910,13 @@ per pack the way a `TargetRegistry` allocation can.
   routes anything into them, rather than being unloadable until that day arrives. `geometryInputViews`
   is indexed by slot, and `GraphRunner.geometryInputView(slot, index)` takes the slot explicitly; the
   Sodium terrain bind site passes `GeometrySlot.TERRAIN`.
-- **Two load-time `GraphValidator` rules bound this feature.** A geometry pass declaring more than
-  `GeometryInputs.RESERVED` (4) inputs fails load outright (`pass.<name>.inputs`; there is nowhere
-  to put the excess). Two geometry passes claiming the same slot also fail load
-  (`checkAtMostOneGeometryPassPerSlot`, key `pass.<name>.slot`): each slot's inputs resolve into
-  that slot's own bind group, so the second pass's inputs would silently never bind, refused loudly
-  at load instead of left as a silent dead declaration. Distinct slots are independent and legal.
+- **Load-time validation bounds each bank.** More than eight textures or eight buffers fails
+  loading, as does a texture after the buffer tail. Only terrain has a buffer binder; other geometry
+  slots reject buffer inputs. Two geometry passes claiming the same slot also fail loading. Distinct
+  slots are independent. Enabled terrain buffer consumers participate in target allocation and
+  engine-upload demand even when no compute or fullscreen pass reads those buffers.
+- **Compute inputs must name allocated targets.** A virtual consolidate-only output has no compute
+  binding. Validation rejects it with an instruction to bind the declared source targets directly.
 - **`program` is honoured, not decorative.** `GraphRunner.geometryProgramPath(slot)` turns a pass's
   pack-root-relative `program` into the extension-less path an `Identifier` wants
   (`shaders/blocks/terrain` → `blocks/terrain`), and returns null when no pack is active or no pass
@@ -1456,13 +1453,14 @@ be restated here.
 | `BlockRendererMaterialIdMixin` | `BlockRenderer` | Set/clear the per-thread material ID around each block's model meshing call | Inject (HEAD/RETURN) |
 | `ChunkVertexFactsMixin` | `ChunkVertexEncoder.Vertex` | Stamp each copied vertex with its block's packed facts (`VertexFacts`) so quads split by translucent sorting keep them past the context clear | Inject |
 | `ClientChunkCacheVoxelLightMixin` | `ClientChunkCache.onLightUpdate` | Queue a voxel world-light refresh for light-only changes, whether or not the section is meshed or visible; does nothing with no pack active | Inject |
-| `ChunkBuilderMeshingTaskMixin` | `ChunkBuilderMeshingTask` | Queue each section's voxel-grid harvest the moment Sodium (re)builds it, piggybacking on Sodium's own change detection; the harvest itself runs on a dedicated background thread (`VoxelWindow.queueMeshTriggeredHarvest`), never inline on Sodium's own meshing thread | Inject |
+| `ChunkBuilderMeshingTaskMixin` | `ChunkBuilderMeshingTask` | Queue background voxel harvests and scope emitted-boundary collection around the original mesh build; cancelled or failed builds discard their captures | Inject + WrapMethod |
+| `BlockRendererBoundaryMixin` | `FRAPIEmitter` (optional) | Observe final Fabric model quads before neighbor culling, then preserve raster culling | WrapOperation |
 | `FluidRendererMaterialIdMixin` | `DefaultFluidRenderer` | Set/clear the per-thread material ID around each block's fluid-surface meshing call (the `renderModel`-parallel path for water/lava quads) | Inject (HEAD/RETURN) |
 | `CompactChunkVertexMixin` | `ChunkMeshFormats` | Substitute the engine's own vertex format for the stock compact format | Redirect |
 | `DefaultChunkRendererGeometryStorageMixin` | `DefaultChunkRenderer` | Route shadow-pass draws to read the already-built SOLID/CUTOUT geometry storage instead of the Fornax-only shadow pass's own (which Sodium never meshes) | Redirect x2 |
 | `DefaultChunkRendererRenderMixin` | `DefaultChunkRenderer` | Bind the PBR-settings uniform right after the stock per-section time uniform | Inject |
 | `DefaultChunkRendererRenderPassMixin` | `DefaultChunkRenderer` | Route deferred (opaque/cutout) draws into a multi-attachment G-buffer render pass instead of the single-attachment stock target; translucent untouched | WrapOperation |
-| `DefaultChunkRendererTextureBindMixin` | `DefaultChunkRenderer` | Bind the normal-map and material-map atlases, then every reserved geometry-input slot (`u_GeomInput0..GeometryInputs.RESERVED-1`, noise-defaulted) right after the stock block atlas bind | Inject |
+| `DefaultChunkRendererTextureBindMixin` | `DefaultChunkRenderer` | Bind the normal/material atlases, eight geometry texture slots and eight read-only uint texel-buffer slots after the stock block atlas bind | Inject |
 | `DrawContextGLMixin` | `GLDrawContext` | Resolve and upload sun-direction/previous-region uniforms by name (OpenGL backend) | Inject x2 |
 | `DrawContextInvoker` | `DrawContext` | Expose a protected static helper to sibling mixins | Invoker |
 | `DrawContextVKMixin` | `VKDrawContext` | Widen the per-draw Vulkan push-constant block from 20 to 60 bytes, with matching alignment gaps | **Overwrite** |
@@ -1471,7 +1469,7 @@ be restated here.
 | `RenderSectionManagerFogOcclusionMixin` | `RenderSectionManager` | Disable Sodium's fog-distance section shrink while a pack is active, so pack-owned aerial/border fog never loses geometry before its own fade | ModifyExpressionValue |
 | `SectionRenderDataStorageRevisionMixin` | `SectionRenderDataStorage` | Stamp each vertex-storage mutation before it starts; resize/deletion stamp every region slot. `TerrainMeshRevision` exposes process-unique generations, so RT mesh caches cannot alias same-size uploads or recycled storage | Inject (HEAD) |
 | `ShaderChunkRendererAccessor` | `ShaderChunkRenderer` | Expose the private static compiled-pipeline cache so it can be cleared on a render-state flip | Accessor |
-| `ShaderChunkRendererBindGroupMixin` | `ShaderChunkRenderer` | Append the normal/material sampler slots, the PBR-settings uniform, and the reserved `u_GeomInput0..N-1` geometry-input sampler slots to the shared terrain bind-group layout | WrapOperation |
+| `ShaderChunkRendererBindGroupMixin` | `ShaderChunkRenderer` | Append the normal/material samplers, PBR uniform, eight geometry samplers and eight `R32_UINT` texel-buffer slots to the shared terrain bind-group layout | WrapOperation |
 | `ShaderChunkRendererConstantsMixin` | `ShaderChunkRenderer` | Add a deferred-output shader constant for opaque/cutout passes only, while a pack is active | ModifyReturnValue |
 | `ShaderChunkRendererDeferredPipelineMixin` | `ShaderChunkRenderer` | Build the five-attachment colour-target-state set for deferred pipelines, leaving translucent's single-target state untouched | WrapOperation |
 | `ShaderChunkRendererShaderLocationMixin` | `ShaderChunkRenderer` | Redirect terrain shader compilation to the active pack's runtime shader (or the engine's built-in fallback with no pack active) | Redirect x2 |
@@ -2430,8 +2428,12 @@ copies that into `TerrainShadowResult` where the pack first reads it. Buffer-for
 `rt_ray_query.comp` against the same structure, bound directly to the pack's request and hit
 buffers: no copy in, no copy out, which is the round trip the Metal tier pays for crossing APIs. The
 kernel is the Metal one's word table byte for byte (ABI 4, nine-word hits, fill mode, both atlas
-encodings); the one structural difference is that Vulkan has no per-primitive data pointer, so a hit
-reaches its mesh's records through the table of primitive addresses. A pack that declares queries
+encodings); Vulkan has no per-primitive data pointer, so a hit reaches its mesh's records through the
+table of primitive addresses. The Vulkan kernel validates finite request components and rebased
+origins, a nonzero direction, and a nonnegative ordered interval before traversal. A zero maximum
+marks an inactive request. Invalid or inactive requests write nine zero words, including tier zero;
+they do not report a traced miss. Direction normalization scales by the largest component before
+squaring, keeping finite nonzero input magnitudes from overflowing the norm. A pack that declares queries
 with ray-traced shadows off gets a structure built from the 96-block camera window, scheduled once
 per frame. Every buffer comes from `RtAllocator`, VMA with device addresses, so a thousand sections
 cost a handful of device allocations, and every `RtBuffer` is `VK_SHARING_MODE_CONCURRENT` across
@@ -2687,6 +2689,14 @@ driver callbacks. It costs readback time only on F2.
   pairing structural rather than a convention. The buffer form has the same law with the tier in
   word 7: an untraced hit buffer reads back zero-filled, so the tier word, not the sign of the
   distance, is what separates an answer from memory nothing ever wrote.
+
+- **Inactive ray requests must not reach Vulkan traversal.** Setting `tMax = 0` while retaining
+  positive `tMin` violates `VUID-RuntimeSpirv-OpRayQueryInitializeKHR-06350`. The Vulkan query
+  kernel rejects inactive intervals, nonfinite request components, nonfinite rebased origins,
+  negative or reversed bounds, and zero directions before `rayQueryInitializeEXT`. These requests
+  leave tier zero, so missing evidence cannot become a claimed clear segment. Positive equal
+  bounds remain valid. This validates the request, not scene completeness: a nonzero answering
+  tier does not prove that every section along the segment is present in the streamed structure.
 
 - **shaderc's default target is SPIR-V 1.0, and ray query needs 1.4.** `ComputeShaderCompiler`
   sets no target environment for pack shaders, so every pack compute module is Vulkan 1.0 /
@@ -3263,32 +3273,33 @@ storage. A successful flush throws away its rollback records. Sections that arri
 first window is set are handled by the first resync; sections outside the window are handled once
 a later window covers them.
 
-The shell sorts by distance first and by camera facing second, so a light or a blocker close behind
-the camera does not wait for a whole ring of far sections in front. The first 24 sections read on
-the render thread and the rest read on the resync worker. Batch size follows the measured reset,
-packing, submit and commit work against the four-millisecond work target. Time spent waiting for
-the shared lock or the GPU fence is left out of that measure: those waits hold other drawing work,
-and counting them drives a cheap batch down to eight sections and pays the same waits far more
-often. The waits still happen before any buffer is reused or published, so neither ordering nor
-light quality changes. The measure sizes the next batch; it does not bound frame time or how long
-an upload takes.
+The shell sorts by distance first and by camera facing second. The first 24 sections read on the
+render thread and the rest read on the resync worker. Workers publish copied CPU payloads into a
+queue indexed by registry, storage generation and toroidal slot. Newer data replaces older data for
+the same slot. Occupancy clears discard older queued geometry, and light clears survive replacement
+payloads. Invalidations are not delayed by the per-frame geometry upload budget.
 
-Batch voxel uploads reuse one scratch space, command pool and fence, all owned by the registry and
-held under the shared queue lock. Each batch reads the current destination handles and sizes fresh,
-keeps the same per-slot packing and bounds checks, and waits for the work to finish before
-returning. `SynchronousTransfer` stops the pool from being reset or destroyed after a wait fails; a
-failed submit never waits on a fence nothing was signaled against. Closing the registry blocks any
-new resource request and retires the workspace; a changed light-volume layout also replaces it.
-A single mesh publish uses this same batch path too, with or without optional metadata.
-A CPU map tracks the owner each slot's light was last successfully uploaded for. Mesh, resync and
-light-only updates all check against that map: a newer update for the same owner inherits a clear
-that has not gone through yet, and going back to the owner already on the GPU keeps its settled
-light. A slot's entry in this map only moves forward once the fence and its required clear both
-succeed; a stale, skipped, out-of-bounds or failed transfer cannot mark the debt as paid. The
-required light range is checked before any writes run. Clearing this bookkeeping means a missing
-owner always asks for a clear on the next accepted upload, since resetting CPU state can leave the
-GPU data untouched. Only a known owner that was actually committed keeps its light settled.
-The older single-slot upload and clear calls are still there on their own.
+`VoxelUploadFrame` drains the queue before opaque terrain draws. The frame transfer waits for the
+previous frame's graphics-completion timeline value. Before submitting that wait, the render thread
+flushes the already-recorded graphics signal outside the shared queue lock. The transfer signals an
+upload-ready value, and graphics waits at `ALL_COMMANDS` before reading voxel buffers. Compute
+consumers share the transfer queue. Transfer barriers order overlapping clears and updates and
+publish the data to subsequent shader reads and writes. Frame-end signaling occurs after forward
+terrain, history and debug reads.
+
+Scratch memory belongs to the registry. The frame uploader owns a reusable command pool and fence;
+it waits before reusing them, outside the shared queue lock. No worker submits GPU work or waits for
+a GPU fence. Destination handles and sizes are read under the lock during recording. Failed
+recording or submission retains queued work and fails the native frame loudly. Successful submission
+runs ownership callbacks and acknowledges only the exact queued revisions it recorded. A newer
+publication cannot be removed by acknowledgement of an older snapshot.
+
+A CPU map tracks the last accepted upload's light owner. Updates for the same owner retain any
+outstanding light-clear requirement; stale or rejected payloads cannot discharge it. A committed
+record means the transfer was accepted and its consumers have an ordered dependency, not that the
+CPU waited for GPU completion. Pack teardown flushes pending graphics synchronization, waits for the
+device to become idle, then releases timeline semaphores and transfer resources. All single-slot,
+batched, light-clear and metadata-reset entry points use the same frame drain.
 
 ### Voxel refill profiling
 
@@ -3299,22 +3310,17 @@ process lifetime, including reloads: subtract two dumps to measure a teleport. A
 executing jobs, excluding queued jobs. Worker-local counters merge once at job completion, including
 failed jobs; ordinary mesh harvests and separate light-only refresh jobs are outside this scope.
 
-Read time includes light capture. Upload time includes transfer reset, packing and command
-recording, submit, fence wait and CPU commit bookkeeping. These spans overlap: do not add them
-together. Shared-queue lock waiting covers result admission and batch upload entry, before taking
-the outer lock. Fence waiting is elapsed host time, including scheduling delays, not GPU busy time.
-Reentrant jobs restore the enclosing telemetry scope; their elapsed spans overlap too.
-Queue time runs from submission to harvest-job entry; for chunk arrivals it also includes removing
-the pending request under the shared lock. Summed queue time can overlap between jobs, and maximum
-job time is not the wall duration of a whole window refill.
+Read time includes light capture. Worker upload spans cover CPU admission and queue publication.
+Transfer packing, submission and ownership callbacks run later on the render thread and do not
+belong to the worker's thread-local refill timing scope. These values cannot be compared directly
+with synchronous transfer timing. Queue time runs from submission to harvest-job entry; overlapping
+jobs do not add up to the wall duration of a complete refill.
 
 Visited positions, attempted reads, null results, successful reads, already-valid skips, obsolete
 work, retired leases and rejected results have separate counts. Null results do not necessarily mean
 unloaded chunks. Outside-build-height reads are counted separately. Light cells count fully captured
-lightmaps; packed sections have recorded update commands; committed sections have completed the
-fence and passed CPU ownership checks. None of these counters asserts complete world coverage.
-Timing adds no per-cell clocks, new world reads or GPU waits. It measures existing work inside a
-refill job, not all renderer contention or the later render-thread source-pool publication.
+lightmaps. A submitted upload can remain pending on the GPU; CPU ownership counters do not prove
+GPU completion or complete world coverage. Timing adds no per-cell clocks or world reads.
 
 ### Optional voxel section state and source inventory
 
@@ -3419,7 +3425,11 @@ and 4096 64-byte records occupy 262,208 bytes. All fields are scalar uint words:
 Admission retains references to committed snapshots and one scalar cursor per section, never
 per-section candidate arrays. It takes turns through owner-coordinate order with a budget of 4096
 cell-index reads per frame, including repeated directional reads. A full pool stops scanning.
-Lightmap-only updates preserve admission; geometry replacement, slot recycling, atlas change and
+Lightmap-only updates preserve admission. The deferred uploader clones the cell and palette arrays,
+so `VoxelGeometryPayload` compares every geometry field by exact content while retaining source
+evidence and ray-geometry identity. Reallocated copies cannot trigger a geometry-replacement error
+or republish source-window membership; changed geometry still requires a new geometry revision.
+Geometry replacement, slot recycling, atlas change and
 storage reset remove the affected rows. Static overflow faces carry their page in the mapping header;
 page-aware consumers sample the original layer. Animated ghosts without a full-copy page remain
 unsupported static source mappings.
@@ -3511,8 +3521,8 @@ superseded callbacks cannot publish new sprite identities.
 Optional metadata readers run on the compute queue. Upload, reset and clear commands order prior
 compute shader reads before their first transfer writes; the existing final transfer-to-compute
 barrier makes the new records visible to subsequent compute reads. A pack can publish a status
-image for graphics through the graph's existing semaphore and image-reuse chain. These buffer
-barriers alone do not authorize direct graphics-queue reads of mutable metadata.
+image for graphics through the graph's existing semaphore and image-reuse chain. The frame upload
+handshake also orders direct graphics readers before later metadata reuse.
 
 Atlas publication is independent of graph registry lifetime. Before consumers execute,
 `VoxelWindow.synchronizeSourceGeneration` compares the current atlas generation against its
@@ -3524,7 +3534,7 @@ backend; an unsuccessful transfer cannot leave an old header silently accepted. 
 submission, fence or readback is added.
 
 `VoxelWindow.sourceInventoryStats` reports CPU totals of source summaries only after the existing
-batch transfer completion wait succeeds. Replacing a committed slot replaces its contribution;
+frame transfer submission succeeds. Replacing a committed slot replaces its contribution;
 clearing it subtracts that contribution. Eligible and unsupported face counters follow the same
 completion and invalidation rule and show up in the existing F10 source telemetry; a queued or
 replaced harvest cannot move them. Committed-upload, stale-upload and cleared-slot counters
@@ -3610,19 +3620,70 @@ with identical cross-sections reduce the result. More than eight remaining boxes
 refinement; nothing is inflated or truncated. The existing palette box words, CUTOUT/CROSS flags,
 GPU buffer sizes and shader traversal stay unchanged.
 
-`VoxelPaletteShapes` deduplicates exact results by original state entry and packed boxes within the
-existing 96-entry section palette. Original entries remain available for unsupported cells. Each
-appended variant copies material/source metadata and recomputes its face-seal mask. Exhausting the
-cap logs geometry pressure and keeps the original selection fallback. It never points a cell at some
-other shape, and it never throws away evidence that has not changed. The harvester does not call
-`VoxelPaletteShapes.refine`. The rebuild above runs once for each distinct state in a section, in
-`buildEntry`, so every cell with that state gets the rebuilt boxes from the one palette entry they
-share. `VoxelPaletteShapes` is the place to hook a rebuild that needs a different shape for each
-cell, one that depends on where the cell is.
+`VoxelPaletteShapes` deduplicates exact results within the existing 96-entry section palette.
+Static model refinement runs once per state in `buildEntry`. Contextual emitted-boundary facts can
+append variants with distinct boxes, face maps or colors. Variants preserve intrinsic state emission,
+recompute face seals and mark authored source evidence unknown when fallback sprites cannot prove
+coverage. Palette exhaustion keeps the original selection geometry and clears its shared boundary
+certificate, so an unsupported cell cannot inherit a proof from another position.
 Resolvers and geometry keys die with the harvest lease; atlas opacity evidence clears after
 reader drain. Tests cover wrapper emission, key reuse and null keys, all 16 fence connections,
 cardinal model baking, receiving/gap/casting rays, unsupported geometry and palette/source
 consistency. These fixtures do not prove the final shadow appearance in a running modded client.
+
+### Emitted model boundaries
+
+`VoxelBoundaryCapture` observes the renderer's actual Fabric model emission during a section mesh
+build. The optional `BlockRendererBoundaryMixin` wraps the `FRAPIEmitter` bridge available in
+Sodium 0.9.2; older versions retain the existing trusted static-model path. The model runs once on
+its renderer-owned thread and world view. An outer emitter transform sees the model's final
+positions, UVs, vertex colors, atlas and layer, before normal lighting. Early face culling is
+disabled for that invocation so a face against a neighboring lamp is still observed. The observer
+applies the original cull predicate to each final, non-null cull face before raster output. Model
+transforms that discard or omit geometry themselves cannot be recovered by this observer. A custom
+model's early-cull group decision on null-cull quads also cannot be reconstructed from one emission;
+late culling preserves final face semantics, not every possible use of the early-cull callback.
+
+The collector holds an atlas read lease during emission and reduction. Complete grid-aligned cubes
+are certified directly, including subdivided faces. For partial geometry, the state shape proposes
+an immutable candidate box union on the renderer-owned thread. The emitted exterior must cover
+every boundary grid face of that union; selection geometry alone never grants a certificate. This
+admits flush-connected bodies whose internal end caps are absent, including all sixteen pane
+connection states. A mismatching candidate falls back to closed-cuboid reconstruction, with the
+same exact exterior proof and eight-box limit. Partial geometry with a
+solid backing, offsets, excessive quads, unsupported atlas data, or varying vertex color retains no
+certificate. Full cubes preserve legacy alpha mapping and opaque coverage bits. Partial boundaries
+retain only affine maps that agree for every quad sharing a direction. Directions with incompatible
+maps can retain a material sample from their largest supported emitted rectangle, without claiming
+an affine map or proving a boundary. Per-face colors are measured
+from the actual emitted sprites and crops using the existing alpha-weighted quad average; this
+average is not a spatially varying material representation. Captures retain no sprite references.
+
+The public Fabric geometry key permits reuse only within the current section build, with block
+state and resolved tint included in the key. Null keys are never reused. Immutable snapshots are
+keyed by world identity, section owner, atlas/model generation, and mesh-build serial. New builds,
+retirement, cancellation and stale completion cannot publish an older capture over newer data.
+Each section stores at most 96 distinct cell facts plus its 4096-byte index array, and the cache
+holds at most one owner per active toroidal slot. Failed captures are distinguished from absent
+captures so a final model cannot inherit an invalid fallback certificate.
+
+The harvest worker consumes those immutable facts and creates palette variants for distinct
+geometry, texture mappings or colors at different positions. Boundary variants retain raw state
+emission but mark authored source evidence unknown; fallback sprites cannot establish exact source
+coverage for transformed geometry. Cutout state, representative UV rect and measured extinction are
+recomputed from the captured parts with the existing resolvers. Pure translucent captures carry no
+legacy alpha-test rect or foliage extinction. Palette exhaustion clears the shared fallback boundary
+proof.
+
+Newly exposed voxel sections request missing captures through a nearest-first queue, with one
+dirty-section request per active voxel frame. The renderer schedules the remesh; a completed mesh
+queues an ordinary background harvest and never requests another remesh. Canceled or failed latest
+builds requeue through the same frame budget; superseded builds cannot request a retry. Every exposed
+toroidal slot retires its previous capture and in-flight serial, so leaving and returning cannot
+reuse neighbor-dependent facts collected before the section left the window. A section outside the
+renderer's available mesh range remains without contextual boundary proof. Logs report the first
+accepted or rejected result for each model class and reason during a lifecycle, plus retirement
+counts, so missing activation and unsupported models are distinguishable.
 
 ### Optional voxel face texture mapping
 
@@ -3633,17 +3694,40 @@ same wrap-around slot and 96-entry addressing as `voxelPalette`:
 has one header word, then six raw float words `u0,v0,du/ds,dv/ds,du/dt,dv/dt`. The header packs
 biome RGB into bits 0..23 and flags into bits 24..31 (flag bit 0 usable UV mapping, bit 1
 alpha-tested mapping, bit 2 rendered opaque-face coverage, bits 3..4 the 1-based static overflow
-page). Page zero uses the base atlas; page 1..3 requires the matching array layer after ghost-UV
+page, bit 5 boundary-only affine mapping, bit 6 certified closed box boundary, and bit 7 a
+translucent-layer face). Page zero uses the base atlas; page 1..3 requires the matching array layer after ghost-UV
 remapping. The seven-word stride and existing UVs are unchanged. Tint alpha is not stored; alpha comes
 from the atlas sample instead. Local `(s,t)` is `(y,z)` on X faces,
 `(x,z)` on Y faces and `(x,y)` on Z faces, so a turned or mirrored baked UV still comes out right. A
-face is usable only when one solid, alpha-tested or see-through quad covers the whole cell face
-with UVs running straight across it. A see-through mapping gives atlas alpha, normal and material
-data but does not claim alpha-test or solid cover. Stacked faces, part cells, crosses, loose leaf
-quads and higher tint layers mark it unusable, and a reader must fall back on the average face
-colour. A usable mapping does not mean the face is solid: readers check the cover flag or the
-atlas alpha. Dropping a see-through mapping would starve reflection readers of that alpha and the
-material maps.
+legacy mapping is usable only when one opaque or alpha-tested quad covers the whole cell face
+with affine UVs. Boundary-only mappings use bit 5 without setting legacy bit 0. They describe
+translucent full faces and compatible axis-aligned partial faces, including pane edges, in the
+same block-local coordinates. Several rectangles may share one direction only when their sprite,
+tint, layer and extrapolated affine UV map agree. Their extrapolated origin can lie outside the
+sprite; a consumer samples only at a certified boundary point. Unsupported maps remain invalid.
+
+The exact header combination `(header & 0x23000000) == 0x02000000` stores sample-only material
+evidence for a partial direction whose rectangles cannot share one affine map. Both usable-mapping
+bits 24 and 29 are clear; bit 25 has this separate meaning only in that combination. Words 1 and 2
+hold the chosen rectangle's center atlas UV, word 3 its area in square blocks, and words 4 through 6
+are zero. UVs are finite and inside the atlas unit square; area is finite, positive and at most one.
+The largest supported emitted rectangle supplies the sample, with first-emitted order breaking
+ties. RGB tint, static page and translucent-layer facts retain their existing header positions.
+Readers must reject malformed sample words and must never use a material sample as a spatial
+mapping, source-coverage proof or geometry certificate. Legacy visibility and source sampling keep
+requiring bit 24, while explicit affine-boundary readers require bit 29. This representative sample
+cannot describe different optical materials within one volume; optical classification remains a
+pack decision.
+
+Bit 7 is a layer fact independent of mapping validity. Bit 6 is repeated in all six headers only
+when the complete trusted static model or captured emitted boundary exactly covers the palette
+box union on the 1/16-block grid; alpha does not participate in this geometry proof. Missing faces, displaced, rotated,
+off-grid and unsupported models cannot certify a volume. Partial cells retain their actual boxes,
+never a fabricated full cube. Geometry refinement clears an existing proof until re-certified.
+Palette word zero bit 12 mirrors the existing raw `lightTransmissive` fact from `voxelFaceSeal`
+bit 6. It is independent of closure and layer, and neither it nor a cutout boundary proves that
+the material is glass. The pack owns optical material classification and transport. The engine's
+opaque mesh queries and legacy visibility behavior are unchanged.
 
 A see-through face keeps its raw material-source evidence but stays flagged as unsupported source
 geometry: a mapping cannot say how much light a blended surface gives. This is separate from the

@@ -71,12 +71,17 @@ class VoxelSourceWindowPublicationTest {
         String window = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/VoxelWindow.java"));
         assertTrue(window.contains("EngineBufferUploadQueue.discard(VoxelSourceWindow.TARGET)"));
         assertTrue(window.contains("EngineBufferUploadQueue.publish(VoxelSourceWindow.TARGET"));
-        assertTrue(window.contains("sourceWindow.commit(item.slot(), item.result(), item.sectionState())"));
+        assertTrue(window.contains("sourceWindow.commit(item.slot(), snapshot, item.sectionState())"));
+        assertTrue(window.contains("if (!isCurrentUpload(item) || !hasCurrentSourceSummary(item.result())"),
+                "source-window publication must retain the original payload ownership guard");
+        int callback = upload.indexOf("VoxelUploadFrame.afterSubmit(() ->");
+        assertTrue(callback >= 0 && upload.indexOf("VoxelWindow.onSectionUploadCommitted(item.token(), item.snapshot())", callback) > callback,
+                "source-window evidence must match the immutable bytes in the submitted grid");
         assertTrue(window.contains("sourceWindow.pending(slot)"));
         assertTrue(window.contains("sourceWindow.invalidate(exposed)"));
     }
-    /** A worker upload may land between graph preparation and either source consumer. Refresh
-     * under that consumer's existing lock before recording its pending buffer update. */
+    /** Refresh source membership under each consumer's existing lock before recording its pending
+     * buffer update; a harvested replacement may retire membership after frame preparation. */
     @Test void everySourceWindowComputeConsumerRefreshesWithinItsDispatchCriticalSection() throws Exception {
         String source = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/pack/graph/ComputePassRunner.java"));
         int run = source.indexOf("public long run(");

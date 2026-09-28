@@ -44,15 +44,17 @@ class VoxelSectionStateUploadContractTest {
         assertTrue(window.contains("BrickGridUpload.invalidateSectionStates(newRegistry)"),
                 "A same-size storage reset must not retain committed metadata");
     }
-    @Test void sourceSummaryPublishesBeforeStateAndTotalsFollowTransferCompletion() throws Exception {
+    @Test void sourceSummaryPublishesBeforeStateAndTotalsFollowSuccessfulSubmission() throws Exception {
         String upload = source("BrickGridUpload");
         int batch = upload.indexOf("private static void uploadBatchLocked");
         int source = upload.indexOf("vkCmdUpdateBuffer(cmd, sourceSummaryBuffer, sourceSummaryOffset, sourceSummaryScratch)", batch);
         int state = upload.indexOf("vkCmdUpdateBuffer(cmd, sectionStateBuffer, sectionStateOffset, sectionStateScratch)", batch);
         int barrier = upload.indexOf("recordUploadToComputeReadBarrier(cmd, stack)", batch);
-        int totals = upload.indexOf("VoxelWindow.onSectionUploadCommitted(item)", batch);
+        int callback = upload.indexOf("VoxelUploadFrame.afterSubmit(() ->", batch);
+        int totals = upload.indexOf("VoxelWindow.onSectionUploadCommitted(item.token(), item.snapshot())", batch);
+        assertTrue(callback > barrier && totals > callback);
         assertTrue(source > batch && state > source && totals > barrier,
-                "Source inventory and state share one transfer; CPU totals may change only after its completion wait");
+                "Source inventory and state share one transfer; CPU totals may change only in the frame transfer submission callback");
         int clear = upload.indexOf("private static void clearOccupancySlotsLocked");
         assertTrue(upload.indexOf("vkCmdFillBuffer(cmd, sourceSummaryBuffer, sourceSummaryOffset,", clear) > clear);
     }

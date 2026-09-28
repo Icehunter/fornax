@@ -258,11 +258,12 @@ public final class VoxelDebugRaymarchPass {
         int sectionY = SectionPos.blockToSectionCoord(camY);
         int sectionZ = SectionPos.blockToSectionCoord(camZ);
         long sectionKey = SectionPos.asLong(sectionX, sectionY, sectionZ);
-        // The window is always centered on the camera's section; capture it every frame so the shader
-        // can bound the DDA to in-window slots (see the bound check in voxel_debug_raymarch.comp).
-        capturedCenterX = sectionX;
-        capturedCenterY = sectionY;
-        capturedCenterZ = sectionZ;
+        // This frame's grid was drained before opaque draws. Recenter queues next-frame writes;
+        // the late debug dispatch must retain the same center as the existing frame's readers.
+        VoxelWindow.WindowState frameWindow = VoxelWindow.currentState();
+        capturedCenterX = frameWindow.centerX();
+        capturedCenterY = frameWindow.centerY();
+        capturedCenterZ = frameWindow.centerZ();
 
         // Recenter + resync ONLY when the camera's section actually changed (Task 10's flagged
         // performance note) -- recenterAndResync harvests only the newly-exposed shell on a section

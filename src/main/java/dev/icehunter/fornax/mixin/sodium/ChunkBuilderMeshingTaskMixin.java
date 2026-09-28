@@ -1,6 +1,9 @@
 package dev.icehunter.fornax.mixin.sodium;
 
 import dev.icehunter.fornax.voxel.VoxelWindow;
+import dev.icehunter.fornax.voxel.VoxelBoundaryCapture;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildContext;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.tasks.ChunkBuilderMeshingTask;
@@ -43,6 +46,24 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 public abstract class ChunkBuilderMeshingTaskMixin {
     @Shadow
     private ChunkRenderContext renderContext;
+
+    /** A method scope is needed for exception cleanup; a RETURN injection cannot release a
+     * failed build's thread-local collector. The original meshing implementation runs once. */
+    @WrapMethod(method = "execute(Lnet/caffeinemc/mods/sodium/client/render/chunk/compile/ChunkBuildContext;"
+            + "Lnet/caffeinemc/mods/sodium/client/util/task/CancellationToken;)"
+            + "Lnet/caffeinemc/mods/sodium/client/render/chunk/compile/ChunkBuildOutput;")
+    private ChunkBuildOutput fornax$captureScope(ChunkBuildContext buildContext, CancellationToken cancellationToken,
+                                                Operation<ChunkBuildOutput> original) {
+        VoxelBoundaryCapture.beginSection(Minecraft.getInstance().level, this.renderContext.getOrigin());
+        boolean completed = false;
+        try {
+            ChunkBuildOutput result = original.call(buildContext, cancellationToken);
+            completed = result != null && !cancellationToken.isCancelled();
+            return result;
+        } finally {
+            VoxelBoundaryCapture.finishSection(completed);
+        }
+    }
 
     @Inject(method = "execute(Lnet/caffeinemc/mods/sodium/client/render/chunk/compile/ChunkBuildContext;"
             + "Lnet/caffeinemc/mods/sodium/client/util/task/CancellationToken;)"

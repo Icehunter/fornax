@@ -23,10 +23,12 @@ class FrameGenerationTeardownContractTest {
 
     @Test
     void closeCurrentDeactivatesFrameGeneration() throws IOException {
-        String source = Files.readString(GRAPH_RUNNER);
+        String source = Files.readString(GRAPH_RUNNER).replace("\r\n", "\n");
         int methodStart = source.indexOf("private static void closeCurrent()");
         assertTrue(methodStart >= 0, "GraphRunner.closeCurrent must still exist");
-        String method = source.substring(methodStart, source.indexOf("\n    }\n", methodStart));
+        int methodEnd = source.indexOf("\n    }\n", methodStart);
+        assertTrue(methodEnd > methodStart, "GraphRunner.closeCurrent body must have a closing brace");
+        String method = source.substring(methodStart, methodEnd);
 
         assertTrue(method.contains("FrameGenPresenter.deactivateAll();"),
                 "pack teardown must deactivate frame generation, or it keeps presenting every frame"

@@ -324,8 +324,13 @@ public final class GraphRunner {
         return GraphInputResolver.resolveView(reference, registry, mipchainTargets);
     }
 
+    /** Live registry buffer at the appended terrain buffer index, or a one-word zero descriptor. */
+    public static GpuBuffer geometryInputBuffer(GeometrySlot slot, int index) {
+        return GeometryBufferBindings.resolve(slot, index, registry);
+    }
+
     /**
-     * The resolved view for {@code slot}'s {@code index}-th declared geometry input, or {@link
+     * The resolved view for {@code slot}'s {@code index}-th leading texture input, or {@link
      * NoiseTexture#getView()} when that slot's pass declares fewer than {@code index + 1} inputs, no
      * pass claims the slot, or that input's resolution is transiently unavailable this frame (a gated
      * target mid-disable, a registry not yet built) -- a safe, non-garbage default, never the live
@@ -343,11 +348,11 @@ public final class GraphRunner {
     }
 
     /**
-     * Re-resolves every reserved geometry-input index for every geometry slot the active pack claims.
-     * {@link GraphValidator} already refuses both more inputs than {@link GeometryInputs#RESERVED} and
-     * two passes claiming one slot, so this neither truncates nor has to pick a winner. Called once
+     * Resolves geometry texture views and records appended buffer references for the active pack.
+     * {@link GraphValidator} bounds each bank separately and rejects duplicate slot claims.
+     * Buffers resolve their current allocation at draw time. Called once
      * per frame from {@link #prepare()} -- BEFORE Sodium's own opaque terrain draw runs, this array's
-     * only reader today -- so a pack that resolves a declared input's target (or history slot, or a
+     * and the later forward draw -- so a pack that resolves a declared input's target (or history slot, or a
      * mipchain's full chain view) gets this frame's freshly (re)sized view, not a stale one from
      * before {@link TargetRegistry}'s own {@code ensureSize} ran earlier in the same {@link
      * #prepare()} call. A resolution failure (declared target compile-disabled/not yet allocated, e.g.
@@ -373,8 +378,13 @@ public final class GraphRunner {
             GeometrySlot slot = p.slot() == null ? GeometrySlot.DEFAULT : p.slot();
             GpuTextureView[] views = geometryInputViews[slot.ordinal()];
             List<String> inputs = p.inputs();
-            int count = Math.min(inputs.size(), GeometryInputs.RESERVED);
-            for (int i = 0; i < count; i++) {
+            int bufferIndex = 0;
+            for (int i = 0; i < inputs.size(); i++) {
+                TargetSpec target = pack.graph().targets().get(inputs.get(i));
+                if (target != null && target.kind() == TargetKind.BUFFER) {
+                    GeometryBufferBindings.set(slot, bufferIndex++, inputs.get(i));
+                    continue;
+                }
                 try {
                     views[i] = GraphInputResolver.resolveView(inputs.get(i), r, mipchainTargets);
                 } catch (RuntimeException e) {
@@ -406,6 +416,7 @@ public final class GraphRunner {
      * {@code TargetInstance} view must never survive into a later draw.
      */
     private static void clearGeometryInputViews() {
+        GeometryBufferBindings.clearReferences();
         for (GpuTextureView[] views : geometryInputViews) {
             Arrays.fill(views, null);
         }
@@ -1240,6 +1251,7 @@ public final class GraphRunner {
             VoxelWindow.synchronizeSourceGeneration(registry, MaterialSourceIndex.current().generation());
         }
         if (runnersBuilt && registry != null) {
+            dev.icehunter.fornax.voxel.VoxelUploadFrame.prepare(registry);
             VoxelWindow.prepareEmitterPool(registry);
         }
         // AFTER ensureRunnersBuilt, which is what lazily creates optionsBuffer, and BEFORE any pass
@@ -2087,17 +2099,17 @@ public final class GraphRunner {
     }
 
     /**
-     * True if any currently-enabled compute pass in {@code graph} reads the brick voxel grid -- the
+     * True if any currently-enabled buffer reader in {@code graph} reads the brick voxel grid -- the
      * voxel window must stream real data whenever this is true, independent of whether the debug
      * raymarch view happens to also be selected. Checked by name against the buffer target the
      * brick-voxelization milestone injects ({@link BrickGridUpload#OCCUPANCY_TARGET}), not a specific
-     * pack option name -- any current or future pack-authored compute pass that reads the voxel grid
+     * pack option name -- any current or future pack-authored buffer reader of the voxel grid
      * activates streaming, without this engine code needing to know that pack's option names.
      *
      * <p>Pure function of {@link GraphSpec} + the live compile values (not of {@link #computeRunners},
      * which only holds runners for passes a device already exists to build) -- this keeps it directly
      * unit-testable without a live pack or GPU device, mirroring {@link
-     * #computePackDeclaresDepthCopyback}. It re-evaluates each compute pass's {@code enabled_if} via
+     * #computePackDeclaresDepthCopyback}. It re-evaluates each pass's {@code enabled_if} via
      * {@link #isEnabledAtCompile}, the exact same check {@link #enabledAtCompile} applies in {@link
      * #finish}, rather than trusting a separately-tracked "currently built" set.
      */
@@ -2110,23 +2122,9 @@ public final class GraphRunner {
             return true;
         }
         for (PassSpec p : graph.passes()) {
-            // Covers COMPUTE, FULLSCREEN and PARTICLES, not just COMPUTE, because a voxel-grid
-            // consumer can be any of the three: "sun_shadow" is a fullscreen fragment pass whose DDA
-            // texelFetches voxelOccupancy directly, so leaving FULLSCREEN out would mean enabling that
-            // pass alone never trips this predicate, VoxelDebugRaymarchPass.onFrame would treat the
-            // grid as unneeded, and the fragment pass's own texelFetch would read an
-            // unallocated/never-streamed buffer (FullscreenPassRunner.run throws "buffer input is not
-            // allocated" the instant a buffer-kind input's registry entry is null). Same reasoning for
-            // PARTICLES: a particles pass binds a buffer-kind input as a real STORAGE_BUFFER
-            // descriptor, so one declaring voxelOccupancy (a shelter march deciding whether a flake is
-            // under cover) would otherwise fail its runner build with "neither an allocated buffer nor
-            // texture target" -- and that throw aborts EVERY runner in the attempt, retrying forever.
-            // MIPCHAIN/COPY/GEOMETRY passes are still not included: no pack
-            // pass of those types has ever declared a voxel-buffer input, and admitting them here
-            // would silently broaden this gate's meaning beyond "a pass that actually DDA-marches or
-            // otherwise samples the grid this frame".
+            // Every pass with a real buffer descriptor must keep its voxel inputs harvested.
             if ((p.type() != PassType.COMPUTE && p.type() != PassType.FULLSCREEN
-                    && p.type() != PassType.PARTICLES)
+                    && p.type() != PassType.PARTICLES && !(p.type() == PassType.GEOMETRY && p.slot() == GeometrySlot.TERRAIN))
                     || !isEnabledAtCompile(p, compileValues)) {
                 continue;
             }
@@ -2149,7 +2147,7 @@ public final class GraphRunner {
      * BUFFER TARGET NAME rather than on any pack's option or pass name, so a pack that grows a second
      * consumer -- ground wetness that dries in a desert, say, alongside snow that only falls where it
      * snows -- turns the fill on without this engine code learning anything about that pack. The same
-     * three pass types are admitted for the same reason: all three bind a buffer input as a real
+     * pass types are admitted for the same reason: each binds a buffer input as a real
      * descriptor and would fail their runner build against an unallocated target.
      *
      * <p>Pure function of {@link GraphSpec} plus the live compile values, so it is unit-testable with
@@ -2158,7 +2156,7 @@ public final class GraphRunner {
     static boolean anyEnabledPassReadsPrecipClipmap(GraphSpec graph, Map<String, Integer> compileValues) {
         for (PassSpec p : graph.passes()) {
             if ((p.type() != PassType.COMPUTE && p.type() != PassType.FULLSCREEN
-                    && p.type() != PassType.PARTICLES)
+                    && p.type() != PassType.PARTICLES && !(p.type() == PassType.GEOMETRY && p.slot() == GeometrySlot.TERRAIN))
                     || !isEnabledAtCompile(p, compileValues)) {
                 continue;
             }
@@ -2193,17 +2191,17 @@ public final class GraphRunner {
     }
 
     /**
-     * True if an enabled fullscreen or particles pass reads the entity occluder set. This is the
+     * True if an enabled fullscreen, particles or terrain pass reads the entity occluder set. This is the
      * other half of {@link #anyEnabledComputePassReadsPrecipCoarseClipmap}. That buffer is uploaded
      * for a compute reader only. This one is uploaded on the graphics queue, see {@code
      * EntityOccluderUpload}, so COMPUTE is left out here on purpose. {@link
      * GraphValidator#checkBufferBindable} refuses a compute reader or writer of this target for the
-     * same reason, so this gate and that validation rule allow the same two pass types.
+     * same reason, so this gate and that validation rule allow the same graphics readers.
      */
     static boolean anyEnabledGraphicsPassReadsEntityOccluders(
             GraphSpec graph, Map<String, Integer> compileValues) {
         for (PassSpec p : graph.passes()) {
-            if ((p.type() != PassType.FULLSCREEN && p.type() != PassType.PARTICLES)
+            if ((p.type() != PassType.FULLSCREEN && p.type() != PassType.PARTICLES && !(p.type() == PassType.GEOMETRY && p.slot() == GeometrySlot.TERRAIN))
                     || !isEnabledAtCompile(p, compileValues)) {
                 continue;
             }
@@ -2228,7 +2226,7 @@ public final class GraphRunner {
 
     /**
      * Which of {@link #GRAPHICS_DRAINABLE_BUFFER_TARGETS} {@link GraphicsBufferUploads} must drain
-     * this rebuild: a target that is an input of an enabled FULLSCREEN or PARTICLES pass, and of no
+     * this rebuild: a target read by an enabled fullscreen, particles or terrain pass, and by no
      * enabled COMPUTE pass. A target with a compute reader is left out because {@link
      * ComputePassRunner} already drains any target it binds. Recording the same pending update
      * again on the graphics queue would race it. Order follows
@@ -2246,7 +2244,7 @@ public final class GraphRunner {
                 if (!isEnabledAtCompile(p, compileValues) || !p.inputs().contains(target)) {
                     continue;
                 }
-                if (p.type() == PassType.FULLSCREEN || p.type() == PassType.PARTICLES) {
+                if (p.type() == PassType.FULLSCREEN || p.type() == PassType.PARTICLES || (p.type() == PassType.GEOMETRY && p.slot() == GeometrySlot.TERRAIN)) {
                     graphicsReader = true;
                 } else if (p.type() == PassType.COMPUTE) {
                     computeReader = true;
@@ -2279,11 +2277,9 @@ public final class GraphRunner {
     private static boolean anyEnabledComputePassReads(
             GraphSpec graph, Map<String, Integer> compileValues, String target) {
         for (PassSpec p : graph.passes()) {
-            // Same widening as anyEnabledComputePassReadsVoxelGrid/anyEnabledPassReadsPrecipClipmap:
-            // GraphValidator.checkBufferBindable legalizes COMPUTE, PARTICLES and FULLSCREEN readers
-            // of a buffer target, so this predicate must see all three or prepare() under-allocates.
+            // Keep allocation demand aligned with the pass kinds that can bind a buffer input.
             if ((p.type() != PassType.COMPUTE && p.type() != PassType.FULLSCREEN
-                    && p.type() != PassType.PARTICLES)
+                    && p.type() != PassType.PARTICLES && !(p.type() == PassType.GEOMETRY && p.slot() == GeometrySlot.TERRAIN))
                     || !isEnabledAtCompile(p, compileValues)) {
                 continue;
             }
@@ -2381,7 +2377,9 @@ public final class GraphRunner {
                         }
                     } else if (reader.type() == PassType.PARTICLES) {
                         stages |= VK13.VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
-                    } else if (reader.type() == PassType.FULLSCREEN || reader.type() == PassType.GEOMETRY
+                    } else if (reader.type() == PassType.GEOMETRY) {
+                        stages |= VK13.VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+                    } else if (reader.type() == PassType.FULLSCREEN
                             || reader.type() == PassType.TEMPORAL || reader.type() == PassType.MIPCHAIN) {
                         stages |= VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
                     } else if (reader.type() == PassType.COPY || reader.type() == PassType.CONSOLIDATE) {
@@ -2479,6 +2477,7 @@ public final class GraphRunner {
      * own encoder; it does not submit or wait on a queue.
      */
     public static void recordGraphicsStorageReadsComplete() {
+        dev.icehunter.fornax.voxel.VoxelUploadFrame.graphicsReadsComplete();
         VulkanCommandEncoder graphics = null;
         for (ComputePassRunner runner : computeRunners.values()) {
             if (!runner.hasPendingGraphicsStorageReads()) {
@@ -3304,7 +3303,9 @@ public final class GraphRunner {
         // -- applied once here at the single point every OTHER GPU resource this method frees
         // (opaqueDepth, WaterSurfaceManager, mipchain/compute runners, the registry itself) funnels
         // through. Rare-path cost only (pack rebuild/unload, or a pack switch); never per-frame.
+        dev.icehunter.fornax.voxel.VoxelUploadFrame.flushBeforeDestroy();
         VulkanComputeBackend.waitForGpuIdleBeforeDestroy();
+        dev.icehunter.fornax.voxel.VoxelUploadFrame.closeCurrent();
 
         // Frame generation presents every frame regardless of pack state, so it must deactivate on
         // every pack teardown too, not just on its own settings toggle. Without this, it can submit
@@ -3329,6 +3330,7 @@ public final class GraphRunner {
         // fall into rebuild()'s stale-snapshot hazard, so no rebuild()/RendererReload sequencing
         // change is needed for it here or anywhere else.
         opaqueDepth.free();
+        GeometryBufferBindings.close();
 
         // The shadow map is another engine-owned target outside TargetRegistry. closeCurrent's
         // device-idle boundary above is exactly the teardown law its texture/view pair needs;

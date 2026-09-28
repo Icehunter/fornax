@@ -86,7 +86,9 @@ class VoxelSourcePolicyTest {
         assertTrue(java.util.regex.Pattern.compile(
                 "if\\s*\\(index == null\\)\\s*(?:\\{\\s*)?sourcePolicy\\.markIncomplete\\(\\)")
                 .matcher(source).find(), "Unmapped cells must still mark source policy incomplete");
-        assertTrue(source.contains("sourcePolicy.finish(overflowLogged[0])"));
+        assertTrue(source.contains("boolean incompletePalette = overflowLogged[0] || shapeVariants.overflowed()"),
+                "both base-state overflow and contextual capture overflow must invalidate policy completeness");
+        assertTrue(source.contains("sourcePolicy.finish(incompletePalette)"));
     }
     @SuppressWarnings("unchecked")
     @Test void packStorageRetirementDropsOldPolicyUntilReplacementGeometryCommits() throws Exception {

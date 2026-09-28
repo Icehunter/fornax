@@ -19,6 +19,7 @@ public final class VoxelHarvestLifecycle {
     /** Called before the block atlas frees any sprite pixels, on either reload or close. */
     public static void onBlockAtlasRetired() {
         GATE.retireAndDrain();
+        VoxelBoundaryCapture.clear();
         VoxelFaceOpacity.clear();
         FoliageDensityResolver.clearCache();
         // No read/write lease remains held when storage takes the GPU queue lock.
@@ -27,6 +28,7 @@ public final class VoxelHarvestLifecycle {
 
     /** Only a successful model publication may reopen reads; atlas upload alone is insufficient. */
     public static void onModelsPublished() {
+        VoxelBoundaryCapture.clear();
         // A paused frame must not leave a stationary camera believing its shell was harvested.
         VoxelWindow.invalidateModelData();
         GATE.modelsPublished();

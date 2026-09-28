@@ -21,10 +21,12 @@ class PerFrameRunnerFailureContractTest {
 
     @Test
     void copyDispatchCatchesAPerFrameResolveFailure() throws IOException {
-        String source = Files.readString(SOURCE);
+        String source = Files.readString(SOURCE).replace("\r\n", "\n");
         int caseStart = source.indexOf("case COPY -> {");
         assertTrue(caseStart >= 0, "the COPY dispatch case must still exist");
-        String block = source.substring(caseStart, source.indexOf('\n', source.indexOf("}\n", caseStart)));
+        int blockEnd = source.indexOf("}\n", caseStart);
+        assertTrue(blockEnd > caseStart, "the COPY dispatch block must have a closing brace");
+        String block = source.substring(caseStart, blockEnd + 1);
 
         assertTrue(block.contains("CopyRunner.run(p, r);"), "must still dispatch to CopyRunner.run");
         assertTrue(block.contains("} catch (RuntimeException e) {"),
@@ -35,7 +37,7 @@ class PerFrameRunnerFailureContractTest {
 
     @Test
     void mipchainDispatchCatchesAPerFrameResolveFailure() throws IOException {
-        String source = Files.readString(SOURCE);
+        String source = Files.readString(SOURCE).replace("\r\n", "\n");
         int caseStart = source.indexOf("case MIPCHAIN -> {");
         assertTrue(caseStart >= 0, "the MIPCHAIN dispatch case must still exist");
         String block = source.substring(caseStart, source.indexOf("logMissingRunnerOnce(p.name());", caseStart));
@@ -49,7 +51,7 @@ class PerFrameRunnerFailureContractTest {
 
     @Test
     void passRunFailureLoggedResetsOnEveryTeardown() throws IOException {
-        String source = Files.readString(SOURCE);
+        String source = Files.readString(SOURCE).replace("\r\n", "\n");
         assertTrue(source.contains("passRunFailureLogged.clear();"),
                 "the per-session log-once set must reset on rebuild/teardown, or a NEW pack session's"
                         + " first failure never logs again");

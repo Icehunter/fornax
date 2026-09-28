@@ -48,10 +48,17 @@ class VoxelLightmapTest {
         assertTrue(source.contains("BlockRenderCache;init("));
         assertTrue(source.contains("shift = At.Shift.AFTER"));
     }
-    @Test void optionalBufferUploadsBesideGeometryInSingleAndBatchPaths() throws Exception {
+    @Test void optionalLightmapUsesTheSameQueuedSnapshotAndTransferAsGeometry() throws Exception {
         String upload=Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/BrickGridUpload.java"));
         assertTrue(upload.contains("isEnabledBufferTarget(VoxelLightmap.TARGET)"));
-        assertTrue(upload.contains("vkCmdUpdateBuffer(cmd, lightmapBuffer, lightmapOffset, lightmapBytes)"));
+        assertTrue(upload.contains("uploadSlots(registry, List.of(new SlotUpload(slot, result, false)))"),
+                "single-slot uploads must use the same queued data path");
+        assertTrue(upload.contains("source.lightmap().clone()"), "deferred writes need stable lightmap bytes");
+        int batch = upload.indexOf("private static void uploadBatchLocked(");
+        int bounds = upload.indexOf("!fitsInBuffer(lightmapOffset, VoxelLightmap.BYTES_PER_SLOT, lightmapBufferSize)", batch);
+        int write = upload.indexOf("vkCmdUpdateBuffer(cmd, lightmapBuffer, lightmapOffset, lightmapScratch)", batch);
+        assertTrue(batch >= 0 && bounds > batch && write > bounds,
+                "optional lightmap bounds must be checked before recording the shared payload transfer");
         assertTrue(upload.contains("vkCmdUpdateBuffer(cmd, lightmapBuffer, lightmapOffset, lightmapScratch)"));
         String validator=Files.readString(Path.of("src/main/java/dev/icehunter/fornax/pack/graph/GraphValidator.java"));
         assertTrue(validator.contains("VoxelLightmap.TARGET"));

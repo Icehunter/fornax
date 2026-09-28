@@ -18,8 +18,8 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Exercises CPU light-owner bookkeeping and the real completion callback explicitly.
- * Invoking completion models a successful fence; the empty registry cannot prove GPU writes. */
+/** Exercises CPU light-owner bookkeeping and the real submission callback explicitly.
+ * Invoking it models a successful ordered submission; the empty registry cannot prove GPU writes. */
 class VoxelLightClearDebtTest {
     private VoxelSectionState states;
     private boolean metadata;
@@ -151,7 +151,7 @@ class VoxelLightClearDebtTest {
         int arrival = window.indexOf("public static void onChunkLoaded", mesh);
         String meshPath = window.substring(mesh, arrival);
         assertFalse(meshPath.contains("BrickGridUpload.uploadSlot("),
-                "ordinary mesh publication must share the fenced batch completion boundary");
+                "ordinary mesh publication must share the frame transfer publication boundary");
         int refresh = window.indexOf("public static void refreshLightmaps");
         String refreshPath = window.substring(refresh, window.indexOf("public static void recenterAndResync", refresh));
         assertTrue(refreshPath.contains("needsLightClear(slot, position)"),
@@ -164,7 +164,15 @@ class VoxelLightClearDebtTest {
         int firstWrite = batchPath.indexOf("VK13.vkCmdUpdateBuffer");
         assertTrue(lightBounds >= 0 && lightBounds < firstWrite,
                 "an invalid required clear must reject the entry before any write or acknowledgement");
-        assertTrue(batchPath.indexOf("VoxelWindow.onSectionUploadCommitted(item)")
-                > batchPath.indexOf("// execute returns only after"), "completion follows a successful fence");
+        int callback = batchPath.indexOf("VoxelUploadFrame.afterSubmit(() ->");
+        int commit = batchPath.indexOf("VoxelWindow.onSectionUploadCommitted(item.token(), item.snapshot())");
+        assertTrue(callback > firstWrite && commit > callback,
+                "light ownership changes only in the successful-submission callback");
+        String frame = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/VoxelUploadFrame.java"));
+        int submit = frame.indexOf("check(VK13.vkQueueSubmit(");
+        int graphicsAcquire = frame.indexOf("graphics.waitSemaphore(uploadReady,");
+        int publish = frame.indexOf("callback.run()");
+        assertTrue(submit >= 0 && graphicsAcquire > submit && publish > graphicsAcquire,
+                "CPU acknowledgement requires successful submission and the graphics acquire dependency");
     }
 }

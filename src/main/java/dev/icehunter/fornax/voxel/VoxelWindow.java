@@ -99,7 +99,9 @@ public final class VoxelWindow {
 
     private static void invalidateStorage() {
         storageGeneration = Math.incrementExact(storageGeneration);
+        BrickGridUpload.discardQueuedUploads();
         meshUpdates.reset();
+        VoxelBoundaryCapture.clear();
         meshChanges.clear();
         slotReadRevision.clear();
         slotCommittedReadRevision.clear();
@@ -236,6 +238,10 @@ public final class VoxelWindow {
     }
 
     static void onSectionUploadCommitted(BrickGridUpload.SlotUpload item) {
+        onSectionUploadCommitted(item, item.result());
+    }
+
+    static void onSectionUploadCommitted(BrickGridUpload.SlotUpload item, SectionHarvester.Result snapshot) {
         if (!isCurrentUpload(item) || !hasCurrentSourceSummary(item.result())
                 || (item.sectionState() != null && !isCurrentSectionState(item.slot(), item.sectionState()))) return;
         SectionPos owner = slotOwner.get(item.slot());
@@ -245,9 +251,9 @@ public final class VoxelWindow {
         if (item.sectionState() != null) {
             sectionStates.commit(item.slot(), item.sectionState());
             if (registry != null && registry.isEnabledBufferTarget(VoxelSourceSummary.TARGET))
-                sourceInventory.commit(item.slot(), item.result().sourceSummary(), item.result().sourceEvidence());
-            if (emitterPool != null) emitterPool.commit(item.slot(), item.result(), item.sectionState());
-            if (sourceWindow != null) sourceWindow.commit(item.slot(), item.result(), item.sectionState());
+                sourceInventory.commit(item.slot(), snapshot.sourceSummary(), snapshot.sourceEvidence());
+            if (emitterPool != null) emitterPool.commit(item.slot(), snapshot, item.sectionState());
+            if (sourceWindow != null) sourceWindow.commit(item.slot(), snapshot, item.sectionState());
         }
         VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.COMMITTED);
         VoxelMeshHarvestTelemetry.LIVE.committed(item.slot());
@@ -258,7 +264,9 @@ public final class VoxelWindow {
         return previous == null || !previous.equals(owner);
     }
 
-    private static boolean isCurrentUpload(BrickGridUpload.SlotUpload item) {
+    static long uploadGeneration() { return storageGeneration; }
+
+    static boolean isCurrentUpload(BrickGridUpload.SlotUpload item) {
         SectionPos owner = slotOwner.get(item.slot());
         return populatedSlots.contains(item.slot()) && slotData.get(item.slot()) == item.result()
                 && owner != null && slotFor(owner.x(), owner.y(), owner.z()) == item.slot();
@@ -495,6 +503,12 @@ public final class VoxelWindow {
         return registry;
     }
 
+    /** Raw emitted boundary data is collected only when the graph declares its sidecar. */
+    public static boolean boundaryCaptureEnabled() {
+        TargetRegistry current = registry;
+        return needsHarvest() && current != null && current.isEnabledBufferTarget(VoxelFaceTexture.TARGET);
+    }
+
     /** Same emptiness test {@link #onSectionHarvested} applies to its result, exposed so a caller can
      * skip the harvest itself rather than discard it afterward: two volatile reads, cheap enough to
      * call from Sodium's meshing hot path before paying for a real model/texel walk that nothing will
@@ -640,19 +654,15 @@ public final class VoxelWindow {
                     && meshRevisionAt(position) == revision) {
                 int slot = slotFor(position.x(), position.y(), position.z());
                 long uploadStart = System.nanoTime();
-                // Registered before the upload: it calls the commit back on this thread before it
-                // returns, and a span registered after that is never found by its own commit.
+                // Register before queueing so frame publication can find the harvest's span.
                 if (slot >= 0) {
                     VoxelMeshHarvestTelemetry.LIVE.submitting(slot, position.x(), position.y(),
                             position.z(), requestedAt, dequeuedAt - requestedAt,
                             uploadStart - readStart);
                 }
                 onSectionHarvested(position, result);
-                // An upload the window turned away never commits, so its span is cleared rather
-                // than left for the next edit of this section to pick up.
-                if (slot >= 0) {
-                    VoxelMeshHarvestTelemetry.LIVE.dropped(slot);
-                }
+                // Queued uploads complete at frame publication. The uploader owns both the
+                // commit and stale-drop telemetry boundary.
             }
         }
     }
@@ -710,6 +720,7 @@ public final class VoxelWindow {
     /** Called every active voxel frame, even with the camera still. Runs on the resync worker, so
      * the render thread never waits, and can queue behind resync work. */
     public static void refreshLightmaps(Level level) {
+        VoxelBoundaryCapture.requestPending(level);
         final long generation;
         final TargetRegistry capturedRegistry;
         final Object worker;
@@ -880,6 +891,7 @@ public final class VoxelWindow {
                     }
                 }
                 if (!exposed.isEmpty()) {
+                    VoxelBoundaryCapture.retireSlots(exposed);
                     sectionStates.invalidate(exposed);
                     sourceInventory.invalidate(exposed);
                     if (emitterPool != null) emitterPool.invalidate(exposed);
@@ -900,6 +912,7 @@ public final class VoxelWindow {
         // "Batched harvest upload" docs, and SYNC_BUDGET's/BatchSizeController's docs, for the full
         // rationale/arithmetic.
         shell.sort(priorityComparator(newCenterX, newCenterY, newCenterZ, forwardX, forwardY, forwardZ));
+        VoxelBoundaryCapture.enqueueRemesh(level, shell);
         int syncCount = Math.min(SYNC_BUDGET, shell.size());
         if (syncCount > 0) {
             harvestAndUploadBatch(level, shell.subList(0, syncCount), syncHarvestedTotal::addAndGet, null, generation, harvestGeneration, reader, System.nanoTime());

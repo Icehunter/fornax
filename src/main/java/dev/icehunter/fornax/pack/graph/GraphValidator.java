@@ -228,6 +228,12 @@ public final class GraphValidator {
             }
             for (String in : p.inputs()) {
                 checkInputRef(in, graph, p);
+                if (p.type() == PassType.COMPUTE && !graph.targets().containsKey(in)
+                        && isConsolidateOutput(in, graph)) {
+                    throw new FornaxPackError(FILE, "pass." + p.name() + ".inputs",
+                            "compute pass cannot bind virtual consolidated array '" + in
+                                    + "'; bind its declared source targets directly");
+                }
                 checkBufferBindable(p, in, graph, false);
                 checkGateConsistency(p, in, graph.targets(), options, "pass." + p.name() + ".inputs");
             }
@@ -236,10 +242,20 @@ public final class GraphValidator {
                 // baked into Sodium's shared terrain bind group at class-init, before any pack loads
                 // -- see that class's own doc) -- a pack declaring more inputs than that has nowhere
                 // to bind the overflow and must be refused at load, not silently truncated at runtime.
-                if (p.inputs().size() > GeometryInputs.RESERVED) {
+                int textureCount = 0, bufferCount = 0;
+                for (String input : p.inputs()) {
+                    TargetSpec target = graph.targets().get(input);
+                    if (target != null && target.kind() == TargetKind.BUFFER) bufferCount++;
+                    else {
+                        if (bufferCount != 0) throw new FornaxPackError(FILE, "pass." + p.name() + ".inputs",
+                                "geometry texture inputs must precede the appended buffer inputs");
+                        textureCount++;
+                    }
+                }
+                if (textureCount > GeometryInputs.RESERVED || bufferCount > GeometryInputs.BUFFER_RESERVED) {
                     throw new FornaxPackError(FILE, "pass." + p.name() + ".inputs",
-                            "geometry pass declares " + p.inputs().size() + " inputs but only "
-                                    + GeometryInputs.RESERVED + " geometry-input slots are reserved");
+                            "geometry inputs exceed reserved capacity: " + GeometryInputs.RESERVED
+                                    + " textures and " + GeometryInputs.BUFFER_RESERVED + " buffers");
                 }
                 for (String in : p.inputs()) {
                     checkGeometryInputFinality(in, graph, p);
@@ -371,10 +387,10 @@ public final class GraphValidator {
      * Refuses a buffer-kind target named in a position no runner can bind it in. A buffer is bound
      * as a {@code STORAGE_BUFFER} descriptor by the two raw-Vulkan pass types
      * ({@link ComputePassRunner}, {@link ParticlePassRunner}) and as a {@code UNIFORM_TEXEL_BUFFER}
-     * input by {@link FullscreenPassRunner}; nothing else in this engine has a code path for one.
+     * input by {@link FullscreenPassRunner} and the terrain geometry binder.
      *
-     * <p>So: legal as an INPUT to COMPUTE, PARTICLES and FULLSCREEN, and as an OUTPUT of COMPUTE
-     * only. Every other position is refused here, where the message can name the pass, rather than
+     * <p>Legal as an input to compute, particles, fullscreen, ray queries and terrain geometry,
+     * and as an output of compute or ray queries. Other positions are refused here rather than
      * at runner build, where it becomes one of:
      *
      * <ul>
@@ -382,7 +398,7 @@ public final class GraphValidator {
      *       with no {@link TargetInstance} at all, thrown inside {@code ensureRunnersBuilt}'s catch,
      *       which aborts EVERY runner and retries forever;
      *   <li>a {@code MipchainRunner} target -- same, plus a scale/format a buffer does not have;
-     *   <li>a {@code CopyRunner} or geometry-slot input -- resolved through
+     *   <li>a {@code CopyRunner} or non-terrain geometry-slot input -- resolved through
      *       {@code GraphInputResolver.resolveView}, which has only textures to hand back;
      *   <li>a {@code ParticlePassRunner} output -- {@link #checkParticlesPass} refuses this too, with
      *       a message about color attachments specifically, but this check runs FIRST (the outputs
@@ -426,12 +442,13 @@ public final class GraphValidator {
         boolean legal = p.type() == PassType.RAY_QUERY || (writePosition
                 ? p.type() == PassType.COMPUTE
                 : p.type() == PassType.COMPUTE || p.type() == PassType.PARTICLES
-                        || p.type() == PassType.FULLSCREEN);
+                        || p.type() == PassType.FULLSCREEN
+                        || (p.type() == PassType.GEOMETRY && p.slot() == GeometrySlot.TERRAIN));
         if (!legal) {
             throw new FornaxPackError(FILE, "pass." + p.name() + (writePosition ? ".outputs" : ".inputs"),
                     "'" + ref + "' is a buffer-kind target, which a " + p.type() + " pass cannot bind"
                             + (writePosition ? " as an output" : " as an input")
-                            + ". A buffer is readable by compute, particles, fullscreen and ray_query"
+                            + ". A buffer is readable by compute, particles, fullscreen, terrain and ray_query"
                             + " passes, and writable by a compute or ray_query pass.");
         }
     }
@@ -1134,7 +1151,7 @@ public final class GraphValidator {
         // never written by any pass, so there is no same-frame freshness question to ask of it.
         if (BUILTINS.contains(ref) || ref.equals(SceneHistory.TARGET + ".history")
                 || ShadowMapManager.isShadowMapRef(ref) || TerrainShadowResult.isRef(ref)
-                || graph.textures().containsKey(ref)) {
+                || graph.textures().containsKey(ref) || ENGINE_BUFFERS.contains(ref)) {
             return;
         }
         if (ref.endsWith(".history")) {

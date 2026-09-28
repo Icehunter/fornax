@@ -275,9 +275,7 @@ public final class VoxelSourceWindow {
         return sameOwner(a, b) && a.geometryRevision() == b.geometryRevision();
     }
     private static boolean sameData(SectionHarvester.Result a, SectionHarvester.Result b) {
-        return a == b || a.palette() == b.palette() && a.paletteIndices() == b.paletteIndices()
-                && a.sourceEvidence() == b.sourceEvidence() && a.sourcePolicy().equals(b.sourcePolicy())
-                && a.harvestGeneration() == b.harvestGeneration();
+        return VoxelGeometryPayload.same(a, b);
     }
     private static void put(ByteBuffer bytes, int word, int value) { bytes.putInt(word * Integer.BYTES, value); }
 }

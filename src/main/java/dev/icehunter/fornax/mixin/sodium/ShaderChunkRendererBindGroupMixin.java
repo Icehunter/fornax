@@ -4,6 +4,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
 import com.mojang.blaze3d.shaders.UniformType;
+import com.mojang.blaze3d.GpuFormat;
 import dev.icehunter.fornax.pipeline.GeometryInputs;
 import net.caffeinemc.mods.sodium.client.render.chunk.ShaderChunkRenderer;
 import org.spongepowered.asm.mixin.Mixin;
@@ -42,6 +43,9 @@ public class ShaderChunkRendererBindGroupMixin {
             builder.withSampler(GeometryInputs.slot(i));
         }
 
+        for (int i = 0; i < GeometryInputs.BUFFER_RESERVED; i++) {
+            builder.withUniform(GeometryInputs.bufferSlot(i), UniformType.TEXEL_BUFFER, GpuFormat.R32_UINT);
+        }
         return original.call(builder);
     }
 }

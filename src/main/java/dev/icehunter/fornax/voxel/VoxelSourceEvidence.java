@@ -127,6 +127,13 @@ public final class VoxelSourceEvidence {
             palette[size++] = palette[entry];
         }
 
+        /** Contextual texture changes retain raw state emission, never fallback authored proof. */
+        void copyUnknown(int entry) {
+            if (entry < 0 || entry >= size) throw new IllegalArgumentException("missing source evidence entry");
+            if (size == palette.length) throw new IllegalArgumentException("voxel source palette exceeds the index cap");
+            palette[size++] = (palette[entry] & (NONEMPTY | 15)) | (FACE_MASK << UNKNOWN_SHIFT);
+        }
+
         void addCell(boolean nonempty, int entry) {
             if (entry < -1 || entry >= size) throw new IllegalArgumentException("voxel source cell has no palette entry");
             if (entry >= 0 && nonempty != ((palette[entry] & NONEMPTY) != 0))

@@ -154,6 +154,9 @@ public class DefaultChunkRendererTextureBindMixin {
         // shared geometry sampler for every slot -- a per-input filter syntax is deliberately not
         // built until a second filter is actually needed (same YAGNI precedent as builtin.noise in
         // the fullscreen path).
+        for (int i = 0; i < GeometryInputs.BUFFER_RESERVED; i++) {
+            pass.setUniform(GeometryInputs.bufferSlot(i), GraphRunner.geometryInputBuffer(GeometrySlot.TERRAIN, i));
+        }
         GpuSampler geomSampler = RenderSystem.getSamplerCache().getRepeat(FilterMode.LINEAR, false);
         for (int i = 0; i < GeometryInputs.RESERVED; i++) {
             GpuTextureView view = GraphRunner.geometryInputView(GeometrySlot.TERRAIN, i);

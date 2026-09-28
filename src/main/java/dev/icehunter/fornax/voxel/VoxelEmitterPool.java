@@ -79,8 +79,7 @@ public final class VoxelEmitterPool {
         if (token.geometryRevision() <= 0) throw new IllegalArgumentException("voxel emitter geometry token must be initialized");
         var previous = committed.get(slot);
         if (previous != null && sameGeometry(previous.token, token)) {
-            if (previous.result.sourceEvidence() != result.sourceEvidence()
-                    || previous.result.paletteIndices() != result.paletteIndices() || previous.result.palette() != result.palette())
+            if (!VoxelGeometryPayload.same(previous.result, result))
                 throw new IllegalArgumentException("voxel emitter content update cannot replace geometry evidence");
             previous.result = result; previous.token = token;
             return;

@@ -39,7 +39,7 @@ class VoxelEmitterPoolPublicationTest {
         var latest = VoxelSectionState.class.getDeclaredField("latest"); latest.setAccessible(true);
         var token = ((Map<Integer, VoxelSectionState.Snapshot>) latest.get(states.get(null))).get(slot);
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
-            // Explicit successful-fence model, not an assertion that this empty registry wrote GPU bytes.
+            // Model a successful ordered submission; this empty registry writes no GPU bytes.
             VoxelWindow.onSectionUploadCommitted(new BrickGridUpload.SlotUpload(slot, result, true, token));
         }
         assertEquals(12, VoxelWindow.emitterPoolStats().eligible());
@@ -54,13 +54,18 @@ class VoxelEmitterPoolPublicationTest {
     /** Runtime allocation, F10 and the Vulkan command stream require a client; pin real wiring. */
     @Test void graphPrepareAllocationInvalidationAndComputeBarrierAreConnected() throws Exception {
         String window = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/VoxelWindow.java"));
-        assertTrue(window.contains("emitterPool.commit(item.slot(), item.result(), item.sectionState())"));
+        assertTrue(window.contains("emitterPool.commit(item.slot(), snapshot, item.sectionState())"));
+        assertTrue(window.contains("if (!isCurrentUpload(item) || !hasCurrentSourceSummary(item.result())"),
+                "the immutable payload may publish only while its original ownership token is current");
         assertTrue(window.contains("emitterPool.invalidate(exposed)"));
         assertTrue(window.contains("EngineBufferUploadQueue.discard(VoxelEmitterPool.TARGET)"));
         String graph = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/pack/graph/GraphRunner.java"));
         assertTrue(graph.contains("VoxelWindow.prepareEmitterPool(registry)"));
         String upload = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/BrickGridUpload.java"));
         assertTrue(upload.contains("registry.ensureBufferSize(VoxelEmitterPool.TARGET, VoxelEmitterPool.BYTE_SIZE)"));
+        int callback = upload.indexOf("VoxelUploadFrame.afterSubmit(() ->");
+        assertTrue(callback >= 0 && upload.indexOf("VoxelWindow.onSectionUploadCommitted(item.token(), item.snapshot())", callback) > callback,
+                "the source pool must use the same copied snapshot as the submitted grid payload");
         String queue = Files.readString(Path.of("src/main/java/dev/icehunter/fornax/pack/graph/EngineBufferUploadQueue.java"));
         int barrier = queue.indexOf("VkBufferMemoryBarrier.calloc");
         assertTrue(barrier >= 0 && barrier < queue.indexOf("VK13.vkCmdFillBuffer"));

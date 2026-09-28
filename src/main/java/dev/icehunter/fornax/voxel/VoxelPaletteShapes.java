@@ -12,12 +12,20 @@ final class VoxelPaletteShapes {
     private record Key(int base, List<VoxelShapeClassifier.PackedBox> boxes) { }
     private final List<SectionPalette.Entry> entries;
     private final Map<Key, Integer> variants = new HashMap<>();
+    private record BoundaryKey(int base, VoxelBoundaryCapture.Boundary boundary) { }
+    private final Map<BoundaryKey, Integer> boundaries = new HashMap<>();
     private final IntConsumer copyMetadata;
+    private final IntConsumer copyBoundaryMetadata;
     private boolean overflow;
 
     VoxelPaletteShapes(List<SectionPalette.Entry> entries, IntConsumer copyMetadata) {
+        this(entries, copyMetadata, copyMetadata);
+    }
+
+    VoxelPaletteShapes(List<SectionPalette.Entry> entries, IntConsumer copyMetadata, IntConsumer copyBoundaryMetadata) {
         this.entries = entries;
         this.copyMetadata = copyMetadata;
+        this.copyBoundaryMetadata = copyBoundaryMetadata;
     }
 
     int refine(int baseIndex, @Nullable List<VoxelShapeClassifier.PackedBox> boxes) {
@@ -41,9 +49,45 @@ final class VoxelPaletteShapes {
         entries.add(new SectionPalette.Entry(base.shapeKind(), key.boxes(), base.faceColors(),
                 base.emissiveStrength(), base.lightTransmissive(), base.emissionColor(), keepCutout,
                 keepCutout ? base.uvRect() : SectionPalette.NO_UV_RECT, base.extinction(),
-                FaceSealResolver.resolve(base.shapeKind(), key.boxes()), base.faceTextureWords()));
+                FaceSealResolver.resolve(base.shapeKind(), key.boxes()),
+                VoxelFaceTexture.withoutBoundaryProof(base.faceTextureWords())));
         variants.put(key, index);
         return index;
+    }
+
+    /** Only positions actually observed by the renderer enter this path. An explicitly rejected
+     * capture removes static fallback proof; no capture leaves trusted static models available. */
+    int boundary(int baseIndex, VoxelBoundaryCapture.Boundary boundary) {
+        var base = entries.get(baseIndex);
+        if (boundary == null && (base.faceTextureWords()[0] & VoxelFaceTexture.CLOSED_BOX_BOUNDARY) == 0) return baseIndex;
+        var key = new BoundaryKey(baseIndex, boundary);
+        Integer existing = boundaries.get(key);
+        if (existing != null) return existing;
+        if (entries.size() >= SectionHarvester.MAX_PALETTE_ENTRIES) {
+            overflow = true;
+            // Without an index for this contextual cell, remove the base proof for every cell
+            // sharing it. Losing optional transmission is preferable to certifying wrong geometry.
+            entries.set(baseIndex, copyBoundary(base, null));
+            return baseIndex;
+        }
+        int index = entries.size();
+        copyBoundaryMetadata.accept(baseIndex);
+        entries.add(copyBoundary(base, boundary));
+        boundaries.put(key, index);
+        return index;
+    }
+
+    private static SectionPalette.Entry copyBoundary(SectionPalette.Entry base, VoxelBoundaryCapture.Boundary boundary) {
+        var kind = boundary == null ? base.shapeKind() : boundary.kind;
+        var boxes = boundary == null ? base.boxes() : boundary.boxes;
+        int[] words = boundary == null ? VoxelFaceTexture.withoutBoundaryProof(base.faceTextureWords()) : boundary.words();
+        boolean keepCutout = (boundary == null ? base.cutout() : boundary.cutout)
+                && (kind != VoxelShapeKind.PARTIAL || boxes.size() <= SectionHarvester.CUTOUT_MAX_BOXES);
+        return new SectionPalette.Entry(kind, boxes, boundary == null ? base.faceColors() : boundary.faceColors(), base.emissiveStrength(),
+                base.lightTransmissive(), base.emissionColor(), keepCutout,
+                keepCutout ? (boundary == null ? base.uvRect() : boundary.uvRect()) : SectionPalette.NO_UV_RECT,
+                boundary == null ? base.extinction() : boundary.extinction,
+                FaceSealResolver.resolve(kind, boxes), words);
     }
 
     boolean overflowed() { return overflow; }

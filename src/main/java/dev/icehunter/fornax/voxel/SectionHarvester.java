@@ -192,13 +192,20 @@ public final class SectionHarvester {
         // calls the live Fabric model-emission hook, the one a connected-texture mod uses with a
         // real world and position. A mod that only changes its geometry inside that hook is not
         // seen here and keeps the selection-shape fallback; that is a documented limit, not a bug.
-        // The rebuild does not use shapeVariants below. That path keys on each voxel rather than on
-        // each distinct state.
+        // The renderer can additionally publish immutable emitted-boundary facts per position.
+        // Reading those facts below invokes no live callback on this worker.
+        var emittedBoundaries = VoxelBoundaryCapture.snapshot(tintSource, originX, originY, originZ, harvestGeneration);
         var shapeVariants = new VoxelPaletteShapes(entries, baseIndex -> {
             sourcePolicy.copy(baseIndex);
             if (sourceEntries != null) {
                 sourceEntries.add(sourceEntries.get(baseIndex));
                 sourceEvidence.copy(baseIndex);
+            }
+        }, baseIndex -> {
+            sourcePolicy.copy(baseIndex);
+            if (sourceEntries != null) {
+                sourceEntries.add(new VoxelSourceSummary.Entry(0, true));
+                sourceEvidence.copyUnknown(baseIndex);
             }
         });
         var rtGeometry = new RtSectionGeometry.Builder();
@@ -208,6 +215,10 @@ public final class SectionHarvester {
                 for (int x = 0; x < 16; x++) {
                     BlockState state = blockData.get(x, y, z);
                     Integer index = indexByState.get(state);
+                    if (index != null && emittedBoundaries != null) {
+                        var captured = emittedBoundaries.cell((y << 8) | (z << 4) | x, state);
+                        if (captured != null) index = shapeVariants.boundary(index, captured.boundary());
+                    }
                     if (index == null) { sourcePolicy.markIncomplete(); rtGeometry.unknown(); }
                     else if (entries.get(index).shapeKind() == VoxelShapeKind.CROSS)
                         rtGeometry.harvest(state, entries.get(index), (y << 8) | (z << 4) | x, index,
@@ -240,11 +251,12 @@ public final class SectionHarvester {
         }
         PaletteSizeHistogram.record(entries.size(), overflowLogged[0] || shapeVariants.overflowed());
 
+        boolean incompletePalette = overflowLogged[0] || shapeVariants.overflowed();
         return new Result(paletteIndices, new SectionPalette(entries),
                 VoxelLightmap.capture(tintSource, originX, originY, originZ),
-                sourceInventory == null ? VoxelSourceSummary.EMPTY : sourceInventory.finish(overflowLogged[0]),
+                sourceInventory == null ? VoxelSourceSummary.EMPTY : sourceInventory.finish(incompletePalette),
                 harvestGeneration, sourceEvidence == null ? VoxelSourceEvidence.UNAVAILABLE
-                        : sourceEvidence.finish(overflowLogged[0]), sourcePolicy.finish(overflowLogged[0]), rtGeometry.finish());
+                        : sourceEvidence.finish(incompletePalette), sourcePolicy.finish(incompletePalette), rtGeometry.finish());
     }
 
     /**
@@ -443,6 +455,9 @@ public final class SectionHarvester {
             sourceEvidence.add(true, state.getLightEmission(), sourceFaces.summaries(),
                     state.getLightEmission() == 0 && sourceFaces.materialsKnownNonpositive());
         }
+        faceTextures = VoxelFaceTexture.withBoundaryFacts(faceTextures, parts, effectiveKind,
+                effectiveBoxes, !parts.isEmpty() && !state.hasOffsetFunction() && VoxelBoundaryGeometry.supportsModel(
+                        net.minecraft.client.Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state), parts));
         return new SectionPalette.Entry(effectiveKind, effectiveBoxes, faceColors, emissiveStrength,
                 lightTransmissive, emissionColor, cutout, uvRect, extinction,
                 FaceSealResolver.resolve(effectiveKind, effectiveBoxes),

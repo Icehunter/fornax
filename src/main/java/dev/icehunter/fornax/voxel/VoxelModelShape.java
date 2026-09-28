@@ -14,7 +14,6 @@ import java.util.function.Supplier;
 import net.fabricmc.fabric.api.client.renderer.v1.Renderer;
 import net.fabricmc.fabric.api.client.renderer.v1.mesh.QuadView;
 import net.fabricmc.fabric.api.client.renderer.v1.model.FabricBlockStateModel;
-import net.fabricmc.fabric.api.client.renderer.v1.sprite.FabricTextureAtlas;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModel;
@@ -74,11 +73,7 @@ final class VoxelModelShape {
             this(Renderer::get, state -> {
                 var client = Minecraft.getInstance();
                 return client == null ? null : client.getModelManager().getBlockStateModelSet().get(state);
-            }, quad -> {
-                if (quad.atlas() == null) return null;
-                var atlas = Minecraft.getInstance().getAtlasManager().getAtlasOrThrow(quad.atlas().getTextureLocation());
-                return ((FabricTextureAtlas) atlas).spriteFinder().find(quad);
-            });
+            }, VoxelAtlasLookup::sprite);
         }
 
         Resolver(Renderer renderer, Function<BlockState, @Nullable BlockStateModel> models,

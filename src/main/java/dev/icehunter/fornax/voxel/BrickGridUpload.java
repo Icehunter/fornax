@@ -1,6 +1,5 @@
 package dev.icehunter.fornax.voxel;
 
-import com.mojang.blaze3d.vulkan.VulkanDevice;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.metalfx.rt.MetalRtGeometry;
 import dev.icehunter.fornax.pack.graph.BufferInstance;
@@ -8,17 +7,12 @@ import dev.icehunter.fornax.pack.graph.TargetRegistry;
 import dev.icehunter.fornax.pass.compute.VulkanComputeBackend;
 import org.jspecify.annotations.Nullable;
 import org.lwjgl.system.MemoryStack;
-import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.VK13;
 import org.lwjgl.vulkan.VkCommandBuffer;
-import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
-import org.lwjgl.vulkan.VkFenceCreateInfo;
 import org.lwjgl.vulkan.VkMemoryBarrier;
-import org.lwjgl.vulkan.VkSubmitInfo;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -50,6 +44,8 @@ public final class BrickGridUpload {
      * order; bit 6 marks a light-transmissive full voxel. */
     public static final String FACE_SEAL_TARGET = "voxelFaceSeal";
     public static final String PALETTE_TARGET = "voxelPalette";
+    /** Palette word zero bit 12 mirrors vanilla light transmission, independent of model closure. */
+    public static final int PALETTE_LIGHT_TRANSMISSIVE = 1 << 12;
     public static final String LIGHT_VOLUME_TARGET = "voxelLightVolume";
     /** One uint per slot: occupancy and emitter bits after harvest, SUMMARY_PENDING before it.
      * Zero means empty only once the pending mark is gone. */
@@ -214,7 +210,7 @@ public final class BrickGridUpload {
     //                  box test) | EXTINCTION (bits 4-11, 8-bit unorm scaled by EXTINCTION_SCALE = 2.0
     //                  -- the measured foliage extinction coefficient per block of path length, see
     //                  FoliageDensityResolver) | CUTOUT flag (bit 30) | CROSS flag (bit 31). Bits
-    //                  12-29 remain free; bits 30/31 were chosen for maximum distance from boxCount's
+    //                  12 mirrors lightTransmissive; bits 13-29 remain free; bits 30/31 were chosen for maximum distance from boxCount's
     //                  real range. (Bit 12 briefly held a SHAPE_TRUNCATED flag, removed once
     //                  VoxelShapeClassifier started merging excess boxes past MAX_BOXES into one union
     //                  box instead of dropping them, so every entry's box list is always complete and
@@ -256,8 +252,8 @@ public final class BrickGridUpload {
     //                  light_inject.comp falls back to deriving a tint GPU-side from this entry's six
     //                  face-color words. Bit 8 is not a lightTransmissive flag here: no shader
     //                  consumes one, and the 24-bit color needs the full bits 8-31.
-    //                  SectionPalette.Entry.lightTransmissive() is still computed for a future
-    //                  consumer to place wherever it lands.
+    //                  SectionPalette.Entry.lightTransmissive() is in word 0 bit 12 and in
+    //                  voxelFaceSeal bit 6; neither fact establishes a closed optical volume.
     //
     // A packed box uses 5 bits per coordinate, not 4: PackedBox coordinates are 1/16-block units
     // spanning 0..16 inclusive (17 distinct values -- a full-cell extent is literally 16), and 4 bits
@@ -304,42 +300,9 @@ public final class BrickGridUpload {
         return tier == 0 ? baseTarget : baseTarget + "_t" + tier;
     }
 
-    /**
-     * Release-side memory barrier for every brick-grid write path below: {@code vkCmdUpdateBuffer}
-     * (a TRANSFER operation) writes occupancy/payload/palette/light-volume bytes that {@code
-     * ComputePassRunner}'s compute dispatches (voxel_water_refl, light_inject/light_propagate)
-     * subsequently read as {@code STORAGE_BUFFER}s -- on the SAME {@code VkQueue} (both this class
-     * and {@code ComputePassRunner} submit via the same cached {@code
-     * VulkanComputeBackend#computeQueue()} handle) but as SEPARATE {@code vkQueueSubmit} calls. This
-     * barrier's dst stage is scoped to {@code COMPUTE_SHADER_BIT} because it only matters for
-     * same-queue readers like those -- it has no effect on a pack's {@code celestial_shadow}
-     * fullscreen pass, a different-queue (graphics-family) reader of {@code voxelOccupancy}: a
-     * pipeline barrier's second synchronization scope only ever covers later-submitted work on the
-     * SAME queue it was recorded on. A cross-family reader requires its own execution and memory
-     * handoff: concurrent buffer sharing removes only queue-family ownership transfers, and a host
-     * fence wait cannot order an earlier graphics read against a later worker write. Optional
-     * section/source metadata is consumed by compute; graphics reads only its resulting status image
-     * through the compute runner's image handoff.
-     *
-     * <p>Per-call {@code vkWaitForFences} (every method below waits its own submission's fence
-     * before returning) guarantees host-visible completion and same-queue submission ordering, but
-     * the Vulkan spec does not extend that guarantee to GPU-side cache visibility for a different
-     * access type on a later, separately-submitted command buffer -- a transfer write's availability
-     * still needs an explicit visibility operation for the compute shader's read, exactly the
-     * {@code VK_ACCESS_TRANSFER_WRITE_BIT -> VK_ACCESS_SHADER_READ_BIT} dependency this barrier
-     * declares. Recorded as the last command before {@code vkEndCommandBuffer}: a pipeline barrier's
-     * second synchronization scope covers every later-submitted command on the same queue, not just
-     * commands later in this same command buffer, so this is a valid release even with nothing
-     * recorded after it. A global {@link VkMemoryBarrier} (not a per-buffer {@code
-     * VkBufferMemoryBarrier}) matches the granularity {@code VoxelDebugRaymarchPass}'s own
-     * compute-to-host barrier already uses; the four call sites below write varying buffer subsets so
-     * a global barrier is also the simplest correct choice.
-     *
-     * <p>Without this, live telemetry showed the predicted symptom: a full-screen occupancy read
-     * intermittently saw a stale/empty page of a fully populated, zero-churn grid (rays exiting on a
-     * phantom miss, spurious "lit"), flickering on an otherwise static scene -- missing-barrier GPU
-     * cache staleness, not a streaming/upload-completion bug.
-     */
+    /** Make transfer writes visible to later compute reads on the shared compute queue.
+     * Graphics readers acquire the frame upload semaphore in {@link VoxelUploadFrame};
+     * same-queue barriers alone cannot synchronize a different queue family. */
     private static void recordUploadToComputeReadBarrier(VkCommandBuffer cmd, MemoryStack stack) {
         VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack).sType$Default()
                 .srcAccessMask(VK13.VK_ACCESS_TRANSFER_WRITE_BIT).dstAccessMask(VK13.VK_ACCESS_SHADER_READ_BIT);
@@ -347,12 +310,8 @@ public final class BrickGridUpload {
                 0, barrier, null, null);
     }
 
-    /** Finish earlier same-queue compute reads before any metadata range is overwritten. Vulkan's
-     * write-after-read hazard requires this execution dependency even when the uploader waits for
-     * its own completion afterward. This does not synchronize a graphics-queue reader: metadata
-     * consumers run in compute, then hand their output image to graphics through its normal path.
-     * The matching transfer-write to compute-read dependency remains at the end of each transfer.
-     * See Vulkan specification, Synchronization and Cache Control: execution dependencies. */
+    /** Finish prior same-queue metadata reads before overwriting them. The frame transfer also
+     * brackets all writes against prior compute reads/writes and previous-frame graphics reads. */
     private static void recordComputeReadToUploadBarrier(VkCommandBuffer cmd, MemoryStack stack) {
         VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack).sType$Default()
                 .srcAccessMask(VK13.VK_ACCESS_SHADER_READ_BIT).dstAccessMask(VK13.VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -439,7 +398,7 @@ public final class BrickGridUpload {
         invalidateSectionStates(registry, 0);
     }
 
-    public static void invalidateSectionStates(TargetRegistry registry, long atlasGeneration) {
+    private static void invalidateSectionStatesNow(TargetRegistry registry, long atlasGeneration) {
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
             BufferInstance sectionState = registry.getBuffer(VoxelSectionState.TARGET);
             BufferInstance sourceSummary = registry.getBuffer(VoxelSourceSummary.TARGET);
@@ -647,7 +606,7 @@ public final class BrickGridUpload {
 
     /** Packs word 0: boxCount in bits 0-3, extinction in bits 4-11 (8-bit unorm, see {@link
      * #EXTINCTION_SCALE}), cutout flag in bit 30, cross flag in bit 31 -- see the {@link
-     * #PALETTE_ENTRY_WORDS} layout comment above (bits 12-29 are free; a SHAPE_TRUNCATED flag briefly
+     * #PALETTE_ENTRY_WORDS} layout comment above (bits 13-29 are free; a SHAPE_TRUNCATED flag briefly
      * lived at bit 12, see that comment's own note). Pure, unit-tested directly. */
     static int packPaletteFlagsWord(int boxCount, boolean cutout, boolean cross, float extinction) {
         int word = boxCount & 0xF;
@@ -701,7 +660,8 @@ public final class BrickGridUpload {
                         + " boxes, more than the " + SectionHarvester.CUTOUT_MAX_BOXES
                         + " that leave the UV-rect words free");
             }
-            buf.putInt(packPaletteFlagsWord(boxCount, cutout, cross, entry.extinction()));
+            buf.putInt(packPaletteFlagsWord(boxCount, cutout, cross, entry.extinction())
+                    | (entry.lightTransmissive() ? PALETTE_LIGHT_TRANSMISSIVE : 0));
             int[] faceColors = entry.faceColors();
             for (int f = 0; f < 6; f++) {
                 buf.putInt(faceColors[f]);
@@ -740,156 +700,7 @@ public final class BrickGridUpload {
     }
 
     public static void uploadSlot(TargetRegistry registry, int slot, SectionHarvester.Result result) {
-        if (registry.isEnabledBufferTarget(VoxelSectionState.TARGET)
-                || registry.isEnabledBufferTarget(VoxelSourceSummary.TARGET)) {
-            // A caller without an owner token can upload data, but cannot certify its ownership.
-            uploadSlots(registry, List.of(new SlotUpload(slot, result, false)));
-            return;
-        }
-        // Pack occupancy + payload bytes on the calling (Sodium worker) thread without touching any GPU
-        // handle -- pure CPU work, kept outside the shared lock so parallel workers can pack
-        // concurrently and only serialize for the brief submit.
-        ByteBuffer occupancyBytes = MemoryUtil.memAlloc((int) OCCUPANCY_BYTES_PER_SLOT);
-        ByteBuffer payloadBytes = MemoryUtil.memAlloc(VOXELS_PER_SECTION);
-        ByteBuffer faceSealBytes = MemoryUtil.memAlloc(VOXELS_PER_SECTION);
-        // Palette table for this slot. Packed on the worker thread (pure CPU); may be empty only if
-        // the section somehow harvested zero palette entries, in which case there is nothing to upload
-        // (vkCmdUpdateBuffer forbids a zero size) and no occupied voxel could reference it anyway.
-        byte[] paletteData = packPaletteEntries(result.palette().entries());
-        ByteBuffer paletteBytes = paletteData.length > 0 ? MemoryUtil.memAlloc(paletteData.length) : null;
-        if (paletteBytes != null) {
-            paletteBytes.put(paletteData).flip();
-        }
-        // 4-byte summary word -- see BRICK_SUMMARY_TARGET's own doc for why a whole uint rather than a
-        // packed bit. Native order: this is a direct off-heap MemoryUtil buffer (native byte order,
-        // little-endian on every supported platform), matching the GPU's own expectation, unlike
-        // packPaletteEntries' heap-backed ByteBuffer.wrap(...) which needs an explicit .order() call.
-        ByteBuffer summaryBytes = MemoryUtil.memAlloc((int) BRICK_SUMMARY_BYTES_PER_SLOT);
-        try {
-            byte[] paletteIndices = result.paletteIndices();
-            for (int i = 0; i < OCCUPANCY_BYTES_PER_SLOT; i++) {
-                occupancyBytes.put(i, (byte) 0);
-            }
-            for (int voxel = 0; voxel < VOXELS_PER_SECTION; voxel++) {
-                int paletteIndex = paletteIndices[voxel] & 0xFF;
-                SectionPalette.Entry entry = result.palette().entries().get(paletteIndex);
-                boolean occupied = isOccupyingShape(entry.shapeKind());
-                if (occupied) {
-                    int byteIndex = voxel / 8;
-                    int bitIndex = voxel % 8;
-                    occupancyBytes.put(byteIndex, (byte) (occupancyBytes.get(byteIndex) | (1 << bitIndex)));
-                }
-                payloadBytes.put(voxel, paletteIndices[voxel]);
-                faceSealBytes.put(voxel, packFaceSeal(entry));
-            }
-            summaryBytes.putInt(0, summaryWord(anySolidVoxel(paletteIndices, result.palette().entries()),
-                    anyEmitter(result.palette().entries())));
-
-            long occupancyOffset = (long) slot * OCCUPANCY_BYTES_PER_SLOT;
-            long payloadOffset = (long) slot * VOXELS_PER_SECTION;
-            long paletteOffset = (long) slot * PALETTE_BYTES_PER_SLOT;
-            long faceSealOffset = (long) slot * FACE_SEAL_BYTES_PER_SLOT;
-            long summaryOffset = (long) slot * BRICK_SUMMARY_BYTES_PER_SLOT;
-
-            // The buffer-handle reads and the submit against them are one atomic critical section
-            // under the process-wide compute lock: TargetRegistry.close/ensureBufferSize free or
-            // reassign these exact buffers from the render thread, so reading the handle outside the
-            // lock and submitting inside it would reopen a use-after-free. getBuffer() dereferences
-            // TargetRegistry's plain-HashMap `buffers`, mutated only under this same lock -- so the
-            // map read is race-free here too. See VulkanComputeBackend.SHARED_QUEUE_LOCK.
-            synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
-                if (!VoxelWindow.hasCurrentSourceSummary(result)) {
-                    VoxelWindow.onSectionUploadDropped();
-                    return;
-                }
-                BufferInstance occupancy = registry.getBuffer(OCCUPANCY_TARGET);
-                BufferInstance payload = registry.getBuffer(PAYLOAD_TARGET);
-                BufferInstance palette = registry.getBuffer(PALETTE_TARGET);
-                BufferInstance faceTexture = registry.getBuffer(VoxelFaceTexture.TARGET);
-                BufferInstance lightmap = registry.getBuffer(VoxelLightmap.TARGET);
-                BufferInstance faceSeal = registry.getBuffer(FACE_SEAL_TARGET);
-                BufferInstance summary = registry.getBuffer(BRICK_SUMMARY_TARGET);
-                if (occupancy == null || payload == null || palette == null || faceSeal == null || summary == null) {
-                    return; // not allocated yet (or torn down) -- caller must ensureAllocated() first
-                }
-                // Correctness guard -- see fitsInBuffer's own doc (out-of-bounds-write fix). `slot` was
-                // computed by the CALLER (VoxelWindow.onSectionHarvested), possibly against a window
-                // state that no longer matches these just-read, LIVE buffer sizes. Checked before
-                // recording anything and skips the WHOLE slot rather than partially writing some of the
-                // four ranges but not others -- partial per-slot corruption would look plausible instead
-                // of obviously wrong; a dropped slot is simply re-harvested if it re-enters the window.
-                if (!fitsInBuffer(occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancy.sizeBytes())) {
-                    logOobDrop(OCCUPANCY_TARGET, slot, occupancyOffset, OCCUPANCY_BYTES_PER_SLOT, occupancy.sizeBytes());
-                    return;
-                }
-                if (!fitsInBuffer(payloadOffset, VOXELS_PER_SECTION, payload.sizeBytes())) {
-                    logOobDrop(PAYLOAD_TARGET, slot, payloadOffset, VOXELS_PER_SECTION, payload.sizeBytes());
-                    return;
-                }
-                if (!fitsInBuffer(faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSeal.sizeBytes())) {
-                    logOobDrop(FACE_SEAL_TARGET, slot, faceSealOffset, FACE_SEAL_BYTES_PER_SLOT, faceSeal.sizeBytes());
-                    return;
-                }
-                if (paletteBytes != null && !fitsInBuffer(paletteOffset, paletteData.length, palette.sizeBytes())) {
-                    logOobDrop(PALETTE_TARGET, slot, paletteOffset, paletteData.length, palette.sizeBytes());
-                    return;
-                }
-                if (!fitsInBuffer(summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summary.sizeBytes())) {
-                    logOobDrop(BRICK_SUMMARY_TARGET, slot, summaryOffset, BRICK_SUMMARY_BYTES_PER_SLOT, summary.sizeBytes());
-                    return;
-                }
-                VulkanComputeBackend backend = VulkanComputeBackend.tryCreate();
-                if (backend == null) {
-                    return;
-                }
-                try {
-                    // ALL FOUR ranges go into ONE command buffer, ONE submit, ONE fence wait (was two full
-                    // staging round trips, each ending in a whole-queue waitIdle -- the upload-stall bug).
-                    byte[] textureData = faceTexture == null ? new byte[0] : packFaceTextures(result.palette().entries());
-                    long textureOffset = (long) slot * VoxelFaceTexture.BYTES_PER_SLOT;
-                    if (faceTexture != null && !fitsInBuffer(textureOffset, textureData.length, faceTexture.sizeBytes())) {
-                        logOobDrop(VoxelFaceTexture.TARGET, slot, textureOffset, textureData.length, faceTexture.sizeBytes());
-                        return;
-                    }
-                    long lightmapOffset = (long) slot * VoxelLightmap.BYTES_PER_SLOT;
-                    if (lightmap != null && !fitsInBuffer(lightmapOffset, VoxelLightmap.BYTES_PER_SLOT, lightmap.sizeBytes())) {
-                        logOobDrop(VoxelLightmap.TARGET, slot, lightmapOffset, VoxelLightmap.BYTES_PER_SLOT, lightmap.sizeBytes());
-                        return;
-                    }
-                    ByteBuffer lightmapBytes = lightmap == null ? null : MemoryUtil.memAlloc(VoxelLightmap.BYTES_PER_SLOT);
-                    if (lightmapBytes != null) lightmapBytes.put(result.lightmap()).flip();
-                    ByteBuffer textureBytes = textureData.length == 0 ? null : MemoryUtil.memAlloc(textureData.length);
-                    if (textureBytes != null) textureBytes.put(textureData).flip();
-                    try {
-                        uploadLocked(backend,
-                                occupancy.vkBuffer(), occupancyOffset, occupancyBytes,
-                                payload.vkBuffer(), payloadOffset, payloadBytes,
-                                faceSeal.vkBuffer(), faceSealOffset, faceSealBytes,
-                                palette.vkBuffer(), paletteOffset, paletteBytes,
-                                summary.vkBuffer(), summaryOffset, summaryBytes,
-                                faceTexture == null ? -1L : faceTexture.vkBuffer(), textureOffset, textureBytes,
-                                lightmap == null ? -1L : lightmap.vkBuffer(), lightmapOffset, lightmapBytes);
-                    } finally {
-                        if (textureBytes != null) MemoryUtil.memFree(textureBytes);
-                        if (lightmapBytes != null) MemoryUtil.memFree(lightmapBytes);
-                    }
-                    // Same tier-0-only hook as uploadBatchLocked's; this branch is uploadSlot's own
-                    // direct write path (no section-state/source-summary metadata enabled), reached
-                    // only after every fitsInBuffer guard above already passed for this slot.
-                    MetalRtGeometry.markDirty(slot);
-                } finally {
-                    backend.close();
-                }
-            }
-        } finally {
-            MemoryUtil.memFree(occupancyBytes);
-            MemoryUtil.memFree(payloadBytes);
-            MemoryUtil.memFree(faceSealBytes);
-            if (paletteBytes != null) {
-                MemoryUtil.memFree(paletteBytes);
-            }
-            MemoryUtil.memFree(summaryBytes);
-        }
+        uploadSlots(registry, List.of(new SlotUpload(slot, result, false)));
     }
 
     /** One slot's harvested payload plus whether its toroidal index is being reclaimed from a
@@ -906,12 +717,10 @@ public final class BrickGridUpload {
         }
     }
 
-    /** Packs every slot into one submission and waits for it to finish. The registry keeps the
-     * scratch space, command pool and fence between batches; vkCmdUpdateBuffer copies scratch bytes
-     * at record time. Destination handles and per-slot sizes are read fresh under SHARED_QUEUE_LOCK
-     * on every call, so a resize never reuses an old buffer handle. Does nothing for an empty batch
-     * or one where a buffer is not yet allocated. */
-    public static void uploadSlots(TargetRegistry registry, List<SlotUpload> uploads) {
+    /** Record a bounded data batch into the frame transfer using registry-owned scratch bytes.
+     * vkCmdUpdateBuffer captures those bytes while recording. The drain checks allocation first;
+     * missing mandatory buffers here are a broken frame transaction, never a successful upload. */
+    private static void uploadSlotsNow(TargetRegistry registry, List<QueuedSlot> uploads) {
         if (uploads.isEmpty()) {
             return;
         }
@@ -924,13 +733,13 @@ public final class BrickGridUpload {
             BufferInstance faceSeal = registry.getBuffer(FACE_SEAL_TARGET);
             BufferInstance summary = registry.getBuffer(BRICK_SUMMARY_TARGET);
             if (occupancy == null || payload == null || palette == null || faceSeal == null || summary == null) {
-                return; // not allocated yet (or torn down) -- caller must ensureAllocated() first
+                throw new IllegalStateException("Voxel data drain lost its required buffers");
             }
             BufferInstance sectionState = registry.getBuffer(VoxelSectionState.TARGET);
             BufferInstance sourceSummary = registry.getBuffer(VoxelSourceSummary.TARGET);
             BufferInstance lightVolume = registry.getBuffer(LIGHT_VOLUME_TARGET); // may legitimately be null
             VoxelUploadResources resources = registry.voxelUploadResources();
-            if (resources == null) return;
+            if (resources == null) throw new IllegalStateException("Voxel data drain has no scratch resources");
             uploadBatchLocked(resources,
                         occupancy.vkBuffer(), occupancy.sizeBytes(),
                         payload.vkBuffer(), payload.sizeBytes(),
@@ -952,27 +761,10 @@ public final class BrickGridUpload {
         }
     }
 
-    /** One reused command pool covering every entry in {@code uploads}: for each slot, the same
-     * occupancy/payload/palette/summary packing {@link #uploadLocked} does for a single slot (reusing
-     * the shared scratch buffers instead of allocating fresh ones), plus an optional light-volume
-     * zero-fill ({@link #clearLightSlot}'s single range) when {@link SlotUpload#clearLight()} is set,
-     * then one submit and one completion wait, using the registry's reusable fence. Caller holds {@code
-     * SHARED_QUEUE_LOCK}. {@code lightVolumeBuffer} of {@code -1L} means the light-volume buffer
-     * isn't allocated; light-clear entries are skipped rather than attempted against an invalid
-     * handle, matching {@link #clearLightSlot}'s own no-op behavior.
-     *
-     * <p><b>Per-item bounds guard.</b> Every entry in {@code
-     * uploads} is checked with {@link #fitsInBuffer} against the {@code *BufferSize} parameters --
-     * the LIVE {@link BufferInstance#sizeBytes()} the caller read inside this same {@code
-     * SHARED_QUEUE_LOCK} critical section -- immediately before that entry's own {@code
-     * vkCmdUpdateBuffer} calls are recorded, and a failing entry is skipped (see {@link
-     * #fitsInBuffer}'s own doc for the full hazard). Unlike {@link #uploadSlot}'s whole-slot skip, this
-     * is checked PER ITEM rather than once for the whole batch: {@code uploads} is a batch drained from
-     * {@link VoxelWindow}'s {@code RESYNC_EXECUTOR} backlog, which can span a real window shrink
-     * mid-batch -- some entries were computed against the OLD, larger diameter (now stale) while others
-     * (harvested after the shrink) already reflect the new, smaller one, so a single all-or-nothing
-     * decision for the whole batch would either wrongly write the stale entries or wrongly drop the
-     * still-valid ones. */
+    /** Record each current slot's complete payload and optional light clear. The frame transfer
+     * owns submission; CPU commit callbacks run only after that submission succeeds.
+     * Per-item live bounds checks reject obsolete layouts before writing any slot range.
+     * Caller holds SHARED_QUEUE_LOCK. Optional targets use a buffer handle of -1L. */
     private static void uploadBatchLocked(VoxelUploadResources resources,
                                           long occupancyBuffer, long occupancyBufferSize,
                                           long payloadBuffer, long payloadBufferSize,
@@ -983,26 +775,28 @@ public final class BrickGridUpload {
                                           long summaryBuffer, long summaryBufferSize,
                                           long sectionStateBuffer, long sectionStateBufferSize,
                                           long sourceSummaryBuffer, long sourceSummaryBufferSize,
-                                          long lightVolumeBuffer, long lightVolumeBufferSize, List<SlotUpload> uploads,
+                                          long lightVolumeBuffer, long lightVolumeBufferSize, List<QueuedSlot> uploads,
                                           ByteBuffer occupancyScratch, ByteBuffer payloadScratch,
                                           ByteBuffer faceSealScratch,
                                           ByteBuffer paletteScratch, ByteBuffer summaryScratch,
                                           ByteBuffer lightZeroScratch, ByteBuffer faceTextureScratch, ByteBuffer lightmapScratch,
                                           ByteBuffer sectionStateScratch, ByteBuffer sourceSummaryScratch) {
         VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.BATCHES);
-        List<SlotUpload> committed = new ArrayList<>();
+        List<QueuedSlot> committed = new ArrayList<>();
         resources.execute(cmd -> {
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 if (sectionStateBuffer != -1L || sourceSummaryBuffer != -1L)
                     recordComputeReadToUploadBarrier(cmd, stack);
-                for (SlotUpload item : uploads) {
+                for (QueuedSlot queued : uploads) {
+                    SlotUpload item = queued.token();
                     int slot = item.slot();
-                    if (!VoxelWindow.hasCurrentSourceSummary(item.result())
+                    if (!VoxelWindow.isCurrentUpload(item) || !VoxelWindow.hasCurrentSourceSummary(item.result())
                             || (item.sectionState() != null && !VoxelWindow.isCurrentSectionState(slot, item.sectionState()))) {
                         VoxelWindow.onSectionUploadDropped();
+                        VoxelMeshHarvestTelemetry.LIVE.dropped(slot);
                         continue;
                     }
-                    SectionHarvester.Result result = item.result();
+                    SectionHarvester.Result result = queued.snapshot();
                     byte[] paletteIndices = result.paletteIndices();
 
                     long occupancyOffset = (long) slot * OCCUPANCY_BYTES_PER_SLOT;
@@ -1118,7 +912,7 @@ public final class BrickGridUpload {
                         lightZeroScratch.clear();
                         VK13.vkCmdUpdateBuffer(cmd, lightVolumeBuffer, lightOffset, lightZeroScratch);
                     }
-                    committed.add(item);
+                    committed.add(queued);
                     VoxelRefillTelemetry.count(VoxelRefillTelemetry.Count.PACKED);
                     // Tier 0 only: this method always targets the un-suffixed OCCUPANCY_TARGET/etc,
                     // never a cascade tier's _t<N> buffers. No-op unless the Metal RT pass is active.
@@ -1128,120 +922,151 @@ public final class BrickGridUpload {
                 recordUploadToComputeReadBarrier(cmd, stack);
             }
         });
-        // execute returns only after the existing batch fence completes successfully.
-        long commitStart = VoxelRefillTelemetry.start();
-        try {
-            for (SlotUpload item : committed) {
-                VoxelWindow.onSectionUploadCommitted(item);
-            }
-        } finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.COMMIT, commitStart); }
+        VoxelUploadFrame.afterSubmit(() -> {
+            long commitStart = VoxelRefillTelemetry.start();
+            try {
+                for (QueuedSlot item : committed) VoxelWindow.onSectionUploadCommitted(item.token(), item.snapshot());
+            } finally { VoxelRefillTelemetry.finish(VoxelRefillTelemetry.Phase.COMMIT, commitStart); }
+        });
     }
 
-    /** Zero-fills one slot's three light ranges. Called when a toroidal slot is CLAIMED by a
-     * new section (recenter shell resync, or a section entering the window via Sodium's meshing
-     * path): the slot index is center-independent (VoxelWindow.slotFor's floorMod), so recenter
-     * never remaps light data -- but a newly-claimed slot inherits the PREVIOUS owner's propagated
-     * light, which would glow through the new section's geometry for the ~15 iterations the
-     * propagation automaton needs to decay it (visible boundary ghosting). The tier-dependent stride
-     * is 4-aligned and remains below vkCmdUpdateBuffer's 65536-byte inline-update ceiling
-     * offset, embedded inline via vkCmdUpdateBuffer exactly like uploadSlot's ranges (same fenced
-     * single-submit path, same SHARED_QUEUE_LOCK atomicity contract). No-op when the buffer isn't
-     * allocated (no pack / emitter lighting never activated). */
-    public static void clearLightSlot(TargetRegistry registry, int slot) {
-        ByteBuffer zeros = MemoryUtil.memCalloc((int) lightVolumeBytesPerSlot());
-        try {
-            synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
-                BufferInstance volume = registry.getBuffer(LIGHT_VOLUME_TARGET);
-                if (volume == null) {
-                    return;
-                }
-                long offset = (long) slot * lightVolumeBytesPerSlot();
-                // Correctness guard -- see fitsInBuffer's own doc (out-of-bounds-write fix).
-                if (!fitsInBuffer(offset, lightVolumeBytesPerSlot(), volume.sizeBytes())) {
-                    logOobDrop(LIGHT_VOLUME_TARGET, slot, offset, lightVolumeBytesPerSlot(), volume.sizeBytes());
-                    return;
-                }
-                VulkanComputeBackend backend = VulkanComputeBackend.tryCreate();
-                if (backend == null) {
-                    return;
-                }
-                try {
-                    uploadSingleRangeLocked(backend, volume.vkBuffer(), offset, zeros);
-                } finally {
-                    backend.close();
-                }
-            }
-        } finally {
-            MemoryUtil.memFree(zeros);
+    private record QueuedSlot(SlotUpload token, SectionHarvester.Result snapshot) { }
+    private static final java.util.Map<TargetRegistry, VoxelUploadQueue<QueuedSlot>> queuedUploads =
+            new java.util.IdentityHashMap<>();
+
+    private static VoxelUploadQueue<QueuedSlot> queue(TargetRegistry registry) {
+        VoxelUploadResources.requireLock();
+        return queuedUploads.computeIfAbsent(registry, ignored -> new VoxelUploadQueue<>(VoxelWindow.uploadGeneration()));
+    }
+
+    /** Called with the storage generation change, before old worker tokens can be accepted. */
+    static void discardQueuedUploads() {
+        VoxelUploadResources.requireLock();
+        for (var queue : queuedUploads.values()) queue.close();
+        queuedUploads.clear();
+    }
+
+    public static void invalidateSectionStates(TargetRegistry registry, long atlasGeneration) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            queue(registry).invalidateMetadata(VoxelWindow.uploadGeneration(), atlasGeneration);
         }
     }
 
-    /** Zero-fills the OCCUPANCY range only (never payload/palette) for every slot in {@code slots}, in
-     * one command buffer / one submit / one fence wait. Called synchronously from {@link
-     * VoxelWindow#recenterAndResync}, on the render thread, for every slot the move newly exposes:
-     * {@code recenterAndResync} publishes the new window geometry synchronously (one volatile write),
-     * but the real harvest+upload of a newly-exposed slot happens on {@link VoxelWindow}'s background
-     * resync executor, frames later. In between, the slot's GPU occupancy/payload/palette bytes still
-     * belong to whatever section previously owned that toroidal index -- without this clear, the DDA
-     * in {@code voxel_water_refl.comp} would read that stale geometry as if it belonged to the new
-     * slot's world-space position (a "teleported" displaced/copied-looking patch). This method blocks
-     * on its fence before returning (same as {@link #uploadSlot}/{@link #clearLightSlot}), so by the
-     * time {@code recenterAndResync} returns the clear is already GPU-visible, before this frame's own
-     * compute dispatch is submitted on the same queue.
-     *
-     * <p>Occupancy is the DDA's real correctness gate: {@code voxelOccupied} in {@code
-     * voxel_water_refl.comp} is consulted before payload/palette are ever touched, so a slot with
-     * occupancy=0 reads as an empty brick (DDA miss -> sky fallback) regardless of what stale bytes
-     * its payload/palette ranges still hold; clearing those two as well would just be two more GPU
-     * submits per slot for no visible effect (see also {@link #clearLightSlot}'s narrower light-only
-     * precedent). The coarse SUMMARY word ({@link #BRICK_SUMMARY_TARGET}) is overwritten here too --
-     * unlike payload/palette it is not merely dead weight if left stale: a brick-skip DDA (a pack's
-     * {@code celestial_shadow.fsh}) trusts a nonzero summary to mean "descend and test", so leaving a
-     * previous owner's real nonzero summary on a freshly-exposed, occupancy-cleared slot would not
-     * corrupt the hit/miss verdict (the per-voxel occupancy test underneath is already all-zero and
-     * correctly reports no occlusion) but would silently defeat the skip.
-     *
-     * <p><b>{@link #SUMMARY_PENDING}, not plain {@code 0}.</b> This method writes the {@link
-     * #SUMMARY_PENDING} sentinel into the summary word rather than {@code 0}: a plain zero here would
-     * be byte-identical to {@link #anySolidVoxel} having proved this brick is really empty, so a
-     * consumer could never distinguish "confirmed no rock" from "rock may well be here, harvest just
-     * hasn't landed yet" -- the gap that let a DDA ray pass clean through a slot straddling real solid
-     * terrain during the window between this clear and the real re-harvest, reporting a false "lit"
-     * result. See {@link #SUMMARY_PENDING}'s own doc for the full mechanism. Consumers that only test
-     * "summary != 0" ({@code voxel_water_refl.comp}/{@code light_inject.comp}, which do not consume
-     * this buffer at all) still correctly treat a pending slot as "has content, worth a closer look" --
-     * {@link #SUMMARY_PENDING} sets no low bits {@link #summaryWord} ever produces, so it can never be
-     * misread as the boolean {@code 1}; only a consumer that explicitly tests the sentinel bit ({@code
-     * marchOcclusion}) gets the more conservative behavior. Keeps the "cleared until harvested"
-     * invariant true for both buffers, not just the correctness-critical one.
-     *
-     * <p>Batched into one submit rather than one call per slot (mirroring {@link #uploadLocked}'s "one
-     * command buffer, one submit" reasoning) because a single recenter can expose dozens of slots on
-     * every section-boundary cross, and -- unlike {@link #uploadSlot}, which runs on a background
-     * harvester thread -- this runs on the render thread, so a separate fenced submit per slot would
-     * stall a frame proportional to shell size. No-op for an empty {@code slots} (the never-centered
-     * sentinel's first recenter, or a move with a still-attached but not-yet-allocated registry) or
-     * when the occupancy buffer isn't allocated yet. */
+    public static void uploadSlots(TargetRegistry registry, List<SlotUpload> uploads) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            for (SlotUpload item : uploads) {
+                if (!VoxelWindow.isCurrentUpload(item) || !VoxelWindow.hasCurrentSourceSummary(item.result())
+                        || (item.sectionState() != null && !VoxelWindow.isCurrentSectionState(item.slot(), item.sectionState()))) {
+                    VoxelWindow.onSectionUploadDropped();
+                    VoxelMeshHarvestTelemetry.LIVE.dropped(item.slot());
+                    continue;
+                }
+                SectionHarvester.Result source = item.result();
+                // Arrays in harvested results are caller-owned. Copy them before deferring the GPU write.
+                List<SectionPalette.Entry> entries = new ArrayList<>();
+                for (var entry : source.palette().entries()) entries.add(new SectionPalette.Entry(
+                        entry.shapeKind(), List.copyOf(entry.boxes()), entry.faceColors().clone(),
+                        entry.emissiveStrength(), entry.lightTransmissive(), entry.emissionColor(),
+                        entry.cutout(), entry.uvRect().clone(), entry.extinction(), entry.faceSealMask(),
+                        entry.faceTextureWords().clone()));
+                SectionHarvester.Result snapshot = new SectionHarvester.Result(source.paletteIndices().clone(),
+                        new SectionPalette(entries), source.lightmap().clone(), source.sourceSummary(),
+                        source.harvestGeneration(), source.sourceEvidence(), source.sourcePolicy(), source.rtGeometry());
+                queue(registry).publish(VoxelWindow.uploadGeneration(), item.slot(), new QueuedSlot(item, snapshot), item.clearLight());
+            }
+        }
+    }
+
+    public static void clearLightSlot(TargetRegistry registry, int slot) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            queue(registry).clearLight(VoxelWindow.uploadGeneration(), slot);
+        }
+    }
+
     public static void clearOccupancySlots(TargetRegistry registry, Collection<Integer> slots) {
+        synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
+            var queue = queue(registry);
+            for (int slot : slots) queue.clear(VoxelWindow.uploadGeneration(), slot);
+        }
+    }
+
+    static boolean hasQueuedUploads(TargetRegistry registry) {
+        VoxelUploadResources.requireLock();
+        var queue = queuedUploads.get(registry);
+        return queue != null && queue.hasPending();
+    }
+
+    static void drainQueuedUploads(TargetRegistry registry, int limit) {
+        VoxelUploadResources.requireLock();
+        var queue = queuedUploads.get(registry);
+        if (queue == null) return;
+        var snapshot = queue.snapshot(limit);
+        if (snapshot.generation() != VoxelWindow.uploadGeneration()) throw new IllegalStateException("Stale voxel drain generation");
+        // Keep the snapshot pending until the whole mandatory layout exists. A successful empty
+        // submission is not evidence that missing payload or clear destinations were written.
+        if (registry.getBuffer(OCCUPANCY_TARGET) == null || registry.getBuffer(PAYLOAD_TARGET) == null
+                || registry.getBuffer(PALETTE_TARGET) == null || registry.getBuffer(FACE_SEAL_TARGET) == null
+                || registry.getBuffer(BRICK_SUMMARY_TARGET) == null) return;
+        if (registry.voxelUploadResources() == null || registry.voxelClearResources() == null) return;
+        if (snapshot.invalidateMetadata()) invalidateSectionStatesNow(registry, snapshot.atlasGeneration());
+        List<Integer> clears = new ArrayList<>();
+        List<QueuedSlot> uploads = new ArrayList<>();
+        for (var entry : snapshot.entries()) {
+            if (entry.clearOccupancy()) clears.add(entry.slot());
+            QueuedSlot data = entry.data();
+            if (data != null) {
+                if (VoxelWindow.isCurrentUpload(data.token())) {
+                    SlotUpload item = data.token();
+                    // A standalone light clear can precede a newer payload for the same slot.
+                    // Fold it into that payload so publication also records the light owner.
+                    if (entry.clearLight() && !item.clearLight())
+                        data = new QueuedSlot(new SlotUpload(item.slot(), item.result(), true, item.sectionState()), data.snapshot());
+                    uploads.add(data);
+                } else {
+                    VoxelWindow.onSectionUploadDropped();
+                    VoxelMeshHarvestTelemetry.LIVE.dropped(entry.slot());
+                    if (entry.clearLight()) clearLightSlotNow(registry, entry.slot());
+                }
+            } else if (entry.clearLight()) clearLightSlotNow(registry, entry.slot());
+        }
+        // Invalidations precede newer data for the same slot and are never charged to its budget.
+        clearOccupancySlotsNow(registry, clears);
+        uploadSlotsNow(registry, uploads);
+        VoxelUploadFrame.afterSubmit(() -> queue.acknowledge(snapshot));
+    }
+
+    /** Record a claimed slot's propagated-light reset into the frame transfer. An absent optional
+     * light volume needs no write; allocated ranges must belong to this generation's layout. */
+    private static void clearLightSlotNow(TargetRegistry registry, int slot) {
+        BufferInstance volume = registry.getBuffer(LIGHT_VOLUME_TARGET);
+        if (volume == null) return;
+        long offset = (long) slot * lightVolumeBytesPerSlot();
+        if (!fitsInBuffer(offset, lightVolumeBytesPerSlot(), volume.sizeBytes())) return;
+        VoxelUploadResources resources = registry.voxelUploadResources();
+        if (resources == null) throw new IllegalStateException("Voxel light clear has no upload resources");
+        resources.execute(cmd -> VK13.vkCmdFillBuffer(cmd, volume.vkBuffer(), offset, lightVolumeBytesPerSlot(), 0));
+    }
+
+    /** Record mandatory exposed-slot clears before this frame's readers. Recenter only queues
+     * these records, so the previous frame's forward draws keep their matching grid and window.
+     * SUMMARY_PENDING distinguishes unavailable geometry from a harvested empty section. */
+    private static void clearOccupancySlotsNow(TargetRegistry registry, Collection<Integer> slots) {
         if (slots.isEmpty()) {
             return;
         }
         synchronized (VulkanComputeBackend.SHARED_QUEUE_LOCK) {
             BufferInstance occupancy = registry.getBuffer(OCCUPANCY_TARGET);
             if (occupancy == null) {
-                return; // not set up yet, or being torn down. Caller must call ensureAllocated() first
+                throw new IllegalStateException("Voxel clear drain lost its occupancy buffer");
             }
-            // ensureAllocated sets up summary at the same time as occupancy, so if occupancy exists,
-            // summary does too, in every real case. A null here only happens mid teardown. The summary
-            // write is then skipped, the same way clearLightSlot skips it, instead of holding up the
-            // occupancy clear, which must always happen.
+            // The drain preflights the mandatory grid layout; optional metadata remains nullable.
             BufferInstance summary = registry.getBuffer(BRICK_SUMMARY_TARGET);
             BufferInstance faceSeal = registry.getBuffer(FACE_SEAL_TARGET);
             BufferInstance sectionState = registry.getBuffer(VoxelSectionState.TARGET);
             BufferInstance sourceSummary = registry.getBuffer(VoxelSourceSummary.TARGET);
             VoxelClearResources resources = registry.voxelClearResources();
             if (resources == null) {
-                return;
+                throw new IllegalStateException("Voxel clear drain has no scratch resources");
             }
             clearOccupancySlotsLocked(resources, occupancy.vkBuffer(), occupancy.sizeBytes(),
                     faceSeal != null ? faceSeal.vkBuffer() : -1L,
@@ -1255,21 +1080,9 @@ public final class BrickGridUpload {
         }
     }
 
-    /** Writes one {@code vkCmdUpdateBuffer} per slot per buffer (occupancy, plus summary when set
-     * up), all in one command buffer and one submit. See {@link #clearOccupancySlots}. {@code
-     * resources} owns the reused scratch buffers, each call only reads them and never changes them,
-     * and it waits for this submission to finish only the next time it is used. See {@link
-     * VoxelClearResources}. {@code summaryBuffer} of {@code -1L} means the summary buffer is not set
-     * up, so its per-slot write is skipped, the same rule {@link #uploadBatchLocked} uses for the
-     * light volume. Caller holds {@code SHARED_QUEUE_LOCK}.
-     *
-     * <p>Bounds guard per slot: {@code slots} comes from the shell that {@link
-     * VoxelWindow#recenterAndResync} just built from the window state it just published, so this
-     * call is far less likely to race than {@link #uploadSlot} or {@link #uploadBatchLocked}, since
-     * there is no delay from a background thread between working out a slot and writing it here.
-     * The guard still runs anyway, see {@link #fitsInBuffer}, for the same reason every other write
-     * path in this class carries it: it is the only check here that cannot itself race, and a caller
-     * that runs in order today is not a promise every future caller will. */
+    /** Record occupancy, face-seal, summary and optional metadata clears in the frame transfer.
+     * Scratch bytes are captured by vkCmdUpdateBuffer during recording; no worker submits or waits.
+     * Live bounds checks reject slots outside the current allocation. Caller holds SHARED_QUEUE_LOCK. */
     private static void clearOccupancySlotsLocked(VoxelClearResources resources, long occupancyBuffer,
                                                    long occupancyBufferSize,
                                                    long faceSealBuffer, long faceSealBufferSize,
@@ -1335,131 +1148,4 @@ public final class BrickGridUpload {
         });
     }
 
-    /** Uploads the occupancy, payload, palette, and summary byte ranges into their destination
-     * buffers in a single fenced submission. No host-visible
-     * staging buffer is allocated: {@code vkCmdUpdateBuffer} embeds each range's bytes directly into
-     * the command buffer, which is valid here because all four pieces are tiny -- {@code
-     * OCCUPANCY_BYTES_PER_SLOT} (512), {@code VOXELS_PER_SECTION} (4096), a slot's actual palette
-     * byte count (at most {@code PALETTE_BYTES_PER_SLOT}, 16384), and {@code
-     * BRICK_SUMMARY_BYTES_PER_SLOT} (4) -- each a multiple of 4 and far under {@code
-     * vkCmdUpdateBuffer}'s 65536-byte inline limit -- and every destination offset is 4-aligned
-     * (slot * 512, slot * 4096, slot * PALETTE_BYTES_PER_SLOT, slot * 4). The destination buffers were
-     * created with {@code VK_BUFFER_USAGE_TRANSFER_DST_BIT} (they were {@code vkCmdCopyBuffer} targets
-     * before this change), which {@code vkCmdUpdateBuffer} also requires.
-     *
-     * <p>Completion is signalled by a per-call {@link org.lwjgl.vulkan.VkFence} rather than {@code
-     * VulkanQueue.waitIdle()}: {@code vkWaitForFences} on this fence drains ONLY this transfer, not
-     * every other in-flight submission on the shared queue (the whole-queue drain twice per upload was
-     * the upload-stall root cause). Blaze3D's {@code VulkanQueue.Submission.close()} hardcodes a null
-     * fence (verified via {@code javap}), so -- exactly as {@code VoxelDebugRaymarchPass.submitDispatch}
-     * does -- we bypass it and call {@code VK13.vkQueueSubmit} directly on the raw queue handle to
-     * attach the fence. The fence and the {@code backend}'s command pool are ephemeral per call
-     * (matching the per-call {@code tryCreate()}/{@code close()} lifecycle), so nothing is shared across
-     * the multiple worker threads that call {@code uploadSlot} concurrently. Caller holds {@code
-     * SHARED_QUEUE_LOCK}. */
-    private static void uploadLocked(VulkanComputeBackend backend,
-                                     long occupancyBuffer, long occupancyOffset, ByteBuffer occupancyBytes,
-                                     long payloadBuffer, long payloadOffset, ByteBuffer payloadBytes,
-                                     long faceSealBuffer, long faceSealOffset, ByteBuffer faceSealBytes,
-                                     long paletteBuffer, long paletteOffset, ByteBuffer paletteBytes,
-                                     long summaryBuffer, long summaryOffset, ByteBuffer summaryBytes,
-                                     long faceTextureBuffer, long faceTextureOffset, ByteBuffer faceTextureBytes,
-                                     long lightmapBuffer, long lightmapOffset, ByteBuffer lightmapBytes) {
-        VulkanDevice device = backend.device();
-        VkCommandBuffer cmd = backend.commandPool().allocateBuffer();
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack).sType$Default();
-            VK13.vkBeginCommandBuffer(cmd, beginInfo);
-            VK13.vkCmdUpdateBuffer(cmd, occupancyBuffer, occupancyOffset, occupancyBytes);
-            VK13.vkCmdUpdateBuffer(cmd, payloadBuffer, payloadOffset, payloadBytes);
-            VK13.vkCmdUpdateBuffer(cmd, faceSealBuffer, faceSealOffset, faceSealBytes);
-            // Palette range: at most MAX_PALETTE_ENTRIES * PALETTE_ENTRY_BYTES = 16384 bytes, well under
-            // vkCmdUpdateBuffer's 65536-byte inline limit; a multiple of 4 (64-byte entries); and its
-            // offset (slot * 16384) is 4-aligned -- so it embeds inline exactly like the other two ranges.
-            // Skipped only for the degenerate empty-palette section (paletteBytes == null).
-            if (paletteBytes != null) {
-                VK13.vkCmdUpdateBuffer(cmd, paletteBuffer, paletteOffset, paletteBytes);
-            }
-            if (lightmapBytes != null) {
-                VK13.vkCmdUpdateBuffer(cmd, lightmapBuffer, lightmapOffset, lightmapBytes);
-            }
-            if (faceTextureBytes != null) {
-                VK13.vkCmdUpdateBuffer(cmd, faceTextureBuffer, faceTextureOffset, faceTextureBytes);
-            }
-            VK13.vkCmdUpdateBuffer(cmd, summaryBuffer, summaryOffset, summaryBytes);
-            recordUploadToComputeReadBarrier(cmd, stack);
-            VK13.vkEndCommandBuffer(cmd);
-
-            VkFenceCreateInfo fenceInfo = VkFenceCreateInfo.calloc(stack).sType$Default();
-            LongBuffer fenceOut = stack.mallocLong(1);
-            if (VK13.vkCreateFence(device.vkDevice(), fenceInfo, null, fenceOut) != VK13.VK_SUCCESS) {
-                FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkCreateFence failed for slot upload");
-                return;
-            }
-            long fence = fenceOut.get(0);
-            try {
-                // Direct submit with the explicit fence -- see method javadoc for why this bypasses
-                // VulkanQueue.Submission (its close() always submits a null fence).
-                VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack).sType$Default()
-                        .pCommandBuffers(stack.pointers(cmd));
-                int submitResult = VK13.vkQueueSubmit(backend.computeQueue().vkQueue(), submitInfo, fence);
-                if (submitResult != VK13.VK_SUCCESS) {
-                    // Must not wait on a fence nothing was ever submitted against -- that would block this
-                    // (SHARED_QUEUE_LOCK-held) thread on FENCE_WAIT_TIMEOUT forever.
-                    FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkQueueSubmit failed with VkResult {}", submitResult);
-                    return;
-                }
-                int waitResult = VK13.vkWaitForFences(device.vkDevice(), fence, true, FENCE_WAIT_TIMEOUT);
-                if (waitResult != VK13.VK_SUCCESS) {
-                    FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkWaitForFences returned VkResult {}", waitResult);
-                }
-            } finally {
-                VK13.vkDestroyFence(device.vkDevice(), fence, null);
-            }
-        }
-    }
-
-    /** Small private sibling of {@link #uploadLocked} for a SINGLE range -- {@link #clearLightSlot}'s
-     * zero-fill only ever touches one buffer, so it does not need {@code uploadLocked}'s three-range
-     * plumbing. Same begin/{@code vkCmdUpdateBuffer}/end/fence-create/submit/wait/destroy sequence as
-     * {@code uploadLocked}, deliberately duplicated rather than folded into it: reshaping the hot
-     * three-range upload path to accommodate a one-range caller is not the smallest change here.
-     * Caller holds {@code SHARED_QUEUE_LOCK}. */
-    private static void uploadSingleRangeLocked(VulkanComputeBackend backend,
-                                                 long buffer, long offset, ByteBuffer bytes) {
-        VulkanDevice device = backend.device();
-        VkCommandBuffer cmd = backend.commandPool().allocateBuffer();
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack).sType$Default();
-            VK13.vkBeginCommandBuffer(cmd, beginInfo);
-            VK13.vkCmdUpdateBuffer(cmd, buffer, offset, bytes);
-            recordUploadToComputeReadBarrier(cmd, stack);
-            VK13.vkEndCommandBuffer(cmd);
-
-            VkFenceCreateInfo fenceInfo = VkFenceCreateInfo.calloc(stack).sType$Default();
-            LongBuffer fenceOut = stack.mallocLong(1);
-            if (VK13.vkCreateFence(device.vkDevice(), fenceInfo, null, fenceOut) != VK13.VK_SUCCESS) {
-                FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkCreateFence failed for light-slot clear");
-                return;
-            }
-            long fence = fenceOut.get(0);
-            try {
-                VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack).sType$Default()
-                        .pCommandBuffers(stack.pointers(cmd));
-                int submitResult = VK13.vkQueueSubmit(backend.computeQueue().vkQueue(), submitInfo, fence);
-                if (submitResult != VK13.VK_SUCCESS) {
-                    // Must not wait on a fence nothing was ever submitted against -- that would block this
-                    // (SHARED_QUEUE_LOCK-held) thread on FENCE_WAIT_TIMEOUT forever.
-                    FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkQueueSubmit failed with VkResult {} for light-slot clear", submitResult);
-                    return;
-                }
-                int waitResult = VK13.vkWaitForFences(device.vkDevice(), fence, true, FENCE_WAIT_TIMEOUT);
-                if (waitResult != VK13.VK_SUCCESS) {
-                    FornaxMod.LOGGER.error("[Fornax] BrickGridUpload: vkWaitForFences returned VkResult {} for light-slot clear", waitResult);
-                }
-            } finally {
-                VK13.vkDestroyFence(device.vkDevice(), fence, null);
-            }
-        }
-    }
 }

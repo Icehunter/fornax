@@ -98,6 +98,11 @@ public final class FoliageDensityResolver {
         List<BlockStateModelPart> parts = new ArrayList<>();
         model.collectParts(RandomSource.create(HARVEST_SEED), parts);
 
+        return resolveExtinction(parts);
+    }
+
+    /** Reuses the same surface-area measurement for the renderer's observed model parts. */
+    static float resolveExtinction(List<BlockStateModelPart> parts) {
         List<QuadSample> samples = new ArrayList<>();
         for (BlockStateModelPart part : parts) {
             collectQuads(part.getQuads(null), samples);

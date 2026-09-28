@@ -75,13 +75,15 @@ class ParticlePassBindingTest {
     }
 
     @Test
-    void computeStorageImageFeedingGeometryWaitsAtFragmentStage() {
+    void computeStorageImageFeedingGeometryWaitsAtVertexAndFragmentStages() {
         PassSpec compute = computePass("water_step", List.of("waveState"), null);
         PassSpec terrain = new PassSpec("terrain", PassType.GEOMETRY, GeometrySlot.TERRAIN,
                 "shaders/terrain", null, List.of("waveState"), List.of("sceneColor"),
                 null, null, List.of(), null, null, null);
         GraphSpec graph = new GraphSpec(Map.of(), List.of(compute, terrain));
-        assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        // Geometry inputs can be fetched by either shader stage; fragment-only misses vertex reads.
+        assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT
+                        | org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                 GraphRunner.computeGraphicsWaitStages(compute, graph, Map.of()));
     }
 
@@ -169,7 +171,9 @@ class ParticlePassBindingTest {
                 "shaders/terrain", null, List.of("waveState.history"), List.of("sceneColor"),
                 null, null, List.of(), null, null, null);
         GraphSpec graph = new GraphSpec(Map.of(), List.of(compute, terrain));
-        assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        // Geometry inputs can be fetched by either shader stage; fragment-only misses vertex reads.
+        assertEquals(org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT
+                        | org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                 GraphRunner.computeGraphicsWaitStages(compute, graph, Map.of()));
     }
 

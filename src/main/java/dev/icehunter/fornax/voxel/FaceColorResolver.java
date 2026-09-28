@@ -238,6 +238,12 @@ public final class FaceColorResolver {
         List<BlockStateModelPart> parts = new ArrayList<>();
         model.collectParts(RandomSource.create(HARVEST_SEED), parts);
 
+        return resolveCutoutRect(parts);
+    }
+
+    /** The same representative-rect policy applied to immutable captured model parts. */
+    static @Nullable float[] resolveCutoutRect(List<BlockStateModelPart> parts) {
+
         // Walks the six culled Direction buckets AND the null (unculled) bucket. The null pass is the fix
         // for leaves (2026-07-20, live-confirmed): every leaf variant is tagged cutout and classifies FULL,
         // but a leaf model's quads are UNCULLED -- they live under getQuads(null), not under any Direction
@@ -266,7 +272,7 @@ public final class FaceColorResolver {
         return null;
     }
 
-    private static int averageQuadColor(BakedQuad quad) {
+    static int averageQuadColor(BakedQuad quad) {
         TextureAtlasSprite sprite = quad.materialInfo().sprite();
         var image = ((SpriteContentsAccessor) (Object) sprite.contents()).fornax$originalImage();
 

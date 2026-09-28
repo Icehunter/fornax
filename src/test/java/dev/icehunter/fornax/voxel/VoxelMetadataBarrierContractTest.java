@@ -11,7 +11,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * It pins the scopes and placement, not driver scheduling or the separate graphics handoff. */
 class VoxelMetadataBarrierContractTest {
     private static String source() throws Exception {
-        return Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/BrickGridUpload.java"));
+        return Files.readString(Path.of("src/main/java/dev/icehunter/fornax/voxel/BrickGridUpload.java"))
+                .replace("\r\n", "\n");
     }
 
     private static String method(String source, String signature) {
@@ -40,7 +41,7 @@ class VoxelMetadataBarrierContractTest {
     @Test void everyMetadataMutationWaitsBeforeItsFirstWriteAndReleasesAfterward() throws Exception {
         String source = source();
         for (String signature : new String[] {
-                "public static void invalidateSectionStates(TargetRegistry registry, long atlasGeneration)",
+                "private static void invalidateSectionStatesNow(TargetRegistry registry, long atlasGeneration)",
                 "private static void uploadBatchLocked",
                 "private static void clearOccupancySlotsLocked"}) {
             String body = method(source, signature);

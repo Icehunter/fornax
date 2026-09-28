@@ -21,10 +21,12 @@ class PreOpaqueLightingComputeWaitStageContractTest {
 
     @Test
     void finalProducerWaitStageIsDerivedNotHardcoded() throws IOException {
-        String source = Files.readString(SOURCE);
+        String source = Files.readString(SOURCE).replace("\r\n", "\n");
         int methodStart = source.indexOf("private static void runPreOpaqueLightingCompute(");
         assertTrue(methodStart >= 0, "runPreOpaqueLightingCompute must still exist");
-        String method = source.substring(methodStart, source.indexOf("\n    }\n", methodStart));
+        int methodEnd = source.indexOf("\n    }\n", methodStart);
+        assertTrue(methodEnd > methodStart, "pre-opaque lighting method must have a closing brace");
+        String method = source.substring(methodStart, methodEnd);
 
         assertFalse(method.contains("VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT"),
                 "the wait stage must not hardcode FRAGMENT -- a pack pointing a COPY or PARTICLES"

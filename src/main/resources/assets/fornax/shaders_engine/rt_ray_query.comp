@@ -100,6 +100,17 @@ bool cutoutAccepts(vec2 uv) {
     return textureLod(atlas, uv, 0.0).a >= CUTOUT_ALPHA;
 }
 
+bool validQueryInput(vec4 originAndMin, vec4 directionAndMax, vec3 origin) {
+    if (any(isnan(originAndMin)) || any(isinf(originAndMin))
+            || any(isnan(directionAndMax)) || any(isinf(directionAndMax))
+            || any(isnan(origin)) || any(isinf(origin))) return false;
+    // Vulkan VUID-RuntimeSpirv-OpRayQueryInitializeKHR-06350 requires Tmin <= Tmax.
+    // A zero maximum denotes an inactive request; it cannot certify a traced miss.
+    if (originAndMin.w < 0.0 || directionAndMax.w <= 0.0
+            || directionAndMax.w < originAndMin.w) return false;
+    return any(notEqual(directionAndMax.xyz, vec3(0.0)));
+}
+
 void writeRecord(uint base, float distance, uint flags, uint surface, uint atlasUv, vec3 normal, uint tier, uint tint) {
     hits[base] = floatBitsToUint(distance);
     hits[base + 1u] = flags;
@@ -134,16 +145,19 @@ void main() {
 
     vec4 originAndMin = requests[index * 2u];
     vec4 directionAndMax = requests[index * 2u + 1u];
-    vec3 direction = directionAndMax.xyz;
-    float lengthSquared = dot(direction, direction);
-    // A zero-length direction is a caller bug, not a miss to trace: normalising would produce NaN
-    // and a NaN ray is undefined to the traversal.
-    if (!(lengthSquared > 0.0)) {
-        writeRecord(base, MISS_DISTANCE, FACE_UNKNOWN << FLAG_FACE_SHIFT, 0u, 0u, vec3(0.0), c.tier, MISS_TINT);
+    vec3 origin = originAndMin.xyz + c.originOffset;
+    // Validate after rebasing too: finite input coordinates can overflow when added. An invalid
+    // ray stays unanswered, so a caller can use its fallback instead of trusting false visibility.
+    if (!validQueryInput(originAndMin, directionAndMax, origin)) {
+        writeRecord(base, 0.0, 0u, 0u, 0u, vec3(0.0), 0u, 0u);
         return;
     }
-    vec3 origin = originAndMin.xyz + c.originOffset;
-    direction *= inversesqrt(lengthSquared);
+    vec3 direction = directionAndMax.xyz;
+    // Scaling a finite nonzero vector first bounds its squared norm to [1,3], avoiding overflow
+    // or underflow from squaring the caller's magnitude. The ray interval remains in blocks.
+    float directionScale = max(abs(direction.x), max(abs(direction.y), abs(direction.z)));
+    direction /= directionScale;
+    direction *= inversesqrt(dot(direction, direction));
 
     // No opacity override: a solid mesh is built opaque and the hardware commits it, a cutout mesh
     // is built non-opaque and every one of its candidates reaches this loop, because a leaf or a
