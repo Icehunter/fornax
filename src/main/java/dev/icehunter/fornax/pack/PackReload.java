@@ -146,8 +146,11 @@ public final class PackReload {
     }
 
     /** One INFO line per reload naming the content fingerprint of the shaders most edited during
-     * live tuning -- the ground-truth answer to "is the game running the file I just edited?". */
-    private static void logShaderFingerprints(Map<String, String> sources) {
+     * live tuning: the true answer to "is the game running the file I just edited?".
+     * Public so {@code PackEditSession.apply()}'s compile-option path can call it too. That path has
+     * no other success log, so a compile toggle that quietly fails to reach {@code GraphRunner.rebuild}
+     * would otherwise leave no trace at all. */
+    public static void logShaderFingerprints(Map<String, String> sources) {
         for (String key : new String[] {"shaders/blocks/terrain.fsh", "shaders/blocks/terrain.vsh", "shaders/post/gbuffer_resolve.fsh"}) {
             String src = sources.get(key);
             FornaxMod.LOGGER.info("[Fornax] shader fingerprint {} = {}", key,

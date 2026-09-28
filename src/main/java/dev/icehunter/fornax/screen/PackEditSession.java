@@ -3,8 +3,10 @@ package dev.icehunter.fornax.screen;
 import dev.icehunter.fornax.FornaxMod;
 import dev.icehunter.fornax.pack.PackDiscovery;
 import dev.icehunter.fornax.pack.PackModel;
+import dev.icehunter.fornax.pack.PackReload;
 import dev.icehunter.fornax.pack.PackValuesFile;
 import dev.icehunter.fornax.pack.graph.GraphRunner;
+import dev.icehunter.fornax.pack.layout.RuntimeShaderPack;
 import dev.icehunter.fornax.pack.option.OptionType;
 import dev.icehunter.fornax.pack.option.PackOption;
 import dev.icehunter.fornax.util.RendererReload;
@@ -412,7 +414,14 @@ final class PackEditSession {
                     PackDiscovery.loadShaderSources(this.model.root()),
                     PackSettingsSupport.compileIntMap(this.model, this.staged),
                     PackSettingsSupport.runtimeFloatMap(this.model, this.staged))
-                    .thenRunAsync(RendererReload::request, Minecraft.getInstance())
+                    .thenRunAsync(() -> {
+                        // A compile toggle changes the text RuntimeShaderPack just installed, not the
+                        // raw file on disk. Fingerprinting the raw file, like PackReload's own reload
+                        // does, would give the same hash every time and prove nothing. Without this
+                        // line, a toggle that failed to reach GraphRunner.rebuild left no trace at all.
+                        PackReload.logShaderFingerprints(RuntimeShaderPack.getInstance().sourcesSnapshot());
+                        RendererReload.request();
+                    }, Minecraft.getInstance())
                     .exceptionally(t -> {
                         FornaxMod.LOGGER.error(
                                 "[Fornax] Resource reload failed after compile-option apply; renderer reload skipped", t);
