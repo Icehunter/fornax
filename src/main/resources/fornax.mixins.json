@@ -58,6 +58,7 @@
     "vanilla.RenderSetupTexturesAccessor",
     "vanilla.RenderTypeLabPbrOwnerMixin",
     "vanilla.ScreenAccessor",
+    "vanilla.ScreenshotCaptureMixin",
     "vanilla.ShaderManagerGeometrySourceMixin",
     "vanilla.SingleFileLabPbrProvenanceMixin",
     "vanilla.SmokeParticleLayerMixin",

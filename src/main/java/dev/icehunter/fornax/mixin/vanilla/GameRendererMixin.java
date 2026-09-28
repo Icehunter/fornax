@@ -265,6 +265,8 @@ public class GameRendererMixin {
         // read uploads the per-frame jitter uniform; advancing there would hand that read the next
         // frame's offset instead of the one just baked into this frame's projection matrix, a
         // one-frame mismatch that would corrupt motion-vector correction.
+        dev.icehunter.fornax.debug.ScreenshotCapture.presentedFrame(CameraJitter.frameCounter(),
+                this.mainRenderTarget.width, this.mainRenderTarget.height);
         CameraJitter.advanceFrame();
         GraphRunner.endProfileFrame();
     }

@@ -308,6 +308,22 @@ public final class GraphRunner {
         return registry;
     }
 
+    /** The view for an F2 capture, read after the history swap. No hidden history aliases. */
+    public static GpuTextureView screenshotCaptureView(String reference) {
+        if (!isActive() || registry == null) throw new IllegalStateException("No active graph for F2 capture");
+        // F2 runs after the graph hands storage textures to the compute queue; a read here would break that.
+        if (registry.isStorageTexture(reference)) {
+            throw new IllegalArgumentException("F2 capture does not support compute storage textures: " + reference);
+        }
+        if (reference.endsWith(".history")) {
+            TargetInstance target = registry.get(reference.substring(0, reference.length() - ".history".length()));
+            if (target == null || !target.hasHistory()) {
+                throw new IllegalArgumentException("No history texture for F2 reference: " + reference);
+            }
+        }
+        return GraphInputResolver.resolveView(reference, registry, mipchainTargets);
+    }
+
     /**
      * The resolved view for {@code slot}'s {@code index}-th declared geometry input, or {@link
      * NoiseTexture#getView()} when that slot's pass declares fewer than {@code index + 1} inputs, no
@@ -1017,6 +1033,7 @@ public final class GraphRunner {
 
     /** Mirrors {@code FramePipeline.prepareGBufferForOpaquePass()}. */
     public static void prepare(ChunkRenderMatrices matrices, double x, double y, double z) {
+        dev.icehunter.fornax.debug.ScreenshotCapture.invalidateCompletedFrame();
         FrameUniformValues.CURRENT.beginFrame();
         // One log line every 5s, no per-frame cost. Sampled BEFORE the isActive() gate so a session
         // is measured whether or not a pack is loaded -- "does it climb with no pack active too" is
@@ -1606,6 +1623,9 @@ public final class GraphRunner {
                     0, 0, 0, 0, 0, width, height);
         }
 
+        dev.icehunter.fornax.debug.ScreenshotCapture.completedFrame(CameraJitter.frameCounter(),
+                CameraJitter.currentOffsetNdc(), CameraJitter.previousOffsetNdc(), width, height,
+                rebuildGeneration, compileValues, x, y, z);
         r.swapHistory();
 
         // Engine-owned voxel debug raymarch streaming update: manages the toroidal window (recenter/
@@ -3257,6 +3277,7 @@ public final class GraphRunner {
     }
 
     private static void closeCurrent() {
+        dev.icehunter.fornax.debug.ScreenshotCapture.invalidateCompletedFrame();
         PrecipCoarseClipmapUpload.reset();
         computeAtlasTextures.clear();
         // Detach the voxel window from this soon-to-be-closed registry BEFORE freeing its buffers, so a

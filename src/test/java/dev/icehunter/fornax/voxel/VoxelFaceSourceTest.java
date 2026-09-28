@@ -40,6 +40,30 @@ class VoxelFaceSourceTest {
     }
 
     @Test
+    void translucentUvDataDoesNotAdvertiseOpaqueSourceCoverage() {
+        try (SpriteContents contents = contents()) {
+            var sprite = new TestSprite(contents);
+            var solid = north(sprite, false);
+            var glass = new BakedQuad(solid.position0(), solid.position1(), solid.position2(), solid.position3(),
+                    solid.packedUV0(), solid.packedUV1(), solid.packedUV2(), solid.packedUV3(), solid.direction(),
+                    new BakedQuad.MaterialInfo(sprite, ChunkSectionLayer.TRANSLUCENT, null, -1, true, 0));
+            var faces = VoxelFaceTexture.packSources(List.of(part(List.of(glass))),
+                    VoxelShapeKind.FULL, -1, index(sprite, 0));
+            // NORTH's exact UV is usable, but neither opaque-coverage nor alpha-test is claimed.
+            assertEquals(0x01ffffff, faces.textureWords()[2 * VoxelFaceTexture.FACE_WORDS]);
+            var summary = faces.summaries().get(Direction.NORTH.get3DDataValue());
+            assertTrue(summary.authoredCandidate(), "raw authored emission evidence is retained");
+            assertEquals(MaterialSourceIndex.UNSUPPORTED_GEOMETRY, summary.flags());
+            var builder = new VoxelSourceEvidence.Builder();
+            builder.add(true, 15, faces.summaries());
+            builder.addCell(true, 0);
+            var evidence = builder.finish(false);
+            assertEquals(0, evidence.eligibleFaces(), "UV support cannot imply opaque-strength emission");
+            assertTrue((evidence.unknownMask(0) & (1 << Direction.NORTH.get3DDataValue())) != 0);
+        }
+    }
+
+    @Test
     void croppedFaceRetainsRawPositiveEvidenceButCannotAdvertiseWholeSpriteCoverage() {
         try (SpriteContents contents = contents()) {
             var sprite = new TestSprite(contents);

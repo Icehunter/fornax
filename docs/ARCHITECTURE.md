@@ -1485,6 +1485,7 @@ be restated here.
 | Mixin | Target | Purpose | Shape |
 |---|---|---|---|
 | `GameRendererMixin` | `GameRenderer` | Apply camera jitter; swap in/out the render-scale target; sequence SSAA downsample, TAA/TAAU reconstruct or MetalFX temporal upscale, scene-history handling, and jitter advance at frame tail | WrapOperation, Inject x2 |
+| `ScreenshotCaptureMixin` | `Screenshot` | At the start of a normal F2, queue raw crops of graph targets and the native framebuffer when a config file asks for it; the PNG is still written | Inject |
 | `GuiRendererCaptureMixin` | `GameRenderer` | Capture vanilla's HUD draw into `UiLayerCapture`'s transparent-background target whenever this frame produced a MetalFX-generated frame (`FrameGenPass.generatedFrameReady()`), then blend it back over the real native target so on-screen output is unchanged | WrapOperation |
 | `PresentSeamMixin` | `Minecraft` | Present a MetalFX-generated frame through `windowSurface` immediately before vanilla's own `blitFromTexture(...)` call in `renderFrame`'s present section, so the swapchain sees generated → real in that order every armed frame | Inject |
 | `CameraAccessor` | `Camera` | Expose the private `depthFar`, the per-frame far-plane distance `Camera.update()` derives, needed for `FrameGenPass` to feed `MTLFXFrameInterpolator`'s `farPlane` and linearize the reversed-Z depth | `@Accessor("depthFar")` |
@@ -2630,6 +2631,47 @@ reported explicitly, and neither a pending nor an unavailable binding can advert
 Source and pure-data tests pin these contracts; only a client run verifies mixin application, GPU
 readback content and driver behavior. The capture frame's timing includes readback overhead.
 
+### F2 raw target crops
+
+`config/fornax-screenshot-capture.json` turns on raw crops of graph targets on a normal F2. The
+file is read only on F2. Without it, F2 works as usual. For example:
+
+```json
+{"targets":["exampleTarget.history","exampleTarget","builtin.gMotion"],
+ "crop":{"x":700,"y":386,"width":512,"height":448}}
+```
+
+The crop is in **GPU image coordinates**, not PNG top-left coordinates. Each target's crop is
+scaled to that texture's size, start rounded down and end rounded up, with no resampling.
+Minecraft 26.2's screenshot flips rows and sets alpha to 255. So PNG rectangle `(700,250,512,448)`
+in a 1728×1084 image is GPU rectangle `(700,386,512,448)`. Raw files hold packed, unflipped GPU
+bytes. Compare the `builtin.output` file against the PNG's RGB to confirm the pair and the
+orientation, rather than assume it.
+
+`ScreenshotCapture` keeps CPU-side values only, taken when the graph finishes and before the
+history swap: frame counter, current and previous jitter, render size, camera position, compile
+values and shader generation. `GameRendererMixin`'s frame tail marks that snapshot as presented
+before jitter advances. Graph prepare and pack teardown drop the snapshot, and a snapshot from a
+different frame is refused. No per-frame GPU copies, waits or reads are added. F2 resolves
+references after the history swap: a target's `.history` image holds this frame's write, while the
+bare name is the older image. References are never rewritten. `.history` on a target that has no
+history is an error.
+
+Each F2 writes `fornax-screenshot-captures/<timestamp>-<uuid>/manifest.json` and raw `.bin`
+files. The manifest records native and render size, each texture's format, base mip, crop, row
+stride, byte count, byte order, SHA-256, state, and any error. A missing target or one without
+COPY_SRC usage is reported; texture flags are not changed. Only single-layer, non-stencil,
+non-storage textures are supported. Storage textures are refused because F2 runs after the graph
+hands them to the compute queue; a copy would be a read the queue does not know about. At most
+sixteen targets; `builtin.output` is added if left out. Limits: 16 MiB per request, eight pending
+requests, 128 MiB staging in all. A request over budget still gets a manifest. The pending count
+is set before any copy is queued, since a callback may run at once. Staging is freed when its
+callback ends; the budget is held until every copy ends, even across pack teardown.
+
+This reads the targets as they are at frame end, not as they were mid-graph, and does not replay
+shaders. Only a game session verifies mixin application, copy content, screenshot pairing and
+driver callbacks. It costs readback time only on F2.
+
 ## 12. Known laws
 
 - **IDs from one pack must never show up under the next.**
@@ -3595,10 +3637,17 @@ page). Page zero uses the base atlas; page 1..3 requires the matching array laye
 remapping. The seven-word stride and existing UVs are unchanged. Tint alpha is not stored; alpha comes
 from the atlas sample instead. Local `(s,t)` is `(y,z)` on X faces,
 `(x,z)` on Y faces and `(x,y)` on Z faces, so a turned or mirrored baked UV still comes out right. A
-face is usable only when one opaque or alpha-tested quad covers the whole cell face with UVs
-running straight across it. See-through materials, stacked faces, part cells, crosses, loose leaf
+face is usable only when one solid, alpha-tested or see-through quad covers the whole cell face
+with UVs running straight across it. A see-through mapping gives atlas alpha, normal and material
+data but does not claim alpha-test or solid cover. Stacked faces, part cells, crosses, loose leaf
 quads and higher tint layers mark it unusable, and a reader must fall back on the average face
-colour.
+colour. A usable mapping does not mean the face is solid: readers check the cover flag or the
+atlas alpha. Dropping a see-through mapping would starve reflection readers of that alpha and the
+material maps.
+
+A see-through face keeps its raw material-source evidence but stays flagged as unsupported source
+geometry: a mapping cannot say how much light a blended surface gives. This is separate from the
+usable-UV flag.
 
 Rendered opaque coverage is independent of UV mapping and source eligibility. A face receives
 flag bit 2 when at least one actual baked quad covers its complete unit-square boundary in

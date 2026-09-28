@@ -94,7 +94,10 @@ public final class VoxelFaceTexture {
                     summary = candidate;
             }
             if (summary == null) summary = MaterialSourceIndex.unavailable(MaterialSourceIndex.UNSUPPORTED_GEOMETRY);
+            // A see-through face may have exact UVs, but that does not say how much light it
+            // gives. Keep it unknown until a reader can handle part cover.
             if (kind != VoxelShapeKind.FULL || candidates.size() != 1
+                    || candidates.getFirst().materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT
                     || (words[face.get3DDataValue() * FACE_WORDS] >>> 24 & 1) == 0) {
                 combinedFlags |= MaterialSourceIndex.UNSUPPORTED_GEOMETRY;
             } else if (!coversWholeSprite(candidates.getFirst())) {
@@ -163,8 +166,10 @@ public final class VoxelFaceTexture {
     static int[] mapping(BakedQuad quad, Direction face, int tint) {
         int[] words = new int[FACE_WORDS];
         var layer = quad.materialInfo().layer();
-        // Solid and alpha-tested faces only. Nothing about light getting through.
-        if (layer != ChunkSectionLayer.SOLID && layer != ChunkSectionLayer.CUTOUT) return words;
+        // UVs are separate from how solid a face is: a see-through face needs its atlas alpha too.
+        // The solid-cover flag is set elsewhere. Only CUTOUT gets the alpha-test bit.
+        if (layer != ChunkSectionLayer.SOLID && layer != ChunkSectionLayer.CUTOUT
+                && layer != ChunkSectionLayer.TRANSLUCENT) return words;
         if (quad.materialInfo().tintIndex() > 0) return words; // Only layer-zero tint is harvested.
         float[][] uv = new float[4][];
         int axis = switch(face.getAxis()) { case X -> 0; case Y -> 1; case Z -> 2; };

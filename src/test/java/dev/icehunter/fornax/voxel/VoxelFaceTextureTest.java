@@ -103,12 +103,57 @@ class VoxelFaceTextureTest {
         assertEquals(0,VoxelFaceTexture.mapping(bent,Direction.NORTH,-1)[0]);
     }
 
-    @Test void translucentSurfaceRequiresTransmissionInsteadOfAnOpaqueMapping() {
-        var q = north(-1,false);
-        var glass = new BakedQuad(q.position0(),q.position1(),q.position2(),q.position3(),
-                q.packedUV0(),q.packedUV1(),q.packedUV2(),q.packedUV3(),q.direction(),
-                new BakedQuad.MaterialInfo(null,ChunkSectionLayer.TRANSLUCENT,null,-1,true,0));
-        assertEquals(0,VoxelFaceTexture.mapping(glass,Direction.NORTH,-1)[0]);
+    @Test void translucentFullFacesKeepExactUvWithoutClaimingOpaqueCoverage() throws Exception {
+        var quads = new java.util.ArrayList<BakedQuad>();
+        for (Direction face : Direction.values()) {
+            Vector3f[] positions = new Vector3f[4];
+            // Perimeter order on each unit-square face, using the documented local axes.
+            int[] corners = {0, 1, 3, 2};
+            for (int i = 0; i < 4; i++) {
+                float u = corners[i] & 1, v = corners[i] >> 1;
+                float plane = face.getAxisDirection() == Direction.AxisDirection.POSITIVE ? 1 : 0;
+                positions[i] = switch (face.getAxis()) {
+                    case X -> new Vector3f(plane, u, v);
+                    case Y -> new Vector3f(u, plane, v);
+                    case Z -> new Vector3f(u, v, plane);
+                };
+            }
+            quads.add(new BakedQuad(positions[0], positions[1], positions[2], positions[3],
+                    UVPair.pack(0, 0), UVPair.pack(1, 0), UVPair.pack(1, 1), UVPair.pack(0, 1), face,
+                    new BakedQuad.MaterialInfo(null, ChunkSectionLayer.TRANSLUCENT, null, 0, true, 0)));
+        }
+        var part = new net.minecraft.client.renderer.block.dispatch.BlockStateModelPart() {
+            public List<BakedQuad> getQuads(Direction face) {
+                return quads.stream().filter(q -> q.direction() == face).toList();
+            }
+            public boolean useAmbientOcclusion() { return true; }
+            public net.minecraft.client.resources.model.sprite.Material.Baked particleMaterial() { return null; }
+            public int materialFlags() { return 0; }
+        };
+        int[] words = VoxelFaceTexture.pack(List.of(part), -1);
+        var empty = new SectionPalette.Entry(VoxelShapeKind.FULL, List.of(), new int[6], 0, false, 0);
+        var glass = new SectionPalette.Entry(VoxelShapeKind.FULL, List.of(), new int[6], 0, false, 0,
+                false, SectionPalette.NO_UV_RECT, 0, 0, words);
+        byte[] packed = Arrays.copyOf(BrickGridUpload.packFaceTextures(List.of(empty, glass)),
+                VoxelFaceTexture.BYTES_PER_SLOT);
+        // Optional fixture: the shader checker reads these real bytes instead of making up a glass record.
+        String fixture = System.getenv("VOXEL_GLASS_FIXTURE");
+        if (fixture != null) {
+            Path directory = Path.of(fixture);
+            Files.createDirectories(directory);
+            Files.write(directory.resolve("face-textures.bin"), packed);
+        }
+        ByteBuffer bytes = ByteBuffer.wrap(packed).order(ByteOrder.LITTLE_ENDIAN);
+        for (Direction face : Direction.values()) {
+            int offset = face.get3DDataValue() * VoxelFaceTexture.FACE_WORDS;
+            // Usable mapping + white tint; neither alpha-test bit 25 nor opaque bit 26 is set.
+            assertEquals(0x01ffffff, words[offset], face.toString());
+            assertArrayEquals(new int[]{0, 0, Float.floatToRawIntBits(1), 0, 0, Float.floatToRawIntBits(1)},
+                    Arrays.copyOfRange(words, offset + 1, offset + VoxelFaceTexture.FACE_WORDS));
+            for (int word = 0; word < VoxelFaceTexture.FACE_WORDS; word++) {
+                assertEquals(words[offset + word], bytes.getInt((VoxelFaceTexture.ENTRY_WORDS + offset + word) * Integer.BYTES));
+            }
+        }
     }
 
     @Test void everyOldAlphaByteIsDiscardedWithoutChangingRgbOrFlags() {
