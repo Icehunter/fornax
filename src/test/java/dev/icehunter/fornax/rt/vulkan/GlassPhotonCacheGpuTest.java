@@ -194,10 +194,7 @@ class GlassPhotonCacheGpuTest {
                 .replace("#moj_import <fornax:globals.glsl>", GLOBALS)
                 .replaceAll("layout\\(set=0,binding=3\\) uniform sampler2D u_Depth;", "");
         String traceSource = traceKernel(pack);
-        String photonLayout = Files.readString(pack.resolve("shaders/include/glass_photons.glsl"));
-        Matcher budget = Pattern.compile("PLAGUE_GLASS_PHOTONS\\s*=\\s*(\\d+)u").matcher(photonLayout);
-        assertTrue(budget.find(), "fixture derives the dispatch budget from the live layout");
-        int photons = Integer.parseInt(budget.group(1)), localBudget = photons / 2;
+        int photons = defaultPhotonBudget(pack), localBudget = photons / 2;
         int twoSourcePaths = (localBudget / 2) * 2;
         try (HeadlessVulkan vk = HeadlessVulkan.tryCreate()) {
             assumeTrue(vk != null, "no headless Vulkan device");
@@ -274,6 +271,20 @@ class GlassPhotonCacheGpuTest {
                 MemoryUtil.memFree(cacheSpirv); MemoryUtil.memFree(traceSpirv);
             }
         }
+    }
+
+    /** The trace fixture compiles the shared option defaults, so allocate and dispatch that same budget. */
+    private static int defaultPhotonBudget(Path pack) throws IOException {
+        String layout = Files.readString(pack.resolve("shaders/include/glass_photons.glsl"));
+        assertTrue(Pattern.compile("PLAGUE_GLASS_PHOTONS\\s*=\\s*uint\\(PLAGUE_GLASS_SAMPLES\\)")
+                .matcher(layout).find(), "layout must derive its active photon prefix from the scanned option");
+        String options = Files.readString(pack.resolve("shaders/include/glass_options.glsl"));
+        var option = dev.icehunter.fornax.pack.option.OptionScanner.scan(
+                java.util.Map.of("shaders/include/glass_options.glsl", options)).get("PLAGUE_GLASS_SAMPLES");
+        assertTrue(option != null, "shared photon budget option must be declared");
+        int photons = Integer.parseInt(option.defaultValue());
+        assertTrue(photons > 0 && photons % 2 == 0, "source and sky quotas require a positive even budget");
+        return photons;
     }
 
     private static void assertFlux(List<float[]> photons, double[] radiance, double[] transmission) {
@@ -383,11 +394,12 @@ class GlassPhotonCacheGpuTest {
                 cache.globals.putInt(0, 47).putInt(4, 4).putInt(8, -52);
                 cache.globals.putFloat(16, 752.125f).putFloat(20, 64.75f).putFloat(24, -824.5f);
                 cache.resetSources(1); cache.source(0, 756, 65, -832, 1, .5f, .25f);
-                TraceRunner trace = new TraceRunner(vk, traceSpirv, cache, 65536);
+                int photons = defaultPhotonBudget(pack);
+                TraceRunner trace = new TraceRunner(vk, traceSpirv, cache, photons);
                 cache.run(); trace.run();
                 List<float[]> baseline = trace.localPhotons();
                 int rebuildCalls=trace.calls();
-                assertEquals(32768,rebuildCalls,"every primary path is traced exactly once");
+                assertEquals(photons / 2,rebuildCalls,"every primary path is traced exactly once");
                 assertTrue(baseline.size() > 1000, "real glass-crossing rays must reach the actual receiver");
                 trace.assertReceiverOrOpticalReferencePlane();
                 for (float delta : new float[]{.03125f, .125f, .33331299f, .875f}) {
@@ -469,10 +481,12 @@ class GlassPhotonCacheGpuTest {
                     for(int i=0;i<4;i++) packed|=uint(max(0,fixtureEntry(fixtureCell(slot,first+i))))<<uint(i*8);
                     return packed;
                 }
+                // Synthetic palette/face callbacks below describe 96 entries in every section.
+                int plagueGlassPaletteCapacity() { return 96; }
                 uint plagueGlassPaletteWord(int word) { int offset=word%16; return offset>=1&&offset<=6 ? 0xffffffffu : 0u; }
                 uint plagueGlassSummaryWord(int word) { return 1u; }
                 uint plagueGlassFaceWord(int word) {
-                    int entry=(word/42)%96,offset=word%7;
+                    int entry=(word/42)%plagueGlassPaletteCapacity(),offset=word%7;
                     if(offset==0) return entry==0 ? 0xe1ffffffu : 0u;
                     return floatBitsToUint(offset==1||offset==2?.25:offset==3||offset==6?.125:0.0);
                 }

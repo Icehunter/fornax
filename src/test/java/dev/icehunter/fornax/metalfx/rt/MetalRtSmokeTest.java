@@ -213,11 +213,11 @@ class MetalRtSmokeTest {
                 owned.push(payload);
                 long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 owned.push(faceSeal);
-                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
                 owned.push(palette);
                 zeroBuffer(payload, BrickGridUpload.VOXELS_PER_SECTION);
                 zeroBuffer(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-                zeroBuffer(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                zeroBuffer(palette, BrickGridUpload.paletteBytesPerSlot());
                 // voxelIndex = (y << 8) | (z << 4) | x for (8, 8, 8) = 2184; bit 2184 % 8 = 0 of
                 // byte 2184 / 8 = 273.
                 setOccupiedVoxel(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, 273, 0);
@@ -378,11 +378,11 @@ class MetalRtSmokeTest {
                 owned.push(payload);
                 long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 owned.push(faceSeal);
-                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
                 owned.push(palette);
                 zeroBuffer(payload, BrickGridUpload.VOXELS_PER_SECTION);
                 zeroBuffer(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-                zeroBuffer(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                zeroBuffer(palette, BrickGridUpload.paletteBytesPerSlot());
                 // voxelIndex = (y << 8) | (z << 4) | x for (8, 8, 8) = 2184; bit 2184 % 8 = 0 of
                 // byte 2184 / 8 = 273.
                 setOccupiedVoxel(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, 273, 0);
@@ -600,11 +600,11 @@ class MetalRtSmokeTest {
                 owned.push(payload);
                 long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 owned.push(faceSeal);
-                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
                 owned.push(palette);
                 zeroBuffer(payload, BrickGridUpload.VOXELS_PER_SECTION);
                 zeroBuffer(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-                zeroBuffer(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                zeroBuffer(palette, BrickGridUpload.paletteBytesPerSlot());
                 // voxelIndex = (y << 8) | (z << 4) | x for (8, 8, 8) = 2184; bit 2184 % 8 = 0 of
                 // byte 2184 / 8 = 273.
                 setOccupiedVoxel(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, 273, 0);
@@ -835,11 +835,11 @@ class MetalRtSmokeTest {
                 owned.push(payload);
                 long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 owned.push(faceSeal);
-                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
                 owned.push(palette);
                 zeroBuffer(payload, BrickGridUpload.VOXELS_PER_SECTION);
                 zeroBuffer(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-                zeroBuffer(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                zeroBuffer(palette, BrickGridUpload.paletteBytesPerSlot());
                 setOccupiedVoxel(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, 273, 0);
 
                 long vertexBuffer = MetalRtAcceleration.createBuffer(device, MetalRtAcceleration.VERTEX_BYTES_PER_SLOT);
@@ -1116,7 +1116,7 @@ class MetalRtSmokeTest {
                 owned.push(payload);
                 long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 owned.push(faceSeal);
-                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
                 owned.push(palette);
 
                 setOccupiedVoxels(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, occupiedVoxels);
@@ -1125,10 +1125,10 @@ class MetalRtSmokeTest {
                 zeroBuffer(payload, BrickGridUpload.VOXELS_PER_SECTION);
                 zeroBuffer(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 setFaceSealBytes(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT, (byte) 0x3F, occupiedVoxels);
-                zeroBuffer(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                zeroBuffer(palette, BrickGridUpload.paletteBytesPerSlot());
                 // Palette entry 0, word 0: boxCount 0, CUTOUT_BIT (1 << 30) set, no CROSS_BIT,
                 // matching rt_expand.metal's own packing.
-                setPaletteEntryZeroFlagsWord(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT, 1 << 30);
+                setPaletteEntryZeroFlagsWord(palette, BrickGridUpload.paletteBytesPerSlot(), 1 << 30);
 
                 long vertexBuffer = MetalRtAcceleration.createBuffer(device, MetalRtAcceleration.VERTEX_BYTES_PER_SLOT);
                 owned.push(vertexBuffer);
@@ -1213,7 +1213,7 @@ class MetalRtSmokeTest {
                 owned.push(payload);
                 long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 owned.push(faceSeal);
-                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
                 owned.push(palette);
 
                 setOccupiedVoxels(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, center);
@@ -1221,17 +1221,17 @@ class MetalRtSmokeTest {
                 // entry 0.
                 zeroBuffer(payload, BrickGridUpload.VOXELS_PER_SECTION);
                 zeroBuffer(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-                zeroBuffer(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                zeroBuffer(palette, BrickGridUpload.paletteBytesPerSlot());
                 // Palette entry 0, word 0: boxCount 1, CUTOUT_BIT (1 << 30) and CROSS_BIT (1 << 31)
                 // both set, matching a real harvested plant entry (BrickGridUpload's own packing).
-                setPaletteEntryZeroFlagsWord(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT,
+                setPaletteEntryZeroFlagsWord(palette, BrickGridUpload.paletteBytesPerSlot(),
                         1 | (1 << 30) | (1 << 31));
                 // Box slot 0 (word 7): a real bounding box, minX=2 minY=0 minZ=2 maxX=14 maxY=16
                 // maxZ=14 in 1/16-block units, packed exactly as rt_expand.metal's own comment
                 // documents; the same box crossCutoutAlphaTestBlocksTheOpaqueHalfAndPassesTheTransparentHalf
                 // reuses for its own trace-level proof.
                 int boxWord = 2 | (0 << 5) | (2 << 10) | (14 << 15) | (16 << 20) | (14 << 25);
-                setPaletteEntryZeroBoxWord(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT, 0, boxWord);
+                setPaletteEntryZeroBoxWord(palette, BrickGridUpload.paletteBytesPerSlot(), 0, boxWord);
 
                 long vertexBuffer = MetalRtAcceleration.createBuffer(device, MetalRtAcceleration.VERTEX_BYTES_PER_SLOT);
                 owned.push(vertexBuffer);
@@ -1325,19 +1325,19 @@ class MetalRtSmokeTest {
                 owned.push(payload);
                 long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 owned.push(faceSeal);
-                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
                 owned.push(palette);
                 zeroBuffer(payload, BrickGridUpload.VOXELS_PER_SECTION);
                 zeroBuffer(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-                zeroBuffer(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                zeroBuffer(palette, BrickGridUpload.paletteBytesPerSlot());
                 setOccupiedVoxel(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, 273, 0);
                 // Palette entry 0, word 0: boxCount 0 (FULL), CUTOUT_BIT (1 << 30) set, no CROSS_BIT.
-                setPaletteEntryZeroFlagsWord(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT, 1 << 30);
+                setPaletteEntryZeroFlagsWord(palette, BrickGridUpload.paletteBytesPerSlot(), 1 << 30);
 
                 long faceTextureBuffer =
-                        MetalRtAcceleration.createBuffer(device, dev.icehunter.fornax.voxel.VoxelFaceTexture.BYTES_PER_SLOT);
+                        MetalRtAcceleration.createBuffer(device, dev.icehunter.fornax.voxel.VoxelFaceTexture.bytesPerSlot());
                 owned.push(faceTextureBuffer);
-                zeroBuffer(faceTextureBuffer, dev.icehunter.fornax.voxel.VoxelFaceTexture.BYTES_PER_SLOT);
+                zeroBuffer(faceTextureBuffer, dev.icehunter.fornax.voxel.VoxelFaceTexture.bytesPerSlot());
                 // Palette index 0, faces 0 and 1 (down and up, the two faces this test's straight-
                 // down ray crosses: x=8.25/8.75 and z=8.5 are strictly interior, so the
                 // ray never reaches a side face): header valid bit (1 << 24) set, identity UV
@@ -1579,26 +1579,26 @@ class MetalRtSmokeTest {
                 owned.push(payload);
                 long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 owned.push(faceSeal);
-                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
                 owned.push(palette);
                 zeroBuffer(payload, BrickGridUpload.VOXELS_PER_SECTION);
                 zeroBuffer(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-                zeroBuffer(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                zeroBuffer(palette, BrickGridUpload.paletteBytesPerSlot());
                 setOccupiedVoxel(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, 273, 0);
                 // Palette entry 0, word 0: boxCount 1, CUTOUT_BIT (1 << 30) and CROSS_BIT (1 << 31)
                 // both set, a real harvested plant entry (BrickGridUpload's own packing).
-                setPaletteEntryZeroFlagsWord(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT,
+                setPaletteEntryZeroFlagsWord(palette, BrickGridUpload.paletteBytesPerSlot(),
                         1 | (1 << 30) | (1 << 31));
                 // Box slot 0 (word 7): the same real bounding box
                 // crossShapedVoxelEmitsItsDiagonalPlanesNotItsBoundingBox uses (minX=2 minY=0
                 // minZ=2 maxX=14 maxY=16 maxZ=14, 1/16-block units).
                 int boxWord = 2 | (0 << 5) | (2 << 10) | (14 << 15) | (16 << 20) | (14 << 25);
-                setPaletteEntryZeroBoxWord(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT, 0, boxWord);
+                setPaletteEntryZeroBoxWord(palette, BrickGridUpload.paletteBytesPerSlot(), 0, boxWord);
                 // Box slots 6/7 (words 13/14) reused as the packed UV rect, exactly the reuse
                 // BrickGridUpload.packPaletteEntries makes for a real cutout entry: the full unit
                 // rect (u0=v0=0 as 16-bit unorm 0, u1=v1=1 as 16-bit unorm 65535).
-                setPaletteEntryZeroBoxWord(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT, 6, 0);
-                setPaletteEntryZeroBoxWord(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT, 7, 0xFFFFFFFF);
+                setPaletteEntryZeroBoxWord(palette, BrickGridUpload.paletteBytesPerSlot(), 6, 0);
+                setPaletteEntryZeroBoxWord(palette, BrickGridUpload.paletteBytesPerSlot(), 7, 0xFFFFFFFF);
 
                 // rt_trace never reads voxelFaceTexture for a CROSS entry (see this test's own
                 // javadoc), so this only needs to be a real bound buffer, never a real mapping,
@@ -1798,11 +1798,11 @@ class MetalRtSmokeTest {
                 owned.push(payload);
                 long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 owned.push(faceSeal);
-                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
                 owned.push(palette);
                 zeroBuffer(payload, BrickGridUpload.VOXELS_PER_SECTION);
                 zeroBuffer(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-                zeroBuffer(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                zeroBuffer(palette, BrickGridUpload.paletteBytesPerSlot());
                 setOccupiedVoxel(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, 273, 0);
 
                 long vertexBuffer = MetalRtAcceleration.createBuffer(device, MetalRtAcceleration.VERTEX_BYTES_PER_SLOT);
@@ -1961,11 +1961,11 @@ class MetalRtSmokeTest {
                 owned.push(payload);
                 long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
                 owned.push(faceSeal);
-                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
                 owned.push(palette);
                 zeroBuffer(payload, BrickGridUpload.VOXELS_PER_SECTION);
                 zeroBuffer(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-                zeroBuffer(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+                zeroBuffer(palette, BrickGridUpload.paletteBytesPerSlot());
                 setOccupiedVoxels(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, 2184, 2191);
 
                 long vertexBuffer = MetalRtAcceleration.createBuffer(device, MetalRtAcceleration.VERTEX_BYTES_PER_SLOT);
@@ -2199,7 +2199,7 @@ class MetalRtSmokeTest {
             float u0, float v0, float duds, float dvds, float dudt, float dvdt) {
         long ptr = Objc.msgSendId(buffer, Objc.selector("contents"));
         MemorySegment seg = MemorySegment.ofAddress(ptr)
-                .reinterpret(dev.icehunter.fornax.voxel.VoxelFaceTexture.BYTES_PER_SLOT);
+                .reinterpret(dev.icehunter.fornax.voxel.VoxelFaceTexture.bytesPerSlot());
         long faceBase = (long) (paletteIndex * 6 + face) * 7 * 4;
         seg.set(ValueLayout.JAVA_INT, faceBase, header);
         seg.set(ValueLayout.JAVA_FLOAT, faceBase + 4, u0);

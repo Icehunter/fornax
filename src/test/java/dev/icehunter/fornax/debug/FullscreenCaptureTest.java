@@ -48,6 +48,17 @@ class FullscreenCaptureTest {
         assertEquals(List.of("first", "second"), FullscreenCapture.parsePasses("{\"passes\":[\"first\",\"second\"]}"));
         assertThrows(IllegalArgumentException.class, () -> FullscreenCapture.parsePasses("{\"passes\":[\"first\",\"first\"]}"));
     }
+    @Test void bindingFiltersArePerPassAndRejectEmptyDuplicateOrUnselectedReferences() {
+        assertEquals(Map.of(), FullscreenCapture.parseBindings("{\"pass\":\"first\"}", List.of("first")));
+        assertEquals(Map.of("first", List.of("output", "input.history")), FullscreenCapture.parseBindings(
+                "{\"bindings\":{\"first\":[\"output\",\"input.history\"]}}", List.of("first")));
+        for (String filters : List.of("{\"second\":[\"value\"]}", "{\"first\":[]}",
+                "{\"first\":[\"value\",\"value\"]}", "{\"first\":[\"../escape\"]}")) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> FullscreenCapture.parseBindings("{\"bindings\":" + filters + "}", List.of("first")));
+        }
+    }
+
     @Test void singlePassConfigurationRemainsSupported() {
         assertEquals(List.of("first"), FullscreenCapture.parsePasses("{\"pass\":\"first\"}"));
     }

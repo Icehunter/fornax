@@ -44,11 +44,12 @@ public final class FullscreenCapture {
     public static void request() { requested = true; }
 
     public static void beginFrame(Map<String, Integer> compileValues) {
-        if (!requested && active == null) { frame++; return; }
+        if (!requested && active == null) { ComputeCapture.pollGraphicsCaptures(); frame++; return; }
         beginFrame(Minecraft.getInstance().gameDirectory.toPath(), compileValues);
     }
 
     static void beginFrame(Path game, Map<String, Integer> compileValues) {
+        ComputeCapture.pollGraphicsCaptures();
         frame++;
         if (active != null) endFrame();
         if (!requested) return;
@@ -60,10 +61,12 @@ public final class FullscreenCapture {
         Path config = game.resolve("config/fornax-capture.json");
         if (!Files.isRegularFile(config)) return; // With no such file the readback key does its usual job.
         try {
-            List<String> names = parsePasses(Files.readString(config));
+            String configuration = Files.readString(config);
+            List<String> names = parsePasses(configuration);
+            Map<String, List<String>> bindings = parseBindings(configuration, names);
             Path directory = game.resolve("fornax-captures").resolve(System.currentTimeMillis() + "-" + UUID.randomUUID());
             Files.createDirectories(directory);
-            active = new Session(directory, names, compileValues);
+            active = new Session(directory, names, compileValues, bindings);
             inFlight = active;
             active.write();
             FornaxMod.LOGGER.info("[Fornax] Raw fullscreen capture armed for frame {}: {}", frame, directory);
@@ -72,11 +75,14 @@ public final class FullscreenCapture {
         }
     }
 
+    /** Capture transfers need producer waits before TRANSFER, including pre-opaque producers. */
+    public static boolean isRequestedOrActive() { return requested || active != null; }
+
     public static boolean isSelected(String name) {
         return active != null && active.passes.containsKey(name) && !active.passes.get(name).started;
     }
 
-    /** Shares the existing one-frame F10 request; compute readbacks own a bounded fence. */
+    /** Shares the one-frame F10 request; the dispatch queue determines readback completion. */
     public static Capture beginCompute(String name, String shader) {
         if (!isSelected(name)) return null;
         Capture capture = active.passes.get(name);
@@ -100,6 +106,7 @@ public final class FullscreenCapture {
         capture.data.put("shaderCacheGeneration", dev.icehunter.fornax.pack.graph.GraphRunner.shaderCacheGeneration());
         capture.data.put("blend", spec.blend());
         try {
+            if (capture.selectedBindings != null) throw new IllegalArgumentException("Binding filters require a compute pass");
             for (boolean buffer : bufferInputs) if (buffer) {
                 throw new IllegalArgumentException("Buffer-input passes cannot be captured by this texture-only facility");
             }
@@ -159,6 +166,23 @@ public final class FullscreenCapture {
         return List.copyOf(names);
     }
 
+    static Map<String, List<String>> parseBindings(String source, List<String> passes) {
+        JsonObject object = JsonParser.parseString(source).getAsJsonObject();
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        if (!object.has("bindings")) return filters;
+        for (var entry : object.getAsJsonObject("bindings").entrySet()) {
+            if (!passes.contains(entry.getKey())) throw new IllegalArgumentException("Binding filter names unselected pass: " + entry.getKey());
+            List<String> names = new ArrayList<>();
+            entry.getValue().getAsJsonArray().forEach(value -> names.add(value.getAsString()));
+            if (names.isEmpty() || new LinkedHashSet<>(names).size() != names.size()
+                    || names.stream().anyMatch(name -> !name.matches("[A-Za-z0-9_][A-Za-z0-9_.-]*"))) {
+                throw new IllegalArgumentException("Binding filter requires distinct exact resource references: " + entry.getKey());
+            }
+            filters.put(entry.getKey(), List.copyOf(names));
+        }
+        return filters;
+    }
+
     static long textureBytes(GpuFormat format, int width, int height, int layers) {
         if (layers != 1 || width < 1 || height < 1 || format.hasStencilAspect()) {
             throw new IllegalArgumentException("Capture requires a non-stencil, single-layer 2D texture");
@@ -209,15 +233,18 @@ public final class FullscreenCapture {
         private final List<Map<String, Object>> inputs = new ArrayList<>();
         private final List<Map<String, Object>> outputs = new ArrayList<>();
         private final List<Map<String, Object>> uniforms = new ArrayList<>();
+        private final List<String> selectedBindings;
         private int expectedInputs;
         private boolean started;
         private boolean drawn;
         private GpuTextureView output;
         private String outputName;
 
-        private Capture(Session session, String name) {
+        private Capture(Session session, String name, List<String> selectedBindings) {
             this.session = session;
             this.name = name;
+            this.selectedBindings = selectedBindings;
+            if (selectedBindings != null) data.put("selectedBindings", selectedBindings);
             data.put("name", name);
             data.put("status", "pending");
             data.put("inputs", inputs);
@@ -257,6 +284,14 @@ public final class FullscreenCapture {
                     && outputs.stream().allMatch(entry -> "captured".equals(entry.get("status")));
         }
 
+        boolean includesBinding(String reference) {
+            return selectedBindings == null || selectedBindings.contains(reference);
+        }
+        void validateBindings(List<String> references) {
+            if (selectedBindings != null) for (String reference : selectedBindings) {
+                if (!references.contains(reference)) throw new IllegalArgumentException("Unknown selected binding in " + name + ": " + reference);
+            }
+        }
         Map<String, Object> computeData() { return data; }
         Path directory() { return session.directory; }
         void reserveBytes(long bytes) {
@@ -266,7 +301,7 @@ public final class FullscreenCapture {
         }
         void computeDispatched() { drawn = true; }
         void computeRetired(boolean complete) {
-            data.put("replayComplete", complete);
+            data.put("replayComplete", complete && selectedBindings == null);
             session.pending--;
             session.write();
         }
@@ -373,9 +408,9 @@ public final class FullscreenCapture {
         long reserved;
         boolean ended;
 
-        Session(Path directory, List<String> names, Map<String, Integer> compileValues) {
+        Session(Path directory, List<String> names, Map<String, Integer> compileValues, Map<String, List<String>> bindings) {
             this.directory = directory;
-            names.forEach(name -> passes.put(name, new Capture(this, name)));
+            names.forEach(name -> passes.put(name, new Capture(this, name, bindings.get(name))));
             manifest.put("version", 2);
             manifest.put("frame", frame);
             manifest.put("byteOrder", ByteOrder.nativeOrder().toString());

@@ -103,10 +103,10 @@ class MetalRtCapacityTest {
             long occupancy = exportBuffer(device, "occupancy", BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, owned, restore);
             exportBuffer(device, "payload", BrickGridUpload.VOXELS_PER_SECTION, owned, restore);
             long seals = exportBuffer(device, "faceSeal", BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT, owned, restore);
-            long palette = exportBuffer(device, "palette", BrickGridUpload.PALETTE_BYTES_PER_SLOT, owned, restore);
+            long palette = exportBuffer(device, "palette", BrickGridUpload.paletteBytesPerSlot(), owned, restore);
             replaceGeometryField("allocatedDiameter", 1, restore);
             contents(seals, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT).fill((byte) 0x3f);
-            contents(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT).set(ValueLayout.JAVA_INT, 0, cutout ? 1 << 30 : 0);
+            contents(palette, BrickGridUpload.paletteBytesPerSlot()).set(ValueLayout.JAVA_INT, 0, cutout ? 1 << 30 : 0);
             MemorySegment mask = contents(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT);
             Map<Integer, SectionPos> sections = Map.of(0, SectionPos.of(0, 0, 0));
             mask.set(ValueLayout.JAVA_BYTE, 0, (byte) 1);

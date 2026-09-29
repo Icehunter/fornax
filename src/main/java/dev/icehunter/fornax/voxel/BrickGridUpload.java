@@ -25,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * a fixed offset per slot and needs no indirection), an occupancy mask (512 bytes/slot, one bit per
  * voxel), a palette-compressed payload (one byte per voxel indexing a small per-slot palette table),
  * the palette table itself (real per-face colors and packed partial-shape box bounds, {@link
- * #PALETTE_BYTES_PER_SLOT} per slot) for the raymarch shader's color and shape resolution, the light
+ * #paletteBytesPerSlot()} per slot) for the raymarch shader's color and shape resolution, the light
  * volume ({@link #lightVolumeBytesPerSlot()} per slot, see the layout comment on {@link
  * #lightCellsPerSectionAxis()}) that the light_inject/light_propagate compute passes populate and
  * the deferred resolve shader samples, and a per-slot coarse SUMMARY ({@link #BRICK_SUMMARY_TARGET},
@@ -275,8 +275,9 @@ public final class BrickGridUpload {
      * hand-mirrored copies of it against the value this class actually packs with. */
     public static final int PALETTE_ENTRY_WORDS = 16;
     static final int PALETTE_ENTRY_BYTES = PALETTE_ENTRY_WORDS * Integer.BYTES; // 64
-    public static final long PALETTE_BYTES_PER_SLOT =
-            (long) SectionHarvester.MAX_PALETTE_ENTRIES * PALETTE_ENTRY_BYTES; // 96 * 64 = 6144
+    public static long paletteBytesPerSlot() {
+        return (long) SectionHarvester.maxPaletteEntries() * PALETTE_ENTRY_BYTES;
+    }
 
     private BrickGridUpload() {
     }
@@ -357,17 +358,17 @@ public final class BrickGridUpload {
         registry.ensureBufferSize(targetName(OCCUPANCY_TARGET, tier), slotCount * OCCUPANCY_BYTES_PER_SLOT);
         registry.ensureBufferSize(targetName(PAYLOAD_TARGET, tier), slotCount * VOXELS_PER_SECTION); // 1 byte/voxel palette index
         registry.ensureBufferSize(targetName(FACE_SEAL_TARGET, tier), slotCount * FACE_SEAL_BYTES_PER_SLOT);
-        // Fixed-stride palette table (see PALETTE_BYTES_PER_SLOT). Routed through the same
+        // Fixed-stride palette table (see paletteBytesPerSlot()). Routed through the same
         // ensureBufferSize path as every other brick-grid buffer, so it inherits that method's
         // mandatory zero-clear at (re)allocation -- MoltenVK does not zero-fill fresh VRAM, and a
         // slot the shader reads before its section is ever harvested must read cleared zeros
         // (boxCount 0, colors 0), not garbage.
-        registry.ensureBufferSize(targetName(PALETTE_TARGET, tier), slotCount * PALETTE_BYTES_PER_SLOT);
+        registry.ensureBufferSize(targetName(PALETTE_TARGET, tier), slotCount * paletteBytesPerSlot());
         if (tier == 0 && registry.isEnabledBufferTarget(VoxelLightmap.TARGET)) {
             registry.ensureBufferSize(VoxelLightmap.TARGET, slotCount * VoxelLightmap.BYTES_PER_SLOT);
         }
         if (tier == 0 && registry.isEnabledBufferTarget(VoxelFaceTexture.TARGET)) {
-            registry.ensureBufferSize(VoxelFaceTexture.TARGET, slotCount * VoxelFaceTexture.BYTES_PER_SLOT);
+            registry.ensureBufferSize(VoxelFaceTexture.TARGET, slotCount * VoxelFaceTexture.bytesPerSlot());
         }
         if (tier == 0 && registry.isEnabledBufferTarget(VoxelSectionState.TARGET)) {
             registry.ensureBufferSize(VoxelSectionState.TARGET, slotCount * VoxelSectionState.BYTES_PER_SLOT);
@@ -457,7 +458,7 @@ public final class BrickGridUpload {
     /** Pure "does this harvested section contain at least one emitter" test -- the source of truth for
      * {@link #BRICK_SUMMARY_TARGET}'s {@link #SUMMARY_HAS_EMITTER} bit, factored out like {@link
      * #anySolidVoxel} for direct unit testing. Cheaper than {@link #anySolidVoxel} by construction: {@code
-     * entries} is already deduplicated to the (at most {@link SectionHarvester#MAX_PALETTE_ENTRIES},
+     * entries} is already deduplicated to the (at most {@link SectionHarvester#maxPaletteEntries()},
      * typically far fewer) distinct block states {@link SectionHarvester#harvest} actually found
      * present in the section, and each entry's {@link SectionPalette.Entry#emissiveStrength()} is
      * already resolved by harvest time -- so this only needs to OR across {@code entries}, never a
@@ -689,7 +690,7 @@ public final class BrickGridUpload {
     /** Writes one section's harvested data into slot {@code slot}'s byte range of the four brick-grid
      * data buffers: the occupancy mask (one bit/voxel), the payload (one palette-index byte/voxel),
      * the palette table (real per-face colors + packed partial-shape box bounds, {@link
-     * #PALETTE_BYTES_PER_SLOT} per slot, laid out to match the raymarch shader's std430 {@code
+     * #paletteBytesPerSlot()} per slot, laid out to match the raymarch shader's std430 {@code
      * palette[]} view byte-for-byte; see the layout comment on {@link #PALETTE_ENTRY_WORDS}), and the
      * coarse per-slot summary word ({@link #BRICK_SUMMARY_TARGET}, see {@link #anySolidVoxel}). */
     static byte[] packFaceTextures(List<SectionPalette.Entry> entries) {
@@ -825,7 +826,7 @@ public final class BrickGridUpload {
 
                     byte[] textureData = faceTextureBuffer == -1L ? new byte[0]
                             : packFaceTextures(result.palette().entries());
-                    long textureOffset = (long) slot * VoxelFaceTexture.BYTES_PER_SLOT;
+                    long textureOffset = (long) slot * VoxelFaceTexture.bytesPerSlot();
                     if (faceTextureBuffer != -1L && !fitsInBuffer(textureOffset, textureData.length, faceTextureBufferSize)) {
                         logOobDrop(VoxelFaceTexture.TARGET, slot, textureOffset, textureData.length, faceTextureBufferSize);
                         continue; // Reject before writing any of this slot's ranges.
@@ -852,7 +853,7 @@ public final class BrickGridUpload {
                         continue; // A required clear and its payload must succeed together.
                     }
                     byte[] paletteData = packPaletteEntries(result.palette().entries());
-                    long paletteOffset = (long) slot * PALETTE_BYTES_PER_SLOT;
+                    long paletteOffset = (long) slot * paletteBytesPerSlot();
                     if (paletteData.length > 0 && !fitsInBuffer(paletteOffset, paletteData.length, paletteBufferSize)) {
                         logOobDrop(PALETTE_TARGET, slot, paletteOffset, paletteData.length, paletteBufferSize);
                         continue; // Never publish committed state over a partially written payload.

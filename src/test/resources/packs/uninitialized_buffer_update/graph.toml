@@ -1,0 +1,12 @@
+[targets.state]
+kind = "buffer"
+stride_bytes = 16
+count = 16
+
+[[pass]]
+name = "update_without_initializer"
+type = "compute"
+shader = "compute/update.comp"
+inputs = ["state"]
+outputs = ["state"]
+dispatch = [1, 1, 1]

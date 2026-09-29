@@ -39,11 +39,11 @@ class MetalRtGeometryTest {
                 MetalRtGeometry.bytesPerSlot(BrickGridUpload.PAYLOAD_TARGET));
         assertEquals(BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT,
                 MetalRtGeometry.bytesPerSlot(BrickGridUpload.FACE_SEAL_TARGET));
-        assertEquals(BrickGridUpload.PALETTE_BYTES_PER_SLOT,
+        assertEquals(BrickGridUpload.paletteBytesPerSlot(),
                 MetalRtGeometry.bytesPerSlot(BrickGridUpload.PALETTE_TARGET));
         // Face texture's own per-slot stride: WORDS_PER_SLOT words times 4 bytes, pinned against
         // VoxelFaceTexture's own public constant rather than a re-hardcoded literal.
-        assertEquals(VoxelFaceTexture.BYTES_PER_SLOT,
+        assertEquals(VoxelFaceTexture.bytesPerSlot(),
                 MetalRtGeometry.bytesPerSlot(VoxelFaceTexture.TARGET));
     }
 
@@ -57,9 +57,9 @@ class MetalRtGeometryTest {
         int slot = 7;
         assertEquals((long) slot * BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT,
                 MetalRtGeometry.slotOffset(BrickGridUpload.OCCUPANCY_TARGET, slot));
-        assertEquals((long) slot * BrickGridUpload.PALETTE_BYTES_PER_SLOT,
+        assertEquals((long) slot * BrickGridUpload.paletteBytesPerSlot(),
                 MetalRtGeometry.slotOffset(BrickGridUpload.PALETTE_TARGET, slot));
-        assertEquals((long) slot * VoxelFaceTexture.BYTES_PER_SLOT,
+        assertEquals((long) slot * VoxelFaceTexture.bytesPerSlot(),
                 MetalRtGeometry.slotOffset(VoxelFaceTexture.TARGET, slot));
     }
 

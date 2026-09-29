@@ -105,7 +105,8 @@ public final class SettingsApplyRouter {
         boolean packReapplyNeeded = before.aaMethod != after.aaMethod
                 || before.ssaaPreset != after.ssaaPreset
                 || before.taauRatio != after.taauRatio;
-        boolean plainSaveNeeded = before.profilerOverlay != after.profilerOverlay
+        boolean plainSaveNeeded = before.voxelPaletteCapacity != after.voxelPaletteCapacity
+                || before.profilerOverlay != after.profilerOverlay
                 || before.overlayShowPasses != after.overlayShowPasses
                 || before.overlayShowCounters != after.overlayShowCounters
                 || before.overlayTopPassesOnly != after.overlayTopPassesOnly

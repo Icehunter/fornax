@@ -138,7 +138,7 @@ class SectionHarvesterTest {
                 break;
             }
         }
-        assertTrue(distinctStates.size() > SectionHarvester.MAX_PALETTE_ENTRIES,
+        assertTrue(distinctStates.size() > SectionHarvester.maxPaletteEntries(),
                 "test setup needs more distinct states than the palette cap to actually exercise the fix");
 
         Strategy<BlockState> strategy = Strategy.createForBlockStates(
@@ -163,11 +163,11 @@ class SectionHarvesterTest {
                 () -> SectionHarvester.harvest(container, MaterialScalars.build(List.of())),
                 "harvesting a section with more than MAX_PALETTE_ENTRIES distinct states must not throw");
 
-        assertEquals(SectionHarvester.MAX_PALETTE_ENTRIES, result.palette().entries().size(),
+        assertEquals(SectionHarvester.maxPaletteEntries(), result.palette().entries().size(),
                 "palette must be capped at MAX_PALETTE_ENTRIES instead of growing past it");
         for (byte rawIndex : result.paletteIndices()) {
             int index = rawIndex & 0xFF;
-            assertTrue(index >= 0 && index < SectionHarvester.MAX_PALETTE_ENTRIES,
+            assertTrue(index >= 0 && index < SectionHarvester.maxPaletteEntries(),
                     "every voxel's palette index must land inside the real, capped palette -- "
                             + "no aliasing/wraparound past the byte range");
         }

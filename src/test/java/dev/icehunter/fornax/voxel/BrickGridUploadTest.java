@@ -38,8 +38,8 @@ class BrickGridUploadTest {
         assertEquals(BrickGridUpload.PALETTE_ENTRY_WORDS * Integer.BYTES, BrickGridUpload.PALETTE_ENTRY_BYTES);
         assertEquals(16, BrickGridUpload.PALETTE_ENTRY_WORDS,
                 "the emitter milestone grew the entry 15 -> 16 words (word 15 = emission)");
-        assertEquals((long) SectionHarvester.MAX_PALETTE_ENTRIES * BrickGridUpload.PALETTE_ENTRY_BYTES,
-                BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+        assertEquals((long) SectionHarvester.maxPaletteEntries() * BrickGridUpload.PALETTE_ENTRY_BYTES,
+                BrickGridUpload.paletteBytesPerSlot());
     }
 
     @Test

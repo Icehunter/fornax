@@ -131,12 +131,12 @@ class VoxelEmitterCandidatesTest {
 
     @Test void maximumPaletteIndexAndInvalidInputsNeverWrapOrAlias() {
         var builder = new VoxelSourceEvidence.Builder();
-        for (int entry = 0; entry < SectionHarvester.MAX_PALETTE_ENTRIES - 1; entry++) builder.add(false, 0, List.of());
+        for (int entry = 0; entry < SectionHarvester.maxPaletteEntries() - 1; entry++) builder.add(false, 0, List.of());
         builder.add(true, 0, faces(POSITIVE));
-        builder.addCell(true, SectionHarvester.MAX_PALETTE_ENTRIES - 1);
+        builder.addCell(true, SectionHarvester.maxPaletteEntries() - 1);
         var evidence = builder.finish(false);
         byte[] cells = new byte[4096];
-        cells[31] = (byte) (SectionHarvester.MAX_PALETTE_ENTRIES - 1);
+        cells[31] = (byte) (SectionHarvester.maxPaletteEntries() - 1);
         assertEquals(31 * 6, VoxelEmitterCandidates.enumerate(cells, evidence).keys()[0]);
         cells[31] = (byte) 255;
         assertThrows(IllegalArgumentException.class, () -> VoxelEmitterCandidates.enumerate(cells, evidence));

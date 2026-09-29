@@ -51,7 +51,7 @@ using namespace metal::raytracing;
 // primitive_data bit layout (rt_expand.metal's write_triangle, this file's own sibling):
 //   primitiveOut[i] = voxelIndex | (face << 12u) | (paletteIndex << 16u)
 // voxelIndex occupies bits 0..11 (VOXELS_PER_SLOT = 4096 = 2^12), face bits 12..14 (6 faces fit in
-// 3 bits), paletteIndex bits 16..22 (MAX_PALETTE_ENTRIES = 96 fits in 7 bits). This kernel only
+// 3 bits), paletteIndex bits 16..23 (the payload stores an unsigned byte). This kernel only
 // needs face and paletteIndex; voxelIndex is not decoded here.
 //
 // Palette word 0 cutout bit (voxel/BrickGridUpload.java, packPaletteFlagsWord): boxCount in bits
@@ -128,7 +128,12 @@ float3 plagueDecodeGeometricNormal(float encodedAlpha, float3 fallback) {
 // palette layout constant is duplicated per shader rather than factored out (no shared #include
 // wired between the engine compute shaders at this milestone).
 constant uint PALETTE_ENTRY_WORDS = 16;
-constant uint MAX_PALETTE_ENTRIES = 96; // SectionHarvester.MAX_PALETTE_ENTRIES
+// The compiler supplies the boot-latched capacity. Standalone diagnostic compilation uses
+// the deployed default; production never relies on this fallback.
+#ifndef FORNAX_VOXEL_PALETTE_CAPACITY
+#define FORNAX_VOXEL_PALETTE_CAPACITY 96
+#endif
+constant uint MAX_PALETTE_ENTRIES = FORNAX_VOXEL_PALETTE_CAPACITY;
 constant uint CUTOUT_BIT = 1u << 30; // palette word 0, matches BrickGridUpload's packing
 constant uint CROSS_BIT = 1u << 31; // palette word 0, matches BrickGridUpload's packing
 
@@ -197,6 +202,9 @@ inline float2 faceLocalSt(uint face, float3 local) {
     return float2(local.y, local.z);
 }
 
+// The producer reserves bits 16..23 for the unsigned palette byte; bit31 belongs to exact triangles.
+inline uint rtPaletteIndex(uint packed) { return (packed >> 16u) & 0xFFu; }
+
 // Closest alpha-tested intersection shared by screen diagnostics and sun-space depth.
 // x is hit distance or infinity; y is the nearest candidate whose representation is unavailable.
 inline float2 rtNearestIntersection(ray r, instance_acceleration_structure accelerationStructure,
@@ -250,7 +258,7 @@ inline float2 rtNearestIntersection(ray r, instance_acceleration_structure accel
             continue;
         }
         uint face = (packed >> 12u) & 0x7u;
-        uint paletteIndex = (packed >> 16u) & 0x7Fu;
+        uint paletteIndex = rtPaletteIndex(packed);
         uint slot = instanceSlotMap[query.get_candidate_instance_id()];
 
         uint entryBase = slot * PALETTE_ENTRY_WORDS * MAX_PALETTE_ENTRIES + paletteIndex * PALETTE_ENTRY_WORDS;

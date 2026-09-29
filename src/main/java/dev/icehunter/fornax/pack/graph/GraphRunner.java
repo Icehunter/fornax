@@ -96,6 +96,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -799,8 +800,11 @@ public final class GraphRunner {
      * alone -- set here, generation-guarded so a superseded rebuild's future landing late can never
      * mark a NEWER rebuild's (different) sources ready.
      */
-    public static CompletableFuture<Void> rebuild(PackModel pack, Map<String, String> shaderSources,
+    public static CompletableFuture<Void> rebuild(PackModel unresolvedPack, Map<String, String> shaderSources,
                                 Map<String, Integer> newCompileValues, Map<String, Float> runtimeValues) {
+        // Resolve and validate before closeCurrent: a bad saved budget must preserve the live graph.
+        PackModel pack = unresolvedPack.withGraph(dev.icehunter.fornax.pack.GraphNumericExpressions.resolveValidated(
+                unresolvedPack.graph(), unresolvedPack.options(), newCompileValues));
         // loadShaderSources doesn't include the generated materials.glsl (it only walks disk files),
         // so splice it back in here the same way PackDiscovery.loadFrom does at initial load.
         Map<String, String> withMaterials = new LinkedHashMap<>(shaderSources);
@@ -1308,11 +1312,10 @@ public final class GraphRunner {
      * Runs the voxel-light producers before Sodium begins the opaque terrain render pass.
      *
      * <p>These passes consume the voxel window uploaded at the end of the preceding frame and do not
-     * consume any current-frame graphics output. Running them here lets the final enabled producer
-     * signal one semaphore whose graphics wait is inserted before opaque rendering begins. Because
-     * every producer submits to the same compute queue in graph order, that single signal covers the
-     * complete inject/propagate/list-reset/list-build chain. This closes the compute-write to
-     * fragment-read dependency without splitting an active Apple tile render encoder.
+     * consume any current-frame terrain output. Their graph routing may mix raw compute and graphics
+     * dispatches. Each raw producer publishes its own graphics handoff before the next dispatch,
+     * so a later graphics-stream consumer cannot bypass it. All waits are recorded before opaque
+     * rendering begins, without splitting an active Apple tile render encoder.
      */
     private static void runPreOpaqueLightingCompute(ChunkRenderMatrices matrices,
                                                     double x, double y, double z,
@@ -1336,25 +1339,14 @@ public final class GraphRunner {
         // whatever this happened to be.
         GpuBufferSlice globals = ChunkRenderContextHolder.getUniformBuffer();
 
-        for (int i = 0; i < runnable.size(); i++) {
-            PassSpec p = runnable.get(i);
+        for (PassSpec p : runnable) {
             ComputePassRunner runner = computeRunners.get(p.name());
             if (runner == null) {
                 continue; // guarded by the collection filter; defensive against a concurrent rebuild
             }
-            boolean finalProducer = i == runnable.size() - 1;
-            // Only the final producer signals: every producer submits to the same compute queue in
-            // graph order, so one semaphore covers the whole chain (see this method's own doc). The
-            // mask it signals is the union of every producer's own graphicsWaitStagesFor result, not a
-            // hardcoded stage: a hardcoded FRAGMENT is correct only as long as every reader of every
-            // lighting buffer in the chain happens to be a fragment-stage consumer, and drifts silently
-            // wrong the moment a pack points a COPY or PARTICLES pass at one instead.
-            long graphicsWaitStages = 0;
-            if (finalProducer) {
-                for (PassSpec producer : runnable) {
-                    graphicsWaitStages |= graphicsWaitStagesFor(producer, pack.graph());
-                }
-            }
+            // A graphics runner signals no raw-compute semaphore. Publish each raw producer's
+            // actual consumer stages immediately, including a graphics consumer within this loop.
+            long graphicsWaitStages = runner.graphicsStream() ? 0L : graphicsWaitStagesFor(p, pack.graph());
             runner.run(r, computeParams(p, width, height), options, globals,
                     computeExtraPushConstants(p, matrices, x, y, z),
                     computeDispatchOverride(p), false, graphicsWaitStages, null);
@@ -1749,7 +1741,7 @@ public final class GraphRunner {
         Map<String, TemporalPassRunner> temporal = new LinkedHashMap<>();
         Map<String, ConsolidateRunner> consolidate = new LinkedHashMap<>();
         // Graph-level, not per-pass: every compute runner built below checks against the same set.
-        Set<String> rayQueryOutputTargets = rayQueryOutputs(currentPack.graph(), compileValues);
+        Set<String> graphicsComputePasses = graphicsStreamComputePasses(currentPack.graph(), compileValues);
         try {
             for (PassSpec p : currentPack.graph().passes()) {
                 if (!enabledAtCompile(p)) {
@@ -1777,7 +1769,7 @@ public final class GraphRunner {
                                         extraPushConstantBytesFor(p),
                                         computeStorageWriteNeedsGraphicsCompletion(
                                                 p, currentPack.graph(), compileValues),
-                                        frameProfiler, rayQueryOutputTargets));
+                                        frameProfiler, graphicsComputePasses.contains(p.name())));
                             } catch (RuntimeException e) {
                                 GpuFatalErrors.rethrowIfFatal(e);
                                 logRunnerBuildFailureOnce(p.name(), e);
@@ -2358,7 +2350,7 @@ public final class GraphRunner {
         for (String output : p.outputs()) {
             outputBaseNames.add(targetBaseName(output));
         }
-        Set<String> graphicsWritten = rayQueryOutputs(graph, compileValues);
+        Set<String> graphicsComputePasses = graphicsStreamComputePasses(graph, compileValues);
         long stages = 0;
         for (PassSpec reader : graph.passes()) {
             if (!isEnabledAtCompile(reader, compileValues)) {
@@ -2367,12 +2359,12 @@ public final class GraphRunner {
             for (String in : reader.inputs()) {
                 if (outputBaseNames.contains(targetBaseName(in))) {
                     if (reader.type() == PassType.COMPUTE) {
-                        // A compute reader in the graphics stream (it reads a G-buffer, shadow or
-                        // ray-query input, so it is recorded on the graphics encoder) is as
+                        // A graphics-stream reader (including scratch writers and transitive
+                        // graphics consumers) is as
                         // cross-queue as a fragment reader: without a wait it dispatches while the
                         // producer is still running on the compute queue. A reader on the compute
                         // queue is ordered by submission and needs nothing here.
-                        if (GraphicsInputDependency.requiredBy(reader.inputs(), graphicsWritten)) {
+                        if (graphicsComputePasses.contains(reader.name())) {
                             stages |= VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
                         }
                     } else if (reader.type() == PassType.PARTICLES) {
@@ -2399,12 +2391,58 @@ public final class GraphRunner {
         return stages;
     }
 
+    /** Compute passes that must share the graphics stream's serial resource lifetime. A buffer
+     * with several writers is scratch storage: putting only one writer on another queue would
+     * leave a same-frame read/overwrite edge without a wait. Runtime gates are intentionally not
+     * pruned because they may change each frame; compile-disabled writers do not participate. */
+    static Set<String> graphicsStreamComputePasses(GraphSpec graph, Map<String, Integer> compileValues) {
+        Set<String> graphicsWritten = new HashSet<>(rayQueryOutputs(graph, compileValues));
+        Map<String, Integer> bufferWriters = new HashMap<>();
+        for (PassSpec pass : graph.passes()) {
+            if (!isEnabledAtCompile(pass, compileValues)) continue;
+            Set<String> outputs = new HashSet<>(pass.outputs());
+            if (pass.target() != null) outputs.add(pass.target());
+            for (String output : outputs) {
+                String base = targetBaseName(output);
+                TargetSpec target = graph.targets().get(base);
+                if (target != null && target.kind() == TargetKind.BUFFER) {
+                    bufferWriters.merge(base, 1, Integer::sum);
+                }
+                if (pass.type() != PassType.COMPUTE) graphicsWritten.add(base);
+            }
+        }
+        Set<String> routed = new HashSet<>();
+        boolean changed;
+        do {
+            changed = false;
+            for (PassSpec pass : graph.passes()) {
+                if (pass.type() != PassType.COMPUTE || !isEnabledAtCompile(pass, compileValues)
+                        || routed.contains(pass.name())) continue;
+                boolean scratchWriter = false;
+                for (String output : pass.outputs()) {
+                    String base = targetBaseName(output);
+                    TargetSpec target = graph.targets().get(base);
+                    if (target != null && target.kind() == TargetKind.BUFFER
+                            && (bufferWriters.getOrDefault(base, 0) > 1 || pass.inputs().contains(output))) {
+                        scratchWriter = true;
+                        break;
+                    }
+                }
+                if (scratchWriter || GraphicsInputDependency.requiredBy(pass.inputs(), graphicsWritten)) {
+                    routed.add(pass.name());
+                    for (String output : pass.outputs()) graphicsWritten.add(targetBaseName(output));
+                    changed = true;
+                }
+            }
+        } while (changed);
+        return Set.copyOf(routed);
+    }
+
     /**
      * The base names of every output a compile-enabled {@link PassType#RAY_QUERY} pass declares.
      * A ray-query pass's hit buffer is graphics-written: {@code RayQueryInterop.answer} copies the
      * Metal trace's answer back with a Vulkan submit on the graphics queue, the same as a shadow map
-     * or G-buffer attachment. Fed into {@link ComputePassRunner#build} so {@link
-     * GraphicsInputDependency#requiredBy} can route a compute reader of one of these buffers into
+     * or G-buffer attachment. Seeds {@link #graphicsStreamComputePasses}, which routes compute readers of these buffers into
      * the graphics stream instead of racing that copy from the compute queue.
      *
      * <p>Pure function of the graph + compile values, for the same reason {@link
@@ -2435,7 +2473,7 @@ public final class GraphRunner {
         if (writer.type() != PassType.COMPUTE) {
             return false;
         }
-        Set<String> graphicsWritten = rayQueryOutputs(graph, compileValues);
+        Set<String> graphicsComputePasses = graphicsStreamComputePasses(graph, compileValues);
         for (String output : writer.outputs()) {
             String base = targetBaseName(output);
             TargetSpec target = graph.targets().get(base);
@@ -2446,13 +2484,13 @@ public final class GraphRunner {
                 if (!isEnabledAtCompile(graphicsPass, compileValues)) {
                     continue;
                 }
-                // A compute reader in the graphics stream (it reads a G-buffer, shadow or
-                // ray-query input) reads this writer's output on the graphics queue, so the
+                // A graphics-stream compute pass reads this writer's output on the graphics
+                // queue, including scratch and transitive graphics consumers, so the
                 // writer's next dispatch on the idle compute queue can land while the previous
                 // frame's graphics submission, reader included, is still executing. A reader on
                 // the compute queue is ordered by submission and needs no edge.
                 if (graphicsPass.type() == PassType.COMPUTE
-                        && !GraphicsInputDependency.requiredBy(graphicsPass.inputs(), graphicsWritten)) {
+                        && !graphicsComputePasses.contains(graphicsPass.name())) {
                     continue;
                 }
                 for (String ref : graphicsPass.inputs()) {
@@ -2969,9 +3007,8 @@ public final class GraphRunner {
      * as-is (it just zeroes one atomic-counter word), so it is NOT recognized here; only {@code
      * light_list_build}'s dispatch domain depends on the live voxel window.
      *
-     * <p>{@code light_list_reset} and this pass execute in-order on the compute queue. The last enabled
-     * pre-opaque lighting producer signals the single semaphore that exposes the complete chain to
-     * graphics; that is usually this pass when analytic lighting is enabled. */
+     * <p>The reset and build follow the graph's queue routing. Every raw producer publishes its own
+     * graphics dependency before a following graphics dispatch or the opaque draw. */
     private static boolean isLightListBuildPass(PassSpec p) {
         return p.name().equals("light_list_build");
     }

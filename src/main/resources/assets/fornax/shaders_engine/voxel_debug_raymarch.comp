@@ -38,8 +38,7 @@ layout(set = 0, binding = 3, std430) readonly buffer Palette { uint palette[]; }
 const int PALETTE_ENTRY_WORDS = 16; // MUST match BrickGridUpload.PALETTE_ENTRY_WORDS (word 15 =
                                     // emission -- unused by this debug shader, but the stride is
                                     // load-bearing for every entryBase computation below)
-const int PALETTE_ENTRIES_PER_SLOT = 96;                                           // == MAX_PALETTE_ENTRIES (2026-07-20: 256 -> 96, real-world palette-size census)
-const int PALETTE_WORDS_PER_SLOT = PALETTE_ENTRY_WORDS * PALETTE_ENTRIES_PER_SLOT; // 1536
+
 
 // std140/std430-unambiguous: padding every member to a 16-byte-aligned vec4/ivec4 sidesteps the
 // project's "scalar-after-vec3 lands at the next 16-byte boundary" law entirely -- there is no bare
@@ -50,6 +49,14 @@ layout(push_constant) uniform PushConstants {
     ivec4 params;       // offset 80, size 16 -- x=windowDiameter, y=outputWidth, z=outputHeight, w=maxSteps
     ivec4 windowCenter; // offset 96, size 16 -- x/y/z = window center SECTION coords (w unused)
 } pc;
+
+int paletteEntriesPerSlot() {
+    int d = pc.params.x;
+    if (d < 1 || d > 33) return 0;
+    int divisor = d*d*d*PALETTE_ENTRY_WORDS;
+    int entries = palette.length() / divisor;
+    return palette.length() % divisor == 0 && entries > 0 && entries <= 253 ? entries : 0;
+}
 
 uint packRGBA(vec3 c) {
     uvec3 q = uvec3(clamp(c, 0.0, 1.0) * 255.0 + 0.5);
@@ -169,7 +176,8 @@ void main() {
         uint word = occupancy[bit >> 5];
         if (((word >> uint(bit & 31)) & 1u) != 0u) {
             int pIndex = int(paletteIndexOf(slot, voxelIndex));
-            int entryBase = slot * PALETTE_WORDS_PER_SLOT + pIndex * PALETTE_ENTRY_WORDS;
+            if (pIndex >= paletteEntriesPerSlot()) break;
+            int entryBase = (slot * paletteEntriesPerSlot() + pIndex) * PALETTE_ENTRY_WORDS;
             uint boxCount = palette[entryBase];
             if (boxCount == 0u) {
                 // FULL cube: the whole cell occludes, exactly like Task 12. The face is whichever

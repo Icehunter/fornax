@@ -124,6 +124,8 @@ class GlassBeamVisibilityGpuTest {
                 }
                 vec4 plagueGlassAlbedo(vec2 uv){return vec4(1.0);}
                 vec4 plagueGlassMaterial(vec2 uv){return vec4(1.0,uv.x>.5?.09:.04,0.0,1.0);}
+                // This controlled scene models the existing 96-entry synthetic descriptor table.
+                int plagueGlassPaletteCapacity(){return 96;}
                 bool plagueGlassBuffersValid(){return true;}
                 """+flatten(pack,"glass_beam_visibility.glsl")+"""
                 bool query(vec2 xy,vec4 plane,vec3 lo,vec3 hi,bool supportOnly){

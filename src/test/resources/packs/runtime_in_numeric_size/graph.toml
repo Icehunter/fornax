@@ -1,0 +1,4 @@
+[targets.grid]
+format="rgba16f"
+width="GRID"
+height="GRID"

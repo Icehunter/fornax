@@ -1,4 +1,6 @@
 {
+  "gui.fornax.option.voxel_palette_capacity": "Voxel Material Capacity (Restart Required)",
+  "gui.fornax.option.voxel_palette_capacity.tooltip": "Material variants per section. Higher values preserve more connected textures and glass boundaries, but use more memory. 128/192/240 use 1.33x/2x/2.5x the material-table memory of 96. Saturated sections still use conservative fallback. Does not change ray samples. Takes effect after restarting Minecraft.",
   "key.category.fornax.keys": "Fornax",
   "key.fornax.open_settings": "Open Fornax Settings",
   "key.fornax.toggle_profiler": "Toggle Frame Profiler Overlay",

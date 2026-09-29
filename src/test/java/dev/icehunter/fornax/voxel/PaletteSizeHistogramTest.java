@@ -50,15 +50,15 @@ class PaletteSizeHistogramTest {
         // MAX_PALETTE_ENTRIES or the bucket table changes again.
         int expectedIndex = -1;
         for (int i = 0; i < PaletteSizeHistogram.BUCKET_UPPER_BOUNDS.length; i++) {
-            if (PaletteSizeHistogram.BUCKET_UPPER_BOUNDS[i] == SectionHarvester.MAX_PALETTE_ENTRIES) {
+            if (PaletteSizeHistogram.BUCKET_UPPER_BOUNDS[i] == SectionHarvester.maxPaletteEntries()) {
                 expectedIndex = i;
                 break;
             }
         }
         assertTrue(expectedIndex >= 0,
                 "MAX_PALETTE_ENTRIES must be one of BUCKET_UPPER_BOUNDS's own values for this test (and "
-                        + "the histogram) to mean anything -- got " + SectionHarvester.MAX_PALETTE_ENTRIES);
-        assertEquals(expectedIndex, PaletteSizeHistogram.bucketIndexFor(SectionHarvester.MAX_PALETTE_ENTRIES));
+                        + "the histogram) to mean anything -- got " + SectionHarvester.maxPaletteEntries());
+        assertEquals(expectedIndex, PaletteSizeHistogram.bucketIndexFor(SectionHarvester.maxPaletteEntries()));
     }
 
     @Test

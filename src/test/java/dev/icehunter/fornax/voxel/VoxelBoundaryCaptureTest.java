@@ -229,7 +229,7 @@ class VoxelBoundaryCaptureTest {
         assertArrayEquals(first.faceColors(),entries.get(a).faceColors());
         assertArrayEquals(next.words(),entries.get(b).faceTextureWords());
         assertEquals(List.of(0,0),copied);
-        var full=new ArrayList<>(Collections.nCopies(SectionHarvester.MAX_PALETTE_ENTRIES,original));
+        var full=new ArrayList<>(Collections.nCopies(SectionHarvester.maxPaletteEntries(),original));
         var capped=new VoxelPaletteShapes(full,unused->{});
         assertEquals(0,capped.boundary(0,next));assertTrue(capped.overflowed());
         assertEquals(0,full.getFirst().faceTextureWords()[0]&VoxelFaceTexture.CLOSED_BOX_BOUNDARY);

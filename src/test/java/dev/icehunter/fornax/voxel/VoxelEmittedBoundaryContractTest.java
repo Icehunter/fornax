@@ -28,7 +28,7 @@ class VoxelEmittedBoundaryContractTest {
         assertTrue(meshing.contains("finally"), "Failed and cancelled builds must release thread-local capture state");
         String harvest = Files.readString(JAVA.resolve("voxel/SectionHarvester.java"));
         assertTrue(harvest.contains("VoxelBoundaryCapture.snapshot"));
-        assertTrue(harvest.contains("shapeVariants.boundary"));
+        assertTrue(harvest.contains("shapeVariants.observed"));
         assertTrue(Files.readString(JAVA.resolve("voxel/VoxelHarvestLifecycle.java"))
                 .contains("VoxelBoundaryCapture.clear"), "Retired atlas references cannot survive in the capture cache");
     }

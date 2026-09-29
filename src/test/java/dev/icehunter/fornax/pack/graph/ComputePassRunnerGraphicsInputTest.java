@@ -30,7 +30,16 @@ class ComputePassRunnerGraphicsInputTest {
     void producerBoundaryUsesDeclaredAliasesAndPartialFlushWithoutAHostWait() throws IOException {
         String source = Files.readString(Path.of(
                 "src/main/java/dev/icehunter/fornax/pack/graph/ComputePassRunner.java"));
-        assertTrue(source.contains("GraphicsInputDependency.requiredBy(spec.inputs(), graphicsWrittenTargets)"));
+        String graph = Files.readString(Path.of(
+                "src/main/java/dev/icehunter/fornax/pack/graph/GraphRunner.java"));
+        assertTrue(graph.contains("Set<String> graphicsComputePasses = graphicsStreamComputePasses(currentPack.graph(), compileValues)"));
+        assertTrue(graph.contains("frameProfiler, graphicsComputePasses.contains(p.name()))"),
+                "runner construction must receive membership in the same graph routing plan used by handoffs");
+        assertTrue(graph.contains("GraphicsInputDependency.requiredBy(pass.inputs(), graphicsWritten)"),
+                "the transitive graph plan retains builtin and declared graphics aliases as its seeds");
+        assertTrue(source.contains("compiledSpirv, graphicsStream);"));
+        assertTrue(source.contains("this.graphicsStream = graphicsStream;"),
+                "the constructor must retain the passed routing decision");
         int start = source.indexOf("private long publishGraphicsInputs()");
         String publish = source.substring(start, source.indexOf("private boolean captureReuseInputs", start));
         assertTrue(publish.indexOf("if (graphicsInputDependency == null) return 0;")
@@ -80,10 +89,8 @@ class ComputePassRunnerGraphicsInputTest {
                 "uncertain submission or completion must not destroy a live graphics signal");
     }
 
-    /** ComputePassRunner's graphicsStream field is computed from exactly this expression, unioned
-     * with the frame's ray-query outputs, at construction; a pass with a G-buffer, shadow-map,
-     * traced-shadow-result or ray-query-hit input dispatches into the graphics stream instead of
-     * the compute queue (see ComputePassRunner.run). */
+    /** Builtin graphics inputs seed the graph routing plan. Declared targets can also become
+     * graphics-written through a producer or scratch use; the graph-level tests cover that closure. */
     @Test
     void graphicsOwnedGBufferInputsSelectGraphicsStreamMode() {
         assertTrue(GraphicsInputDependency.requiredBy(
@@ -91,7 +98,7 @@ class ComputePassRunnerGraphicsInputTest {
                 "G-buffer refs in the input list must select graphics-stream mode");
         assertFalse(GraphicsInputDependency.requiredBy(
                         List.of("globals", "packOptions", "someTarget")),
-                "an ordinary target input has no graphics-owned ref, so the pass stays on the compute queue");
+                "an ordinary target is not a builtin seed; its producers determine the graph routing");
     }
 
 }

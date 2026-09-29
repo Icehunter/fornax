@@ -16,10 +16,10 @@ import java.util.regex.Pattern;
  * per-entry word count and the entries-per-slot count are baked into the addressing math of every
  * consumer. GLSL cannot see Java's constants, so each consumer hand-mirrors
  * {@code const int PALETTE_ENTRY_WORDS = N;} and, as the entries-per-slot term of a
- * {@code PALETTE_WORDS_PER_SLOT} declaration, {@code SectionHarvester.MAX_PALETTE_ENTRIES} itself --
+ * {@code PALETTE_WORDS_PER_SLOT} declaration, {@code SectionHarvester.maxPaletteEntries()} itself --
  * real pack mirrors write this as {@code const int PALETTE_WORDS_PER_SLOT =
  * PALETTE_ENTRY_WORDS * N;}. The entries-per-slot term moved 256 -> 96; see {@code
- * SectionHarvester.MAX_PALETTE_ENTRIES}'s own doc for the census data behind it. A mirror left
+ * SectionHarvester.maxPaletteEntries()}'s own doc for the census data behind it. A mirror left
  * stale does not fail, it silently reads a different entry than the one Java wrote and renders
  * plausible-looking garbage (wrong shadow cutouts, wrong injected light colors) with no error
  * anywhere -- which is why this check exists instead of trusting mirrors kept correct by hand.
@@ -72,10 +72,10 @@ public final class PaletteStrideContract {
             Matcher wordsPerSlotMatcher = WORDS_PER_SLOT_DECL.matcher(source.getValue());
             while (wordsPerSlotMatcher.find()) {
                 int mirrored = Integer.parseInt(wordsPerSlotMatcher.group(1));
-                if (mirrored != SectionHarvester.MAX_PALETTE_ENTRIES) {
+                if (mirrored != SectionHarvester.maxPaletteEntries()) {
                     throw new FornaxPackError(source.getKey(), "PALETTE_WORDS_PER_SLOT",
                             "declares PALETTE_WORDS_PER_SLOT = PALETTE_ENTRY_WORDS * " + mirrored
-                                    + ", but this engine packs " + SectionHarvester.MAX_PALETTE_ENTRIES
+                                    + ", but this engine packs " + SectionHarvester.maxPaletteEntries()
                                     + " palette entries per slot. Every palette read in this shader would "
                                     + "address the wrong slot and render silent garbage. Update the pack "
                                     + "to match this engine version.");

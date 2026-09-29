@@ -74,12 +74,10 @@ profile's `shaderpacks/` so pack edits are live without a copy step.
 `scripts/deploy.ps1` is the Windows equivalent, same two environment variables (`FORNAX_PROFILE`,
 `FORNAX_LINK_PACK`) or the matching `-ProfileDir` / `-LinkPack` parameters. It links the pack as a
 directory junction rather than a symlink, because a symlink on Windows needs Administrator or
-Developer Mode while `mklink /J` does not. It reconciles the launcher index the way `deploy.sh` does,
-minus the content-store blob adoption: the Windows database has no `store_blobs` or
-`store_instance_files` tables. The Windows launcher scans a hand-dropped jar into `instance_files`
-with a row of its own, re-hashes an overwritten file on that scan and keeps `missing` at 0, so it
-never refuses to launch over the jar. The index re-stamp is a fallback: it wants `sqlite3` on `PATH`
-and the app closed, and reports itself skipped when either is absent.
+Developer Mode while `mklink /J` does not. Both deployment scripts build, copy and verify the jar
+without accessing the launcher database or content store. Modrinth App may remain open.
+Restart Minecraft to load a deployed build. The Bash script verifies a staged file before an atomic
+rename; the Windows script copies directly and requires Minecraft closed during replacement.
 
 On Windows a checkout made with `core.autocrlf=true` fails the tests that scan source text for exact
 multi-line snippets: the CRLF endings mean the pattern is not found, so the failure surfaces as a

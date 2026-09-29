@@ -20,7 +20,7 @@ class PreOpaqueLightingComputeWaitStageContractTest {
             "src/main/java/dev/icehunter/fornax/pack/graph/GraphRunner.java");
 
     @Test
-    void finalProducerWaitStageIsDerivedNotHardcoded() throws IOException {
+    void eachRawProducerWaitStageIsDerivedNotHardcoded() throws IOException {
         String source = Files.readString(SOURCE).replace("\r\n", "\n");
         int methodStart = source.indexOf("private static void runPreOpaqueLightingCompute(");
         assertTrue(methodStart >= 0, "runPreOpaqueLightingCompute must still exist");
@@ -32,9 +32,9 @@ class PreOpaqueLightingComputeWaitStageContractTest {
                 "the wait stage must not hardcode FRAGMENT -- a pack pointing a COPY or PARTICLES"
                         + " pass at a lighting buffer needs a different stage, and a hardcoded"
                         + " constant would silently under-synchronize that case");
-        assertTrue(method.contains("graphicsWaitStagesFor(producer, pack.graph())"),
+        assertTrue(method.contains("graphicsWaitStagesFor(p, pack.graph())"),
                 "the signalled mask must come from the shared, tested computeGraphicsWaitStages"
-                        + " path, unioned across every producer in the chain (not just the final"
-                        + " one), since the semaphore only signals once the whole chain has run");
+                        + " path for each raw producer, including a producer before a graphics-stream"
+                        + " consumer within the pre-opaque phase");
     }
 }

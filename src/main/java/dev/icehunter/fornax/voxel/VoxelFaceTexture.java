@@ -10,6 +10,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.block.state.BlockState;
 import java.util.ArrayList;
+import org.joml.Vector3f;
 import java.util.List;
 
 /** Holds exact per-quad UV mapping plus a separate opaque-face-coverage flag.
@@ -36,8 +37,8 @@ public final class VoxelFaceTexture {
     // One header word for RGB and flags, then six raw float words for UV. Tint alpha is not read.
     public static final int FACE_WORDS = 7;
     public static final int ENTRY_WORDS = 6 * FACE_WORDS;
-    public static final int WORDS_PER_SLOT = SectionHarvester.MAX_PALETTE_ENTRIES * ENTRY_WORDS;
-    public static final int BYTES_PER_SLOT = WORDS_PER_SLOT * Integer.BYTES;
+    public static int wordsPerSlot() { return SectionHarvester.maxPaletteEntries() * ENTRY_WORDS; }
+    public static int bytesPerSlot() { return wordsPerSlot() * Integer.BYTES; }
     private VoxelFaceTexture() { }
 
     public record SourceFaces(int[] textureWords, List<MaterialSourceIndex.Summary> summaries,
@@ -73,7 +74,8 @@ public final class VoxelFaceTexture {
     static SourceFaces packSources(List<BlockStateModelPart> parts, VoxelShapeKind kind, int tint,
                                    MaterialSourceIndex index) {
         int[] words = kind == VoxelShapeKind.FULL ? pack(parts, tint)
-                : kind == VoxelShapeKind.PARTIAL ? packPartial(parts, tint) : new int[ENTRY_WORDS];
+                : kind == VoxelShapeKind.PARTIAL ? packPartial(parts, tint)
+                : kind == VoxelShapeKind.CROSS ? packCross(parts, tint) : new int[ENTRY_WORDS];
         List<MaterialSourceIndex.Summary> summaries = new ArrayList<>();
         boolean knownNonpositive = true, hasQuad = false;
         for (Direction face : Direction.values()) {
@@ -84,41 +86,47 @@ public final class VoxelFaceTexture {
                     if (quad.direction() == face) candidates.add(quad);
                 }
             }
-            MaterialSourceIndex.Summary summary = null;
-            int combinedFlags = 0;
             for (var quad : candidates) {
-                var sprite = quad.materialInfo().sprite();
-                var candidate = index.lookup(sprite);
+                var candidate = index.lookup(quad.materialInfo().sprite());
                 hasQuad = true;
-                // Whether a source is missing has nothing to do with face geometry: check every
-                // real quad before applying any crop/shape/page limit. Missing material data is
-                // never proof of zero.
-                knownNonpositive &= candidate.flags() == MaterialSourceIndex.MISSING_MAP
-                        || (candidate.supported() && candidate.texelCount() > 0 && !candidate.authoredCandidate());
-                // A static ghost carries its full-resolution page through the face header. An
-                // animated ghost has no full-copy page, so it cannot claim static source coverage.
-                if (sprite instanceof dev.icehunter.fornax.atlas.BlockAtlasGhostSprite ghost
-                        && !ghost.hasOverflowCopy())
-                    candidate = candidate.withFlags(MaterialSourceIndex.UNSUPPORTED_ATLAS_PAGE);
-                combinedFlags |= candidate.flags();
-                // Unsupported stacked faces retain one positive source's raw evidence, not a
-                // fabricated average or a source-texel count represented as visible coverage.
-                if (summary == null || (!summary.authoredCandidate() && candidate.authoredCandidate()))
-                    summary = candidate;
+                knownNonpositive &= knownNonpositive(candidate);
             }
-            if (summary == null) summary = MaterialSourceIndex.unavailable(MaterialSourceIndex.UNSUPPORTED_GEOMETRY);
-            // A see-through face may have exact UVs, but that does not say how much light it
-            // gives. Keep it unknown until a reader can handle part cover.
-            if (kind != VoxelShapeKind.FULL || candidates.size() != 1
-                    || candidates.getFirst().materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT
-                    || (words[face.get3DDataValue() * FACE_WORDS] >>> 24 & 1) == 0) {
-                combinedFlags |= MaterialSourceIndex.UNSUPPORTED_GEOMETRY;
-            } else if (!coversWholeSprite(candidates.getFirst())) {
-                combinedFlags |= MaterialSourceIndex.CROPPED_UV;
-            }
-            summaries.add(summary.withFlags(combinedFlags));
+            summaries.add(sourceSummary(candidates, kind, words[face.get3DDataValue() * FACE_WORDS], index));
         }
         return new SourceFaces(words, summaries, index.generation(), hasQuad && knownNonpositive);
+    }
+
+    /** Material evidence comes from the emitted sprite, with the same whole-face limits as UVs. */
+    static MaterialSourceIndex.Summary sourceSummary(List<BakedQuad> candidates, VoxelShapeKind kind,
+                                                     int header, MaterialSourceIndex index) {
+        MaterialSourceIndex.Summary summary = null;
+        int combinedFlags = 0;
+        for (var quad : candidates) {
+            var sprite = quad.materialInfo().sprite();
+            var candidate = index.lookup(sprite);
+            if (sprite instanceof dev.icehunter.fornax.atlas.BlockAtlasGhostSprite ghost
+                    && !ghost.hasOverflowCopy())
+                candidate = candidate.withFlags(MaterialSourceIndex.UNSUPPORTED_ATLAS_PAGE);
+            combinedFlags |= candidate.flags();
+            // Preserve positive raw evidence for diagnostics, even when composition is unsupported.
+            if (summary == null || (!summary.authoredCandidate() && candidate.authoredCandidate()))
+                summary = candidate;
+        }
+        if (summary == null)
+            summary = MaterialSourceIndex.unavailable(MaterialSourceIndex.UNSUPPORTED_GEOMETRY);
+        if (kind != VoxelShapeKind.FULL || candidates.size() != 1
+                || candidates.getFirst().materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT
+                || (header >>> 24 & 1) == 0) {
+            combinedFlags |= MaterialSourceIndex.UNSUPPORTED_GEOMETRY;
+        } else if (!coversWholeSprite(candidates.getFirst())) {
+            combinedFlags |= MaterialSourceIndex.CROPPED_UV;
+        }
+        return summary.withFlags(combinedFlags);
+    }
+
+    static boolean knownNonpositive(MaterialSourceIndex.Summary candidate) {
+        return candidate.flags() == MaterialSourceIndex.MISSING_MAP
+                || (candidate.supported() && candidate.texelCount() > 0 && !candidate.authoredCandidate());
     }
 
     private static boolean coversWholeSprite(BakedQuad quad) {
@@ -138,11 +146,13 @@ public final class VoxelFaceTexture {
     static int[] resolve(BlockState state, VoxelShapeKind kind, int tint) {
         var fluid = VoxelFluidFace.resolve(state);
         if (fluid != null) return VoxelFluidFace.words(fluid, tint);
-        if (kind != VoxelShapeKind.FULL && kind != VoxelShapeKind.PARTIAL) return new int[ENTRY_WORDS];
+        if (kind != VoxelShapeKind.FULL && kind != VoxelShapeKind.PARTIAL && kind != VoxelShapeKind.CROSS)
+            return new int[ENTRY_WORDS];
         var model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
         List<BlockStateModelPart> parts = new ArrayList<>();
         model.collectParts(RandomSource.create(0L), parts); // Same fixed model variant the palette colours use.
-        return kind == VoxelShapeKind.FULL ? pack(parts, tint) : packPartial(parts, tint);
+        return kind == VoxelShapeKind.FULL ? pack(parts, tint)
+                : kind == VoxelShapeKind.CROSS ? packCross(parts, tint) : packPartial(parts, tint);
     }
 
     static int[] pack(List<BlockStateModelPart> parts, int tint) {
@@ -155,9 +165,11 @@ public final class VoxelFaceTexture {
                     if (quad.direction() == face) candidates.add(quad);
                 }
             }
-            // Stacked quads cannot be described by one straight UV map.
-            if (candidates.size() == 1) {
-                System.arraycopy(mapping(candidates.getFirst(), face, tint), 0, words,
+            // A separate exterior layer does not change the exact opaque backing's UVs.
+            // Coplanar layers remain unavailable: one map cannot represent their composition.
+            BakedQuad mapped = mappedFace(candidates, face);
+            if (mapped != null) {
+                System.arraycopy(mapping(mapped, face, tint), 0, words,
                         face.get3DDataValue() * FACE_WORDS, FACE_WORDS);
             }
             for (var quad : candidates) {
@@ -168,6 +180,113 @@ public final class VoxelFaceTexture {
             }
         }
         return withBoundaryFacts(words, parts, VoxelShapeKind.FULL, List.of(), true);
+    }
+
+    /** Shared selection for static and emitted appearance; a map never composes coincident layers. */
+    static BakedQuad mappedFace(List<BakedQuad> candidates, Direction face) {
+        return candidates.size() == 1 ? candidates.getFirst() : backing(candidates, face);
+    }
+
+    private static BakedQuad backing(List<BakedQuad> candidates, Direction face) {
+        BakedQuad base = null;
+        for (var quad : candidates) if (VoxelFaceOpacity.covers(quad, face)) {
+            if (base != null) return null;
+            base = quad;
+        }
+        if (base == null) return null;
+        int axis = VoxelBoundaryGeometry.axis(face);
+        float sign = face.getAxisDirection() == Direction.AxisDirection.POSITIVE ? 1f : -1f;
+        float plane = sign > 0 ? 1f : 0f;
+        for (var quad : candidates) if (quad != base) {
+            if (VoxelFaceOpacity.opaque(quad)) return null;
+            for (int vertex = 0; vertex < BakedQuad.VERTEX_COUNT; vertex++) {
+                float coordinate = quad.position(vertex).get(axis);
+                if (!Float.isFinite(coordinate) || sign * (coordinate - plane) <= 0f) return null;
+            }
+        }
+        return base;
+    }
+
+    /** CROSS reuses four records in the 42-word entry, selected by the signed diagonal normal:
+     * (nx > 0 ? 1 : 0) + (nz > 0 ? 2 : 0). Affine coordinates are block-local (x,y).
+     * Cardinal palette colours stay zero; consumers must use the CROSS box to bound these maps. */
+    static int[] packCross(List<BlockStateModelPart> parts, int tint) {
+        int[] words = new int[ENTRY_WORDS];
+        if (!FaceColorResolver.surface(parts).cross()) return words;
+        int[][] maps = new int[4][];
+        Object[] sprites = new Object[4];
+        for (var part : parts) for (var quad : part.getQuads(null)) {
+            int[] map = crossMapping(quad, tint);
+            if (map == null) return new int[ENTRY_WORDS];
+            var edge = new Vector3f(quad.position(1)).sub(quad.position(0));
+            var normal = edge.cross(new Vector3f(quad.position(2)).sub(quad.position(0)));
+            if (!normal.isFinite() || normal.y != 0f || normal.x == 0f || normal.z == 0f)
+                return new int[ENTRY_WORDS];
+            int slot = (normal.x > 0f ? 1 : 0) + (normal.z > 0f ? 2 : 0);
+            if (maps[slot] != null && (sprites[slot] != quad.materialInfo().sprite()
+                    || !compatible(maps[slot], map))) return new int[ENTRY_WORDS];
+            maps[slot] = map;
+            sprites[slot] = quad.materialInfo().sprite();
+        }
+        for (int slot = 0; slot < maps.length; slot++) if (maps[slot] != null)
+            System.arraycopy(maps[slot], 0, words, slot * FACE_WORDS, FACE_WORDS);
+        return words;
+    }
+
+    private static int[] crossMapping(BakedQuad quad, int tint) {
+        if (quad.materialInfo().layer() != ChunkSectionLayer.CUTOUT
+                || quad.materialInfo().tintIndex() > 0) return null;
+        float x0 = Float.POSITIVE_INFINITY, y0 = x0;
+        float x1 = Float.NEGATIVE_INFINITY, y1 = x1;
+        for (int vertex = 0; vertex < BakedQuad.VERTEX_COUNT; vertex++) {
+            var p = quad.position(vertex);
+            if (!p.isFinite()) return null;
+            x0 = Math.min(x0,p.x()); x1 = Math.max(x1,p.x());
+            y0 = Math.min(y0,p.y()); y1 = Math.max(y1,p.y());
+        }
+        if (!(x1 > x0 && y1 > y0)) return null;
+        float[][] uv = new float[4][];
+        int[] order = new int[4];
+        for (int vertex = 0; vertex < BakedQuad.VERTEX_COUNT; vertex++) {
+            var p = quad.position(vertex);
+            if ((p.x() != x0 && p.x() != x1) || (p.y() != y0 && p.y() != y1)) return null;
+            int corner = (p.x() == x1 ? 1 : 0) + (p.y() == y1 ? 2 : 0);
+            if (uv[corner] != null) return null;
+            float u = UVPair.unpackU(quad.packedUV(vertex)), v = UVPair.unpackV(quad.packedUV(vertex));
+            if (!Float.isFinite(u) || !Float.isFinite(v) || u < 0f || u > 1f || v < 0f || v > 1f)
+                return null;
+            uv[corner] = new float[]{u,v}; order[vertex] = corner;
+        }
+        if ((order[0] ^ order[2]) != 3 || (order[1] ^ order[3]) != 3) return null;
+        // The tracer reconstructs the palette's 1/16-grid rectangle. Preserve the real UV corner
+        // values on those same rounded endpoints; fitting to unsent positions reads past sprites.
+        x0 = VoxelShapeClassifier.to16ths(x0) / 16f;
+        x1 = VoxelShapeClassifier.to16ths(x1) / 16f;
+        y0 = VoxelShapeClassifier.to16ths(y0) / 16f;
+        y1 = VoxelShapeClassifier.to16ths(y1) / 16f;
+        if (!(x1 > x0 && y1 > y0)) return null;
+        int[] words = new int[FACE_WORDS];
+        for (int channel = 0; channel < 2; channel++) {
+            float expected = uv[1][channel] + uv[2][channel] - uv[0][channel];
+            // Four rounding ulps cover the three affine corner arithmetic operations.
+            if (Math.abs(expected - uv[3][channel]) > 4 * Math.ulp(Math.max(Math.abs(expected), Math.abs(uv[3][channel]))))
+                return null;
+            float ds = (uv[1][channel] - uv[0][channel]) / (x1 - x0);
+            float dt = (uv[2][channel] - uv[0][channel]) / (y1 - y0);
+            float origin = uv[0][channel] - ds * x0 - dt * y0;
+            if (!Float.isFinite(ds) || !Float.isFinite(dt) || !Float.isFinite(origin)) return null;
+            words[1+channel] = Float.floatToRawIntBits(origin);
+            words[3+channel] = Float.floatToRawIntBits(ds);
+            words[5+channel] = Float.floatToRawIntBits(dt);
+        }
+        float determinant = Float.intBitsToFloat(words[3]) * Float.intBitsToFloat(words[6])
+                - Float.intBitsToFloat(words[5]) * Float.intBitsToFloat(words[4]);
+        if (!Float.isFinite(determinant) || determinant == 0f) return null;
+        int rgb = quad.materialInfo().tintIndex() == 0 ? tint : -1;
+        words[0] = 0x03000000 | (rgb & 0x00ffffff); // Usable affine map and alpha-tested coverage.
+        if (quad.materialInfo().sprite() instanceof dev.icehunter.fornax.atlas.BlockAtlasGhostSprite ghost
+                && ghost.hasOverflowCopy()) words[0] |= ghost.overflowPage() << ATLAS_PAGE_SHIFT;
+        return words;
     }
 
     static int[] packPartial(List<BlockStateModelPart> parts, int tint) {

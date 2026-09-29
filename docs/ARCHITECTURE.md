@@ -370,8 +370,15 @@ draws at all.
    - The graph is validated as a whole: every target's format parses, every `enabled_if` expression
      references only compile options (never a runtime option, enforcing the runtime/compile split
      the option grammar promises), every pass's input/output references resolve to a declared
-     target or a `builtin.*` name, and the pass/target graph is checked for cycles. A VRAM estimate
-     is computed and logged alongside this pass.
+     target or a `builtin.*` name, and the pass/target graph is checked for cycles. A buffer input in
+     the physical pass sequence consumes its nearest earlier writer's version; when earlier writers
+     may all be disabled, future writer edges remain for cycle rejection. Images and geometry slot
+     inputs retain every producer edge. A compute pass may list the same buffer as an input and an
+     output only when earlier writers cover every compile configuration in which it runs. Runtime gates must be
+     absent on an initializing writer or identical to the reader's gate; a pre-opaque update cannot
+     use a later `finish()` writer. Image feedback remains invalid. This admits storage aliasing,
+     not cross-invocation synchronization: the shader must make its own reads and writes race-free.
+     A VRAM estimate is computed and logged alongside this pass.
    - **Gate consistency.** A pass must never be enabled while an `enabled_if`-gated target it reads,
      writes, or mipchains is unallocated. The check is exact: it enumerates the combined domain of
      every compile option both expressions reference (booleans and bracketed enum lists, capped at
@@ -1556,7 +1563,7 @@ from `voxelSourceWindow`'s source set, without removing self emission or its abi
 It does not identify or subtract that source's contribution from Minecraft's merged lightmap.
 
 `MaterialResolution` resolves the default and category overrides into `MaterialScalars`. Each
-section harvest stores a separate immutable, two-word `VoxelSourcePolicy` palette mask, even
+section harvest stores a separate immutable, four-word `VoxelSourcePolicy` palette mask, even
 when source diagnostics are disabled. Overflow or an unmapped cell marks that policy incomplete
 rather than trusting an aliased palette index. Raw `VoxelSourceEvidence`, summary and diagnostic
 emitter-pool data remain unchanged. `withLightmap` preserves policy identity. A blocks-manifest
@@ -2623,13 +2630,33 @@ file or substitutes a regenerated volume. Every artifact records its byte count 
 images retain GPU row order with no conversion or vertical flip.
 
 Unselected dispatches perform no readback allocation, copy or wait. Selected readbacks use raw VMA
-TRANSFER_DST staging first-used solely on the compute queue, including distinct queue families.
-The image-reuse wait includes TRANSFER for capture, and memory barriers order uploads/input copies,
-kernel execution, output copies and host reads. A five-second fence wait bounds capture blocking.
-Non-coherent mappings are invalidated only after confirmed completion; timeout marks failure and
-retains staging on the runner's ring slot until a later confirmed fence permits destruction.
-Requests share a 1 GiB byte budget, with at most 512 MiB per resource. Unsupported resources are
-reported explicitly, and neither a pending nor an unavailable binding can advertise replayComplete.
+TRANSFER_DST staging first-used solely on the dispatch's execution queue. Compute-queue captures
+use their runner's fence; graphics-stream captures bracket the exact inline dispatch and retain a
+normal encoder `GpuFence` taken before recording. They do not submit or flush the frame. Completion
+is polled before the next F10 request checks pending work. Teardown uses a bounded five-second wait;
+timeouts or uncertain recording failures retain staging and its fence until completion is proven.
+Non-coherent mappings are invalidated only after that proof. The manifest's `executionQueue` names
+the dispatch queue. The existing frame submission and graphics-stream routing remain intact.
+
+Capture input transfers require incoming producer waits at `ALL_COMMANDS`, including the first
+handoff and producers before opaque draws. Memory barriers order uploads, input copies, the kernel,
+output copies and host reads. Copy-to-write dependencies also protect against later graph passes
+overwriting copied resources, even if recording one of the copies fails partway through.
+
+An optional `bindings` object limits compute readbacks by exact graph reference, for example:
+
+```json
+{"passes":["example_compute"],
+ "bindings":{"example_compute":["globals","input.history","output"]}}
+```
+
+The filter applies to inputs and outputs; include every output needed for the diagnosis. References
+with `.history` are distinct from current references. Unknown or duplicate names fail explicitly.
+Excluded descriptors retain their binding index, name and direction with `status: "excluded"`, and
+reserve no readback bytes. This permits a small diagnostic when large atlas bindings would exhaust
+the 1 GiB request budget. Filters apply only to compute captures. An explicitly filtered capture
+always has `replayComplete: false`; `diagnosticComplete: true` means every selected binding arrived
+after a dispatched kernel and confirmed fence. It does not claim sufficient inputs for replay.
 Source and pure-data tests pin these contracts; only a client run verifies mixin application, GPU
 readback content and driver behavior. The capture frame's timing includes readback overhead.
 
@@ -3029,10 +3056,11 @@ driver callbacks. It costs readback time only on F2.
   submissions from advancing a value no queue will ever signal. The release method records no
   submit and performs no host wait; teardown drains the compute ring before destroying the timeline.
 - **A hand-picked wait stage for a fixed set of consumers must be re-derived, not hardcoded, once a
-  shared function already computes it.** `GraphRunner.runPreOpaqueLightingCompute`'s final producer
-  signals the union of `computeGraphicsWaitStages` across every producer in its chain rather than a
-  hardcoded `FRAGMENT_SHADER_BIT`, so a pack pointing a `COPY` or `PARTICLES` pass at a lighting
-  buffer still gets the correct stage instead of a silently under-synchronized fragment-only wait.
+  shared function already computes it.** `GraphRunner.runPreOpaqueLightingCompute` publishes each raw
+  producer's own `computeGraphicsWaitStages` result immediately. The phase can mix compute-queue and
+  graphics-stream runners; signaling only the last runner loses earlier raw work when that runner
+  uses graphics and emits no semaphore. Per-producer waits also cover `COPY` and `PARTICLES` readers
+  at their actual transfer and vertex stages, before opaque terrain rendering begins.
 - **A transform on absolute world coordinates runs in double, never float.** `ShadowCamera.compute`'s
   texel-snap needs the true sub-texel remainder of the player's absolute position. Float32 cannot
   represent that remainder past a few million blocks: every sub-texel offset rounds to the same
@@ -3398,9 +3426,9 @@ candidate objects around. Its default cap of 4096 comes from the local colored-l
 overall candidate budget. A caller can pass a different cap; this is a limit, not a shared pool or
 a selection rule.
 
-The stored palette data is four bytes per entry, so at most 384 bytes at the current 96-entry cap.
-Across a reach-12 window's 15,625 slots that is at most 5.72 MiB total, or 1.91 MiB at 32 entries
-per section, not counting JVM object and array headers or short-lived snapshots. A default listing
+The stored source-evidence data is four bytes per entry: 384 bytes at capacity 96 and 960 bytes
+at capacity 240. Across a reach-12 window's 15,625 slots that is 5.72 to 14.31 MiB, or 1.91 MiB
+at 32 actual entries per section, excluding JVM object/array headers and short-lived snapshots. A default listing
 call keeps at most 16 KiB of key data, and only for the caller that asked for it. Neither the
 seven-word face texture nor the eight-word source-summary GPU layout changes.
 
@@ -3668,10 +3696,10 @@ holds at most one owner per active toroidal slot. Failed captures are distinguis
 captures so a final model cannot inherit an invalid fallback certificate.
 
 The harvest worker consumes those immutable facts and creates palette variants for distinct
-geometry, texture mappings or colors at different positions. Boundary variants retain raw state
-emission but mark authored source evidence unknown; fallback sprites cannot establish exact source
-coverage for transformed geometry. Cutout state, representative UV rect and measured extinction are
-recomputed from the captured parts with the existing resolvers. Pure translucent captures carry no
+geometry, texture mappings or colors at different positions. Boundary-only variants retain raw
+state emission but mark authored source evidence unknown; fallback sprites cannot establish exact
+source coverage for transformed geometry. Cutout state, representative UV rect and measured
+extinction are recomputed from the captured parts with the existing resolvers. Pure translucent captures carry no
 legacy alpha-test rect or foliage extinction. Palette exhaustion clears the shared fallback boundary
 proof.
 
@@ -3684,6 +3712,30 @@ reuse neighbor-dependent facts collected before the section left the window. A s
 renderer's available mesh range remains without contextual boundary proof. Logs report the first
 accepted or rejected result for each model class and reason during a lifecycle, plus retirement
 counts, so missing activation and unsupported models are distinguishable.
+
+Opaque full-cell appearances are captured independently of optical boundary certification. The
+same renderer invocation records only final neighbor-visible faces for this purpose, so hidden
+connected-texture bottoms do not multiply palette variants. Each direction selects its supported
+full-face map or unique opaque backing; unsupported directions cannot revive the static model's
+unresolved sprite. Actual emitted tint indices and uniform vertex-color multipliers are retained.
+Harvest resolves those tint layers at the section center, preserving the existing biome-color
+approximation. Appearance facts contain no sprite, world or callback references and cannot grant
+closed-volume proof. Opaque appearances are observed per cell rather than reused by geometry key,
+because neighboring face culling can differ for otherwise identical geometry.
+
+Each supported emitted appearance also retains immutable per-direction material-source summaries
+from its actual selected sprite, tagged with the material atlas generation. Harvest rebuilds source
+evidence from those summaries; it cannot inherit an unresolved static sprite's authored emission.
+Culled faces, unsupported overlays and invalid mappings remain unknown without suppressing another
+independently supported direction. Source-window rows describe an admitted known face, so their
+unknown flag is clear even when other directions contribute to the diagnostic unknown-cell count.
+A generation mismatch or unavailable appearance retains intrinsic levels only as diagnostic facts
+and publishes no source face. Material evidence never grants an optical boundary certificate.
+
+The worker merges appearance and optional boundary facts into one palette variant. The existing
+96-entry limit is unchanged; appearance exhaustion makes the fallback mapping unavailable rather
+than publishing an unresolved contextual texture. CROSS and partial mappings keep their existing
+paths. Captures still inherit the world/generation/section/serial invalidation rules above.
 
 ### Optional voxel face texture mapping
 
@@ -3705,6 +3757,27 @@ translucent full faces and compatible axis-aligned partial faces, including pane
 same block-local coordinates. Several rectangles may share one direction only when their sprite,
 tint, layer and extrapolated affine UV map agree. Their extrapolated origin can lie outside the
 sprite; a consumer samples only at a certified boundary point. Unsupported maps remain invalid.
+
+For FULL cells with several quads in a direction, a unique opaque full boundary quad can retain
+its exact backing map only when every other quad is non-opaque and lies strictly outside that
+boundary. Coplanar layers, interior layers and ambiguous backings stay unavailable. This records
+the backing surface only; it does not add floating overlay geometry to voxel traversal. Stacked
+source summaries remain unsupported even when the backing has a usable map.
+
+For CROSS cells the first four seven-word records instead describe signed diagonal normals,
+indexed by `(normal.x > 0 ? 1 : 0) + (normal.z > 0 ? 2 : 0)`. The last two records remain zero.
+Their affine coordinates are block-local `(x,y)`; consumers bound them with the CROSS palette box,
+not the unit square. Each winding has its own UV and tint mapping with usable and alpha-tested
+bits set. Only exact upright diagonal rectangles with finite affine UVs and layer-zero or no tint
+qualify. The classifier proves that every quad spans the same rectangle. UV corner values are
+fitted to the same rounded and clamped 1/16-grid endpoints as the palette box, preserving each
+plane's own sprite, rotation and mirroring on the existing coarse geometry. This stretches or
+shrinks the texture with that approximation; it does not export exact model positions. A rectangle
+collapsed by quantization, conflicting mappings, unsupported geometry or tint leave all records
+unavailable. Distinct plane sprites remain supported; a consumer must not clamp these records to
+the palette's single representative sprite rectangle.
+Cardinal palette colours remain zero, so consumers must not use them to reject a CROSS hit.
+CROSS source summaries remain unknown; texture mapping does not imply opaque emitter coverage.
 
 The exact header combination `(header & 0x23000000) == 0x02000000` stores sample-only material
 evidence for a partial direction whose rectangles cannot share one affine map. Both usable-mapping
@@ -3794,17 +3867,29 @@ map names, the traced shadow result, and the G-buffer images: `builtin.depth`, `
 says no for `builtin.waterDepth` and `builtin.waterNormal`. Pass names and packs do not matter to
 it.
 
-A compute pass with such an input does not go to the compute queue. `ComputePassRunner` records it
-into the graphics stream, in the same order as the draws around it. With Plague's settings that is
-`sun_shadow_seed` and `atmo_aerial`.
+`GraphRunner.graphicsStreamComputePasses` extends this classification across the active graph.
+Every graphics pass's output, including ray-query hits, seeds the set of graphics-written targets.
+Compute passes consuming those targets join the graphics stream, and their outputs extend the set
+until no further consumer joins. All compute writers of a buffer with several active writers, and
+compute passes that read and write the same buffer, also join. Compile-disabled passes do not count;
+runtime-gated passes remain in the conservative plan. Runner creation, compute-to-graphics waits and
+previous-frame storage-reuse checks use the same routing result.
+
+`ComputePassRunner` records these passes into the graphics stream in graph order. Before each kernel,
+an `ALL_COMMANDS` to `COMPUTE_SHADER` barrier orders earlier graphics reads before scratch overwrites
+and makes earlier memory writes visible to shader reads and writes. The compute release barrier also
+includes vertex, fragment, transfer and compute consumers, plus shader-write destination access
+for later overwrites. These barriers add no submit or host
+wait. Single-writer compute work without graphics dependencies can still use the compute queue.
 
 The reason is how MoltenVK works. A timeline signal only covers the command buffer it sits in. The
 draws that made the images were sent earlier, in another command buffer. So a wait on the compute
 queue does not put the read after those draws. Recording on the same queue does, because Metal
 keeps one queue in order.
 
-A graphics-stream pass takes no fence, no timestamp, no capture and no reuse ticket, and it signals
-nothing. F10 capture and GPU timing do not run for it, so the profiler shows no GPU time for it.
+A graphics-stream pass takes no timestamp or reuse ticket and signals no compute-to-graphics
+semaphore. Selected F10 captures use its normal graphics encoder completion epoch without forcing
+a submit; unselected passes allocate no capture fence. GPU timing does not run for this path.
 
 `GraphicsInputDependency` itself is never built: the same check that would build it picks the
 graphics stream first. Its old wait path (signal at `ALL_COMMANDS`, flush with
@@ -3818,3 +3903,35 @@ graphics pass wait for a compute pass's output.
 
 Tests pin which input names pick the graphics stream, and the compute queue path's wait list and
 signal order.
+
+
+### Compile-time graph sizing
+
+Fixed texture width/height, pack buffer count, ray-query rays and compute dispatch components
+accept positive integer expressions over declared compile options. Supported syntax is integer
+literals, identifiers, parentheses, addition, multiplication and exact division. Runtime options,
+unknown names, fractional division, overflow and out-of-domain selected values fail loudly.
+The existing `render` count sentinel is unchanged; renderers still consume concrete numeric specs.
+
+`GraphNumericExpressions` retains formulas on `GraphSpec`, resolves defaults after option scanning,
+and validates every declared sizing combination (bounded at 4096 combinations). A selected rebuild
+resolves and validates an immutable graph before `closeCurrent`, preserving the previous graph on
+invalid sizing. `PackModel.withGraph` carries this resolved graph through registry creation and
+runner construction. Rebuilds retain expression provenance for later setting changes.
+
+### Section material capacity
+
+`voxelPaletteCapacity` selects 96/128/192/240 entries per section. The config loader publishes the
+boot-active value; settings save only a pending value and explicitly requires restart. Capacity-
+dependent layout accessors read the active value instead of capturing it in class initializers.
+Old configs default to 96. Harvest/capture, upload, export buffers, native compilation and debug
+readers agree on this value. The single-byte cell format remains unchanged: capture IDs 254/255
+remain failure sentinels. Metal palette indices use all eight bits; `VoxelSourcePolicy` uses four
+longs so indices above 127 cannot alias lower entries.
+
+A palette entry occupies 16 uint words plus an optional 42-word face record: 64 or 232 bytes per
+slot. A nine-section-diameter tier-0 grid uses 15.48/20.65/30.97/38.71 MiB for material records;
+a matching Metal export doubles that portion. Coarse tiers, geometry, atlases, allocator overhead
+and request buffers are additional. Histogram diagnostics list palette and face costs separately.
+More capacity admits more facts, but overflow remains explicit. This change does not add merging
+or priority heuristics and does not synthesize optical boundary proof from appearance.

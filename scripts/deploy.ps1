@@ -2,7 +2,7 @@
 # launcher profile, optionally linking a pack checkout into that profile's shaderpacks/.
 #
 # LOCAL-ONLY: this script only builds and copies files on disk. It does not touch git, does not
-# commit, does not push. Safe to re-run any time.
+# commit, push, or access the launcher database or content store.
 #
 #   $env:FORNAX_PROFILE = "$env:APPDATA\ModrinthApp\profiles\Fabulously Optimized"
 #   $env:FORNAX_LINK_PACK = "C:\Users\Icehunter\source\plague"
@@ -12,9 +12,7 @@
 #
 #   .\scripts\deploy.ps1 -ProfileDir "...\profiles\Fabulously Optimized" -LinkPack "...\source\plague"
 #
-# Why a separate script rather than running deploy.sh under Git Bash: deploy.sh is macOS-specific in
-# four places that all matter -- `md5 -q`, `shasum`, `pgrep -x "Modrinth App"`, and the
-# `~/Library/Application Support` launcher paths -- plus the two platform differences below.
+# Uses native PowerShell paths, checksums and directory junctions on Windows.
 [CmdletBinding()]
 param(
     [string]$ProfileDir = $env:FORNAX_PROFILE,
@@ -92,9 +90,7 @@ if ($candidates.Count -gt 1) {
 $jar       = $candidates[0]
 $buildHash = (Get-FileHash -LiteralPath $jar.FullName -Algorithm SHA256).Hash
 
-# The deployed name is the jar's own, deliberately STABLE across builds -- same reasoning as
-# deploy.sh: a build-unique filename orphans the path a launcher may already have indexed, and the
-# instance then refuses to start on that dead row while the new jar sits beside it, unused.
+# Keep one stable jar path across builds. The launcher manages its own index.
 $deployName = $jar.Name
 
 Write-Host "  found: $($jar.Name)"
@@ -119,8 +115,7 @@ Get-ChildItem $modsDir -Filter 'fornax-*.jar' -File -ErrorAction SilentlyContinu
 $deployPath = Join-Path $modsDir $deployName
 Copy-Item -LiteralPath $jar.FullName -Destination $deployPath -Force
 
-# No chmod here. deploy.sh sets 0600 because the macOS launcher's content store refused to adopt a
-# 0644 jar; POSIX modes do not apply on Windows and the launcher reads the file as written.
+# POSIX file modes do not apply on Windows.
 
 # Verify what landed rather than trusting the copy: a truncated or partially written jar is exactly
 # the failure the launcher's own integrity check would report next.
@@ -134,8 +129,7 @@ Write-Host "  verified sha256: $($deployedHash.Substring(0,16))..."
 # --- Optional pack link -------------------------------------------------------------------------
 # A DIRECTORY JUNCTION, not a symlink: creating a symlink on Windows needs either Administrator or
 # Developer Mode, while `mklink /J` works as a plain user. The launcher and the engine both see a
-# junction as an ordinary directory, and the launcher's file index skips it the same way it skips
-# any unmanaged shaderpack directory.
+# junction as an ordinary directory.
 if ($LinkPack) {
     if (-not (Test-Path -LiteralPath $LinkPack -PathType Container)) {
         Write-Error "FORNAX_LINK_PACK is set but is not a directory: $LinkPack"
@@ -160,76 +154,6 @@ if ($LinkPack) {
     & cmd /c mklink /J "`"$linkPath`"" "`"$LinkPack`"" | Out-Null
     if (-not (Test-Path -LiteralPath $linkPath)) { Write-Error "failed to create junction at $linkPath" }
     Write-Host "  linked: $linkPath -> $LinkPack"
-}
-
-# --- Launcher index -----------------------------------------------------------------------------
-# Modrinth App keeps a SQLite index of every file under a profile (path, sha1, size, plus a
-# `missing` flag) and validates it before launching. A hand-dropped jar does NOT stay outside that
-# index: the app picks it up on its next scan and gives it a row like any other mod, so an in-place
-# overwrite leaves that row's sha1 and size describing the previous build.
-#
-# The Windows database has no store_blobs / store_instance_files tables, so the content-store blob
-# adoption deploy.sh performs has nothing to write to here and is left out. What remains portable is
-# the rest: re-stamp the row for the path just written, and drop rows whose file is genuinely gone.
-#
-# Observed on this launcher build: after an in-place overwrite it re-hashes the file on its own scan
-# and the row's sha1/size follow the new jar, with `missing` staying 0 -- it does not refuse to launch
-# the way the macOS content-store build does. So this section is a fallback for when that scan has
-# not happened yet, not a precondition for launching, and skipping it is not a failure.
-#
-# Writing is conditional on two things, both for the reason deploy.sh gives: sqlite3 has to be on
-# PATH, and the app must not be running, because writing under it risks a corrupt WAL and it would
-# overwrite the change anyway.
-#
-# Set FORNAX_SKIP_LAUNCHER_INDEX=1 to leave the database untouched.
-if (-not $env:FORNAX_SKIP_LAUNCHER_INDEX) {
-    $appDb = Join-Path $env:APPDATA 'ModrinthApp\app.db'
-    # No ?. here: Windows PowerShell 5.1 has no null-conditional operator.
-    $sqliteCmd = Get-Command sqlite3 -ErrorAction SilentlyContinue
-    $sqlite = if ($sqliteCmd) { $sqliteCmd.Source } else { $null }
-    $appRunning = [bool](Get-Process -Name 'Modrinth App' -ErrorAction SilentlyContinue)
-    Write-Host ''
-    if (-not (Test-Path -LiteralPath $appDb)) {
-        Write-Host "  launcher index: skipped (no Modrinth App database at $appDb)"
-    } elseif (-not $sqlite) {
-        Write-Host '  launcher index: skipped (no sqlite3 on PATH)'
-    } elseif ($appRunning) {
-        Write-Warning 'launcher index: SKIPPED - Modrinth App is running.'
-        Write-Warning "  The row for mods/$deployName still describes the previous build. The app re-hashes"
-        Write-Warning '  on its own scan; if it ever refuses to launch asking for a repair, close it and re-run.'
-    } else {
-        $profileKey = (Split-Path -Leaf $ProfileDir).Replace("'", "''")
-        $instanceId = (& $sqlite -readonly $appDb "select id from instances where path='$profileKey';") -replace "`r", ''
-        if (-not $instanceId) {
-            Write-Host "  launcher index: skipped (no instance registered for '$profileKey')"
-        } else {
-            Write-Host "=== Reconciling launcher index for $profileKey ==="
-            $sha1 = (Get-FileHash -LiteralPath $deployPath -Algorithm SHA1).Hash.ToLower()
-            $size = (Get-Item -LiteralPath $deployPath).Length
-            $rel = "mods/$deployName".Replace("'", "''")
-            & $sqlite $appDb "update instance_files set sha1='$sha1', size=$size, missing=0 where instance_id='$instanceId' and relative_path='$rel';"
-            Write-Host "  re-stamped mods/$deployName ($($sha1.Substring(0,12))..., $size bytes)"
-
-            # Checked one at a time against the filesystem rather than deleted by flag: a row flagged
-            # missing whose file EXISTS is a stale flag to clear, not a row to delete, and deleting it
-            # would unregister real content.
-            $orphans = 0
-            $flagged = @(& $sqlite -readonly $appDb "select relative_path from instance_files where instance_id='$instanceId' and missing=1;")
-            foreach ($row in $flagged) {
-                $row = $row -replace "`r", ''
-                if (-not $row) { continue }
-                $esc = $row.Replace("'", "''")
-                if (Test-Path -LiteralPath (Join-Path $ProfileDir $row)) {
-                    & $sqlite $appDb "update instance_files set missing=0 where instance_id='$instanceId' and relative_path='$esc';"
-                    Write-Host "  un-flagged (file present): $row"
-                } else {
-                    & $sqlite $appDb "delete from instance_files where instance_id='$instanceId' and relative_path='$esc';"
-                    $orphans++
-                }
-            }
-            if ($orphans -gt 0) { Write-Host "  removed $orphans orphaned row(s) for files no longer on disk" }
-        }
-    }
 }
 
 Write-Host ''

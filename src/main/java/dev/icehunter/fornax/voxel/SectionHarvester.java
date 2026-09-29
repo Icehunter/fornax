@@ -52,7 +52,7 @@ public final class SectionHarvester {
      * states onto the same byte value. {@code PaletteSizeHistogram} stays on unconditionally so a
      * future session that finally hits this cap's cap-hits counter is the early warning to revisit it.
      */
-    public static final int MAX_PALETTE_ENTRIES = 96;
+    public static int maxPaletteEntries() { return VoxelPaletteLayout.entries(); }
 
     /** Distinct states already reported by the cutout-drop diagnostic below, so a chunk-load storm logs each once. */
     private static final java.util.Set<String> CUTOUT_DROP_LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -169,14 +169,14 @@ public final class SectionHarvester {
             if (indexByState.containsKey(state)) {
                 return;
             }
-            if (entries.size() >= MAX_PALETTE_ENTRIES) {
+            if (entries.size() >= maxPaletteEntries()) {
                 if (!overflowLogged[0]) {
                     overflowLogged[0] = true;
                     FornaxMod.LOGGER.warn(
                             "[Fornax] Section has more than {} distinct block states (real palette "
                                     + "overflowed to the global palette); extra states beyond the cap "
                                     + "will render as palette entry 0 instead of their real appearance",
-                            MAX_PALETTE_ENTRIES);
+                            maxPaletteEntries());
                 }
                 return;
             }
@@ -201,13 +201,19 @@ public final class SectionHarvester {
                 sourceEntries.add(sourceEntries.get(baseIndex));
                 sourceEvidence.copy(baseIndex);
             }
-        }, baseIndex -> {
+        }, (baseIndex, appearance) -> {
             sourcePolicy.copy(baseIndex);
             if (sourceEntries != null) {
-                sourceEntries.add(new VoxelSourceSummary.Entry(0, true));
-                sourceEvidence.copyUnknown(baseIndex);
+                var observed = appearance == null ? null : appearance.sourceFaces(sourceIndex.generation());
+                sourceEntries.add(observed == null ? new VoxelSourceSummary.Entry(0, true)
+                        : VoxelSourceSummary.Entry.from(observed.summaries()));
+                sourceEvidence.copyObserved(baseIndex, observed, sourceIndex.generation());
             }
         });
+        // Preserve the existing section-centre biome approximation. Final UVs and emitted tint
+        // indices vary per cell; repeated appearances and each state's tint layers resolve once.
+        var resolvedAppearances = new java.util.HashMap<AppearanceKey, VoxelFaceAppearance.Resolved>();
+        var appearanceTints = new IdentityHashMap<BlockState, Map<Integer, Integer>>();
         var rtGeometry = new RtSectionGeometry.Builder();
         byte[] paletteIndices = new byte[16 * 16 * 16];
         for (int y = 0; y < 16; y++) {
@@ -217,14 +223,21 @@ public final class SectionHarvester {
                     Integer index = indexByState.get(state);
                     if (index != null && emittedBoundaries != null) {
                         var captured = emittedBoundaries.cell((y << 8) | (z << 4) | x, state);
-                        if (captured != null) index = shapeVariants.boundary(index, captured.boundary());
+                        if (captured != null) {
+                            VoxelFaceAppearance.Resolved appearance = captured.appearance() == null ? null
+                                    : resolvedAppearances.computeIfAbsent(new AppearanceKey(state, captured.appearance()),
+                                            key -> key.appearance.resolve(layer -> appearanceTints
+                                                    .computeIfAbsent(state, unused -> new java.util.HashMap<>())
+                                                    .computeIfAbsent(layer, tintLayer -> biomeTint(state, tintSource, tintAt, tintLayer))));
+                            index = shapeVariants.observed(index, captured.boundary(), appearance);
+                        }
                     }
                     if (index == null) { sourcePolicy.markIncomplete(); rtGeometry.unknown(); }
                     else if (entries.get(index).shapeKind() == VoxelShapeKind.CROSS)
                         rtGeometry.harvest(state, entries.get(index), (y << 8) | (z << 4) | x, index,
                                 new BlockPos(originX + x, originY + y, originZ + z));
                     else if (entries.get(index).shapeKind() == VoxelShapeKind.PARTIAL) rtGeometry.unknown();
-                    // A state that was skipped above (palette overflow past MAX_PALETTE_ENTRIES) has no
+                    // A state that was skipped above (palette overflow past maxPaletteEntries()) has no
                     // entry here -- fall back to index 0 deterministically rather than unboxing null.
                     paletteIndices[(y << 8) | (z << 4) | x] = (byte) (index != null ? index : 0);
                     if (sourceInventory != null) {
@@ -238,16 +251,16 @@ public final class SectionHarvester {
         }
 
         // Palette-size diagnostic (2026-07-20): feeds PaletteSizeHistogram's always-on, lock-free
-        // counters so MAX_PALETTE_ENTRIES keeps tracking real distribution data instead of a guess --
-        // it already shrank the constant once (256 -> 96, see MAX_PALETTE_ENTRIES's own doc), and stays
+        // counters so maxPaletteEntries() keeps tracking real distribution data instead of a guess --
+        // it already shrank the constant once (256 -> 96, see maxPaletteEntries()'s own doc), and stays
         // on so a future session that finally hits this cap shows up as a cap-hits > 0 early warning.
-        // overflowLogged[0] is the harvester's real "more than MAX_PALETTE_ENTRIES distinct states
-        // were present" signal, not just entries.size() == MAX_PALETTE_ENTRIES (a section that
-        // happens to have EXACTLY MAX_PALETTE_ENTRIES distinct states with no overflow would also report).
+        // overflowLogged[0] is the harvester's real "more than maxPaletteEntries() distinct states
+        // were present" signal, not just entries.size() == maxPaletteEntries() (a section that
+        // happens to have EXACTLY maxPaletteEntries() distinct states with no overflow would also report).
         if (shapeVariants.overflowed()) {
             FornaxMod.LOGGER.warn("[Fornax] Section ({}, {}, {}) exhausted its {} voxel palette entries; "
-                    + "additional contextual shapes retain their selection-shape fallback",
-                    originX, originY, originZ, MAX_PALETTE_ENTRIES);
+                    + "additional contextual shapes retain fallback geometry and unresolved appearances become unavailable",
+                    originX, originY, originZ, maxPaletteEntries());
         }
         PaletteSizeHistogram.record(entries.size(), overflowLogged[0] || shapeVariants.overflowed());
 
@@ -265,15 +278,22 @@ public final class SectionHarvester {
      *
      * <p>Never throws: a tint is worth less than the mesh build this hook sits in.
      */
+    private record AppearanceKey(BlockState state, VoxelFaceAppearance appearance) { }
+
     private static int biomeTint(BlockState state, @Nullable BlockAndTintGetter tintSource,
                                  @Nullable BlockPos tintAt) {
+        return biomeTint(state, tintSource, tintAt, 0);
+    }
+
+    private static int biomeTint(BlockState state, @Nullable BlockAndTintGetter tintSource,
+                                 @Nullable BlockPos tintAt, int tintLayer) {
         if (tintSource == null || tintAt == null) {
             return -1;
         }
         try {
             // MC 26.2 answers with a per-layer tint source, not one getColor call. Layer 0 is the
             // one grass, leaves, vines and water carry; no source means no tint.
-            BlockTintSource source = Minecraft.getInstance().getBlockColors().getTintSource(state, 0);
+            BlockTintSource source = Minecraft.getInstance().getBlockColors().getTintSource(state, tintLayer);
             if (source == null) {
                 return -1;
             }

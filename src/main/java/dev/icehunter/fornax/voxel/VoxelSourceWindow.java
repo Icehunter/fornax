@@ -246,10 +246,10 @@ public final class VoxelSourceWindow {
                 put(bytes, base, source.token.x() * 16 + (cell & 15));
                 put(bytes, base + 1, source.token.y() * 16 + (cell >> 8));
                 put(bytes, base + 2, source.token.z() * 16 + ((cell >> 4) & 15));
-                put(bytes, base + 3, slot * SectionHarvester.MAX_PALETTE_ENTRIES + entry);
-                // Only this run's own face survives in the low six bits; the facts above them,
-                // the block's light level and its missing-map mask, are the entry's and stay.
-                put(bytes, base + 4, source.facts[entry] & ~63 | 1 << run.face());
+                put(bytes, base + 3, slot * SectionHarvester.maxPaletteEntries() + entry);
+                // Admission proves this run's own direction. Unknown sibling directions remain
+                // in the diagnostic cell count, but cannot invalidate an independently known face.
+                put(bytes, base + 4, source.facts[entry] & ~(63 | UNKNOWN_SOURCE) | 1 << run.face());
                 put(bytes, base + 5, source.token.geometryRevision());
                 put(bytes, base + 6, VoxelSectionState.COMMITTED);
                 put(bytes, base + 7, packRun(run));

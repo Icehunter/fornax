@@ -19,6 +19,9 @@ public final class FornaxConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     private static FornaxSettings settings = new FornaxSettings();
+    private static volatile VoxelPaletteCapacity activeVoxelPaletteCapacity = VoxelPaletteCapacity.ENTRIES_96;
+
+    public static VoxelPaletteCapacity activeVoxelPaletteCapacity() { return activeVoxelPaletteCapacity; }
 
     private FornaxConfig() {
     }
@@ -65,6 +68,8 @@ public final class FornaxConfig {
             settings.schemaVersion = FornaxSettings.CURRENT_SCHEMA_VERSION;
             save(path);
         }
+        // load is startup-only (prelaunch/client init); save and pack reload never alter this latch.
+        activeVoxelPaletteCapacity = settings.voxelPaletteCapacity;
     }
 
     /**
@@ -99,6 +104,7 @@ public final class FornaxConfig {
      */
     static void install(FornaxSettings s) {
         settings = s;
+        activeVoxelPaletteCapacity = VoxelPaletteCapacity.ENTRIES_96;
     }
 
     private static Path configPath() {

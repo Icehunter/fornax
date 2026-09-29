@@ -44,9 +44,9 @@ class VoxelFaceTextureTest {
         // Seven words per face, six faces, 96 palette entries in one section slot.
         assertEquals(7,VoxelFaceTexture.FACE_WORDS);
         assertEquals(42,VoxelFaceTexture.ENTRY_WORDS);
-        assertEquals(4032,VoxelFaceTexture.WORDS_PER_SLOT);
-        assertEquals(16128,VoxelFaceTexture.BYTES_PER_SLOT);
-        assertEquals(0,VoxelFaceTexture.BYTES_PER_SLOT % Integer.BYTES);
+        assertEquals(4032,VoxelFaceTexture.wordsPerSlot());
+        assertEquals(16128,VoxelFaceTexture.bytesPerSlot());
+        assertEquals(0,VoxelFaceTexture.bytesPerSlot() % Integer.BYTES);
     }
     @Test void multipleQuadsRemainExplicitlyUnsupported() {
         var q = north(-1,false);
@@ -151,7 +151,7 @@ class VoxelFaceTextureTest {
         }
         // If set, save these bytes for the software Vulkan checker; they come from the real code.
         String fixture = System.getenv("VOXEL_FACE_FIXTURE");
-        if (fixture != null) Files.write(Path.of(fixture),Arrays.copyOf(packed,VoxelFaceTexture.BYTES_PER_SLOT));
+        if (fixture != null) Files.write(Path.of(fixture),Arrays.copyOf(packed,VoxelFaceTexture.bytesPerSlot()));
     }
 
     @Test void uvMantissaBitsThatDoNotFitHalfFloatsArePreserved() {

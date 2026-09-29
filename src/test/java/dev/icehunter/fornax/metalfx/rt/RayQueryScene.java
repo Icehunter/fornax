@@ -152,11 +152,11 @@ final class RayQueryScene implements AutoCloseable {
         owned.push(payload);
         long faceSeal = MetalRtAcceleration.createBuffer(device, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
         owned.push(faceSeal);
-        long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+        long palette = MetalRtAcceleration.createBuffer(device, BrickGridUpload.paletteBytesPerSlot());
         owned.push(palette);
         zero(payload, BrickGridUpload.VOXELS_PER_SECTION);
         zero(faceSeal, BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-        zero(palette, BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+        zero(palette, BrickGridUpload.paletteBytesPerSlot());
         setOccupied(occupancy, BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, occupiedVoxelIndices);
 
         long vertexBuffer = MetalRtAcceleration.createBuffer(device, MetalRtAcceleration.VERTEX_BYTES_PER_SLOT);

@@ -77,23 +77,18 @@ class PaletteStrideContractTest {
     }
 
     @Test
-    void engineOwnRaymarchShaderMirrorsTheCurrentEntriesPerSlot() {
-        // The engine raymarch shader spells the entries-per-slot term as its own named constant
-        // (PALETTE_ENTRIES_PER_SLOT), unlike the three real pack mirrors below which inline the literal
-        // as PALETTE_ENTRY_WORDS * N -- so this needs its own pattern, same as PALETTE_ENTRY_WORDS above
-        // has its own dedicated test rather than routing through PaletteStrideContract (out of scope --
-        // see that class's javadoc).
+    void engineOwnRaymarchDerivesCapacityAndRejectsMalformedBuffersBeforeAddressing() {
         String source = readEngineResource(ENGINE_RAYMARCH);
-        Matcher matcher =
-                Pattern.compile("const\\s+int\\s+PALETTE_ENTRIES_PER_SLOT\\s*=\\s*(\\d+)\\s*;").matcher(source);
-        assertTrue(matcher.find(), "engine raymarch shader declares PALETTE_ENTRIES_PER_SLOT");
-        assertEquals(SectionHarvester.MAX_PALETTE_ENTRIES, Integer.parseInt(matcher.group(1)),
-                ENGINE_RAYMARCH + " must mirror SectionHarvester.MAX_PALETTE_ENTRIES");
+        assertTrue(source.contains("int entries = palette.length() / divisor;"));
+        assertTrue(source.contains("palette.length() % divisor == 0"));
+        assertTrue(source.contains("entries > 0 && entries <= 253"));
+        assertTrue(source.contains("if (pIndex >= paletteEntriesPerSlot()) break;"));
+        assertTrue(source.contains("(slot * paletteEntriesPerSlot() + pIndex) * PALETTE_ENTRY_WORDS"));
     }
 
     @Test
     void rejectsAShaderMirroringAStaleWordsPerSlotTerm() {
-        int stale = SectionHarvester.MAX_PALETTE_ENTRIES + 160; // e.g. the old 256 once the engine is 96
+        int stale = SectionHarvester.maxPaletteEntries() + 160; // e.g. the old 256 once the engine is 96
         Map<String, String> sources = Map.of("shaders/post/celestial_shadow.fsh",
                 "const int PALETTE_ENTRY_WORDS = " + BrickGridUpload.PALETTE_ENTRY_WORDS + ";\n"
                         + "const int PALETTE_WORDS_PER_SLOT = PALETTE_ENTRY_WORDS * " + stale + ";\n");
@@ -109,7 +104,7 @@ class PaletteStrideContractTest {
         Map<String, String> sources = Map.of("shaders/post/celestial_shadow.fsh",
                 "const int PALETTE_ENTRY_WORDS = " + BrickGridUpload.PALETTE_ENTRY_WORDS + ";\n"
                         + "const int PALETTE_WORDS_PER_SLOT = PALETTE_ENTRY_WORDS * "
-                        + SectionHarvester.MAX_PALETTE_ENTRIES + ";\n");
+                        + SectionHarvester.maxPaletteEntries() + ";\n");
         assertDoesNotThrow(() -> PaletteStrideContract.validate(sources));
     }
 
@@ -119,7 +114,7 @@ class PaletteStrideContractTest {
         // not formatted identically (trailing comments, extra spacing). The pattern must match all of
         // them, or the guard silently checks nothing -- same precedent as the PALETTE_ENTRY_WORDS
         // whitespace test above.
-        int n = SectionHarvester.MAX_PALETTE_ENTRIES;
+        int n = SectionHarvester.maxPaletteEntries();
         Map<String, String> sources = Map.of(
                 "a.comp", "const int PALETTE_WORDS_PER_SLOT = PALETTE_ENTRY_WORDS * " + n + ";",
                 "b.comp", "const int PALETTE_WORDS_PER_SLOT = PALETTE_ENTRY_WORDS * " + n

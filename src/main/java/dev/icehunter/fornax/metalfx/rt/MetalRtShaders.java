@@ -117,7 +117,8 @@ public final class MetalRtShaders {
      * milestone's worth.
      */
     static CompiledKernel compileKernel(long device, String resourcePath, String functionName) {
-        String source = prelude(resourcePath) + readResource(resourcePath);
+        String source = capacityPreamble(dev.icehunter.fornax.voxel.VoxelPaletteLayout.entries())
+                + prelude(resourcePath) + readResource(resourcePath);
         long library = compileSource(device, resourcePath, source);
 
         long function = Objc.msgSendId(library, Objc.selector("newFunctionWithName:"),
@@ -148,6 +149,12 @@ public final class MetalRtShaders {
      * this switch gets nothing, which is a compile error at its first use of a shared helper rather
      * than a silent miscompile.
      */
+    static String capacityPreamble(int entries) {
+        if (entries < 1 || entries > dev.icehunter.fornax.voxel.VoxelPaletteLayout.MAX_CAPTURE_FACTS)
+            throw new IllegalArgumentException("invalid voxel palette capacity");
+        return "#define FORNAX_VOXEL_PALETTE_CAPACITY " + entries + "\n";
+    }
+
     private static String prelude(String resourcePath) {
         if (resourcePath.equals(SUN_DEPTH_RESOURCE)) {
             return readResource(TRACE_RESOURCE) + "\n";

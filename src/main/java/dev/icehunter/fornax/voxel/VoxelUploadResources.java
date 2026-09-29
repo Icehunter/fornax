@@ -17,8 +17,8 @@ public final class VoxelUploadResources implements AutoCloseable {
 
     private VoxelUploadResources() {
         int[] sizes = {(int) BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT, BrickGridUpload.VOXELS_PER_SECTION,
-                (int) BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT, (int) BrickGridUpload.PALETTE_BYTES_PER_SLOT,
-                (int) BrickGridUpload.BRICK_SUMMARY_BYTES_PER_SLOT, VoxelFaceTexture.BYTES_PER_SLOT,
+                (int) BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT, (int) BrickGridUpload.paletteBytesPerSlot(),
+                (int) BrickGridUpload.BRICK_SUMMARY_BYTES_PER_SLOT, VoxelFaceTexture.bytesPerSlot(),
                 VoxelLightmap.BYTES_PER_SLOT, Math.toIntExact(BrickGridUpload.lightVolumeBytesPerSlot()),
                 VoxelSectionState.BYTES_PER_SLOT, VoxelSourceSummary.BYTES_PER_SLOT};
         int bytes = 0;

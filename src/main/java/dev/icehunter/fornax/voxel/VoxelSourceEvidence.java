@@ -3,6 +3,7 @@ package dev.icehunter.fornax.voxel;
 import dev.icehunter.fornax.atlas.MaterialSourceIndex;
 import java.util.Arrays;
 import java.util.List;
+import org.jspecify.annotations.Nullable;
 
 /** Evidence kept only on the CPU: one packed int per palette entry. The masks record facts per
  * face direction, never color, light amount, area, or whether a face shows. No per-cell objects
@@ -76,8 +77,8 @@ public final class VoxelSourceEvidence {
 
     /** Used only during diagnostic harvesting. Counts come from the harvester's own cell walk. */
     static final class Builder {
-        private final int[] palette = new int[SectionHarvester.MAX_PALETTE_ENTRIES];
-        private final byte[] intrinsicOnly = new byte[SectionHarvester.MAX_PALETTE_ENTRIES];
+        private final int[] palette = new int[SectionHarvester.maxPaletteEntries()];
+        private final byte[] intrinsicOnly = new byte[SectionHarvester.maxPaletteEntries()];
         private int size, eligible, unsupported, nonemptyCells;
         private boolean missingEntry;
         private boolean hasIntrinsicOnly;
@@ -132,6 +133,18 @@ public final class VoxelSourceEvidence {
             if (entry < 0 || entry >= size) throw new IllegalArgumentException("missing source evidence entry");
             if (size == palette.length) throw new IllegalArgumentException("voxel source palette exceeds the index cap");
             palette[size++] = (palette[entry] & (NONEMPTY | 15)) | (FACE_MASK << UNKNOWN_SHIFT);
+        }
+
+        /** Rebuild from the actual emitted material; stale or absent proof stays unknown. */
+        void copyObserved(int entry, VoxelFaceTexture.@Nullable SourceFaces observed, long atlasGeneration) {
+            if (entry < 0 || entry >= size) throw new IllegalArgumentException("missing source evidence entry");
+            if (observed == null || observed.atlasGeneration() != atlasGeneration || atlasGeneration <= 0) {
+                copyUnknown(entry);
+                return;
+            }
+            int original = palette[entry], intrinsic = original & 15;
+            add((original & NONEMPTY) != 0, intrinsic, observed.summaries(),
+                    intrinsic == 0 && observed.materialsKnownNonpositive());
         }
 
         void addCell(boolean nonempty, int entry) {

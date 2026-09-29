@@ -70,9 +70,9 @@ class VoxelSourcePolicyTest {
 
     @Test void paletteMaskSpansBothWordsAndMarksOverflowOrUnmappedCellsIncomplete() {
         var policy = new VoxelSourcePolicy.Builder();
-        for (int i = 0; i < SectionHarvester.MAX_PALETTE_ENTRIES; i++) policy.add(i == 0 || i == 63 || i == 64 || i == 95);
+        for (int i = 0; i < SectionHarvester.maxPaletteEntries(); i++) policy.add(i == 0 || i == 63 || i == 64 || i == 95);
         var complete = policy.finish(false);
-        for (int i = 0; i < SectionHarvester.MAX_PALETTE_ENTRIES; i++)
+        for (int i = 0; i < SectionHarvester.maxPaletteEntries(); i++)
             assertEquals(i == 0 || i == 63 || i == 64 || i == 95, complete.allows(i));
         assertFalse(complete.allows(-1)); assertFalse(complete.allows(96));
         assertTrue(complete.complete()); assertFalse(policy.finish(true).complete());

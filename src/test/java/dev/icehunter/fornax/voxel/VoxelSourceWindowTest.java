@@ -166,4 +166,33 @@ class VoxelSourceWindowTest {
         assertThrows(IllegalArgumentException.class, () -> window.commit(-1, fixture.data, fixture.token));
         assertThrows(IllegalArgumentException.class, () -> window.commit(35937, fixture.data, fixture.token));
     }
+    @Test void oneKnownEmittingFaceIsPublishedDespiteUnknownOtherDirections() {
+        var builder = new VoxelSourceEvidence.Builder();
+        builder.add(false, 0, List.of());
+        var faces = new java.util.ArrayList<>(java.util.Collections.nCopies(6,
+                dev.icehunter.fornax.atlas.MaterialSourceIndex.unavailable(
+                        dev.icehunter.fornax.atlas.MaterialSourceIndex.UNSUPPORTED_GEOMETRY)));
+        faces.set(1, new dev.icehunter.fornax.atlas.MaterialSourceIndex.Summary(0, 1, 0, 1, 0, 0xfeffffff));
+        builder.add(true, 15, faces);
+        builder.addCell(true, 1);
+        var fixture = VoxelEmitterPoolTest.result(7, 0);
+        var data = new SectionHarvester.Result(fixture.paletteIndices(), fixture.palette(), fixture.lightmap(),
+                fixture.sourceSummary(), fixture.harvestGeneration(), builder.finish(false));
+        var window = inventory();
+        window.commit(0, data, token(0, 0, 0, 1, 1));
+        var bytes = window.preparePublication().bytes();
+        assertEquals(1, word(bytes, 2), "The independently supported top produces one source run");
+        assertEquals(1, word(bytes, 9), "Missing directions remain diagnostically unknown");
+        assertEquals(0, word(bytes, base(0) + 4) & VoxelSourceWindow.UNKNOWN_SOURCE,
+                "An admitted known face must not be rejected because another direction is unknown");
+    }
+
+    /** The real harvester needs a live model manager; its metadata handoff is pinned separately. */
+    @Test void observedMaterialVariantsRebuildSourceEvidenceInsteadOfUnconditionallyErasingIt() throws Exception {
+        String source = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src/main/java/dev/icehunter/fornax/voxel/SectionHarvester.java"));
+        assertTrue(source.contains("sourceEvidence.copyObserved("),
+                "Observed material must transfer generation-checked source evidence through the harvester");
+    }
+
 }

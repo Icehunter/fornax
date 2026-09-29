@@ -7,7 +7,6 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -112,57 +111,65 @@ public final class VoxelBoundaryCapture {
                             Consumer<Predicate<Direction>> original) {
         Scope scope = ACTIVE.get();
         if (scope == null || !scope.owner.equals(SectionPos.of(pos))
-                || !VoxelHarvestLifecycle.isCurrent(scope.generation)
-                || (state.getLightDampening() >= 15
-                    && !((net.minecraft.client.renderer.block.dispatch.BlockStateModel) model)
-                            .hasMaterialFlag(BakedQuad.FLAG_TRANSLUCENT))) {
+                || !VoxelHarvestLifecycle.isCurrent(scope.generation)) {
             original.accept(cull);
             return;
         }
+        boolean opaqueAppearance = state.getLightDampening() >= 15
+                && !((net.minecraft.client.renderer.block.dispatch.BlockStateModel) model)
+                        .hasMaterialFlag(BakedQuad.FLAG_TRANSLUCENT);
         // The model, sprite finder and tint source are accessed only inside the renderer's own
         // invocation and an atlas lease. No world, random or emitter is retained by a fact.
         try (var lease = VoxelHarvestLifecycle.tryAcquire(scope.generation)) {
             if (lease == null) { original.accept(cull); return; }
             if (state.hasOffsetFunction()) {
                 original.accept(cull);
-                scope.add(pos, state, null);
+                scope.add(pos, state, null, opaqueAppearance ? VoxelFaceAppearance.UNAVAILABLE : null);
                 report(model, "position-offset", false);
                 return;
             }
             Object key;
             int tint;
             try {
-                var source = Minecraft.getInstance().getBlockColors().getTintSource(state, 0);
+                var source = opaqueAppearance ? null : Minecraft.getInstance().getBlockColors().getTintSource(state, 0);
                 tint = source == null ? -1 : source.colorInWorld(state, world, pos) | 0xff000000;
-                key = model.createGeometryKey(world, pos, state, RandomSource.create(state.getSeed(pos)));
+                // Appearance is observed per cell: final neighbour culling can differ even when
+                // geometry keys agree. Section-centre biome tint is resolved by harvest later.
+                key = opaqueAppearance ? null : model.createGeometryKey(world, pos, state, RandomSource.create(state.getSeed(pos)));
             } catch (RuntimeException failure) {
                 original.accept(cull);
-                scope.add(pos, state, null);
+                scope.add(pos, state, null, opaqueAppearance ? VoxelFaceAppearance.UNAVAILABLE : null);
                 report(model, "context-unavailable", false);
                 return;
             }
             var cacheKey = key == null ? null : new GeometryKey(state, key, tint);
-            Optional<Boundary> cached = cacheKey == null ? null : scope.keyed.get(cacheKey);
+            Cell cached = cacheKey == null ? null : scope.keyed.get(cacheKey);
             if (cached != null) {
                 original.accept(cull);
-                scope.add(pos, state, cached.orElse(null));
+                scope.add(pos, state, cached.boundary(), cached.appearance());
                 return;
             }
             List<VoxelShapeClassifier.PackedBox> candidateBoxes = List.of();
             try {
-                var candidate = VoxelShapeClassifier.classify(state);
-                if (candidate.kind() == VoxelShapeKind.PARTIAL) candidateBoxes = candidate.boxes();
+                if (!opaqueAppearance) {
+                    var candidate = VoxelShapeClassifier.classify(state);
+                    if (candidate.kind() == VoxelShapeKind.PARTIAL) candidateBoxes = candidate.boxes();
+                }
             } catch (RuntimeException unavailable) {
                 // A state shape only proposes boxes; emitted geometry can still prove a volume.
                 report(model, "shape-candidate-unavailable", false, unavailable);
             }
             Capture capture = new Capture(VoxelAtlasLookup::sprite, tint, candidateBoxes);
+            capture.appearanceEnabled = opaqueAppearance;
+            capture.boundaryEnabled = !opaqueAppearance;
             observe(emitter, cull, original, capture);
             Boundary boundary = capture.result();
-            scope.add(pos, state, boundary);
-            if (cacheKey != null && scope.keyed.size() < SectionHarvester.MAX_PALETTE_ENTRIES)
-                scope.keyed.put(cacheKey, Optional.ofNullable(boundary));
-            report(model, boundary == null ? capture.reason : "closed", boundary != null, capture.failure());
+            VoxelFaceAppearance appearance = opaqueAppearance ? capture.appearance() : null;
+            scope.add(pos, state, boundary, appearance);
+            if (cacheKey != null && scope.keyed.size() < scope.capacity)
+                scope.keyed.put(cacheKey, new Cell(state, boundary, appearance));
+            report(model, opaqueAppearance ? "appearance" : boundary == null ? capture.reason : "closed",
+                    opaqueAppearance || boundary != null, capture.failure());
         }
     }
 
@@ -172,9 +179,10 @@ public final class VoxelBoundaryCapture {
     static void observe(QuadEmitter emitter, Predicate<Direction> cull,
                         Consumer<Predicate<Direction>> original, Capture capture) {
         emitter.pushTransform(quad -> {
-            capture.accept(quad);
             Direction face = quad.cullFace();
-            return face == null || !cull.test(face);
+            boolean visible = face == null || !cull.test(face);
+            capture.accept(quad, visible);
+            return visible;
         });
         try { original.accept(face -> false); }
         finally { emitter.popTransform(); }
@@ -231,6 +239,8 @@ public final class VoxelBoundaryCapture {
         // One face and one coincident overlay for every box accepted by the palette ABI.
         private static final int MAX_QUADS = 12 * VoxelShapeClassifier.MAX_BOXES;
         private final Function<QuadView, @Nullable TextureAtlasSprite> sprites;
+        private final VoxelFaceAppearance.Collector appearance;
+        private boolean appearanceEnabled = true, boundaryEnabled = true;
         private final int tint;
         private final List<VoxelShapeClassifier.PackedBox> candidateBoxes;
         private final List<BakedQuad> quads = new ArrayList<>();
@@ -244,10 +254,21 @@ public final class VoxelBoundaryCapture {
         }
         Capture(Function<QuadView, @Nullable TextureAtlasSprite> sprites, int tint,
                 List<VoxelShapeClassifier.PackedBox> candidateBoxes) {
-            this.sprites = sprites; this.tint = tint; this.candidateBoxes = List.copyOf(candidateBoxes);
+            this(sprites, tint, candidateBoxes, dev.icehunter.fornax.atlas.MaterialSourceIndex.current());
         }
-        void accept(QuadView quad) {
-            if (invalid) return;
+        Capture(Function<QuadView, @Nullable TextureAtlasSprite> sprites, int tint,
+                List<VoxelShapeClassifier.PackedBox> candidateBoxes,
+                dev.icehunter.fornax.atlas.MaterialSourceIndex sourceIndex) {
+            this.sprites = sprites;
+            this.appearance = new VoxelFaceAppearance.Collector(sprites, sourceIndex);
+            this.tint = tint;
+            this.candidateBoxes = List.copyOf(candidateBoxes);
+        }
+        void accept(QuadView quad) { accept(quad, true); }
+        VoxelFaceAppearance appearance() { return appearance.result(); }
+        void accept(QuadView quad, boolean visible) {
+            if (appearanceEnabled && visible) appearance.accept(quad);
+            if (!boundaryEnabled || invalid) return;
             if (quads.size() >= MAX_QUADS) { invalid = true; reason = "quad-budget"; return; }
             try {
                 if (quad.atlas() != QuadAtlas.BLOCK) { invalid = true; reason = "non-block-atlas"; return; }
@@ -351,7 +372,7 @@ public final class VoxelBoundaryCapture {
         });
     }
 
-    record Cell(BlockState state, @Nullable Boundary boundary) { }
+    record Cell(BlockState state, @Nullable Boundary boundary, @Nullable VoxelFaceAppearance appearance) { }
     record Request(int slot, SectionPos owner, Object world, long generation) { }
 
     static final class Snapshot {
@@ -367,7 +388,10 @@ public final class VoxelBoundaryCapture {
         @Nullable Cell cell(int index, BlockState state) {
             int id = Byte.toUnsignedInt(indices[index]);
             if (id == 0) return null;
-            if (id == 255) return new Cell(state, null); // Capacity failure is explicit, never a stale fallback proof.
+            // The final two unsigned byte values are failure sentinels, outside the one-based fact IDs (at most 253):
+            // 254 invalidates appearance too; 255 retains the older optical-only failure meaning.
+            if (id == 254) return new Cell(state, null, VoxelFaceAppearance.UNAVAILABLE);
+            if (id == 255) return new Cell(state, null, null); // Capacity failure is explicit, never a stale fallback proof.
             Cell cell = cells.get(id - 1);
             return cell.state == state ? cell : null;
         }
@@ -375,22 +399,35 @@ public final class VoxelBoundaryCapture {
 
     static final class Scope {
         final int slot;
+        final int capacity;
         final SectionPos owner;
         final Object world;
         final long generation, epoch, serial;
         final byte[] indices = new byte[16 * 16 * 16];
         final List<Cell> cells = new ArrayList<>();
         final Map<Cell, Integer> ids = new HashMap<>();
-        final Map<GeometryKey, Optional<Boundary>> keyed = new HashMap<>();
+        final Map<GeometryKey, Cell> keyed = new HashMap<>();
         Scope(int slot, SectionPos owner, Object world, long generation, long epoch, long serial) {
-            this.slot=slot; this.owner=owner; this.world=world; this.generation=generation; this.epoch=epoch; this.serial=serial;
+            this(slot, owner, world, generation, epoch, serial, SectionHarvester.maxPaletteEntries());
         }
-        void add(BlockPos pos, BlockState state, @Nullable Boundary boundary) {
-            Cell cell = new Cell(state, boundary);
+        Scope(int slot, SectionPos owner, Object world, long generation, long epoch, long serial, int capacity) {
+            if (capacity < 1 || capacity > VoxelPaletteLayout.MAX_CAPTURE_FACTS)
+                throw new IllegalArgumentException("capture capacity collides with byte sentinels");
+            this.slot = slot;
+            this.owner = owner;
+            this.world = world;
+            this.generation = generation;
+            this.epoch = epoch;
+            this.serial = serial;
+            this.capacity = capacity;
+        }
+        void add(BlockPos pos, BlockState state, @Nullable Boundary boundary) { add(pos, state, boundary, null); }
+        void add(BlockPos pos, BlockState state, @Nullable Boundary boundary, @Nullable VoxelFaceAppearance appearance) {
+            Cell cell = new Cell(state, boundary, appearance);
             Integer id = ids.get(cell);
             if (id == null) {
-                if (cells.size() >= SectionHarvester.MAX_PALETTE_ENTRIES) {
-                    indices[((pos.getY() & 15) << 8) | ((pos.getZ() & 15) << 4) | (pos.getX() & 15)] = (byte) 255;
+                if (cells.size() >= capacity) {
+                    indices[((pos.getY() & 15) << 8) | ((pos.getZ() & 15) << 4) | (pos.getX() & 15)] = (byte) (appearance == null ? 255 : 254);
                     report(this, "section-fact-budget", false);
                     return;
                 }

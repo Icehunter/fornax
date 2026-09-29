@@ -61,6 +61,7 @@ public final class PackTomlLoader {
     public static GraphSpec loadGraph(Reader reader, String file) {
         Config root = parse(reader, file);
         TomlSupport.rejectUnknownKeys(root, Set.of("targets", "textures", "pass", "ray_traced_shadows"), file);
+        Map<String, String> numericExpressions = GraphNumericExpressions.capture(root, file);
         RayTracedShadowSpec rayTracedShadows = parseRayTracedShadows(root, file);
         Map<String, TargetSpec> targets = new LinkedHashMap<>();
         if (root.contains("targets")) {
@@ -250,7 +251,7 @@ public final class PackTomlLoader {
                         parseRayQuery(p, type, name, file)));
             }
         }
-        return new GraphSpec(targets, textures, passes, rayTracedShadows);
+        return new GraphSpec(targets, textures, passes, rayTracedShadows, numericExpressions);
     }
 
     /**

@@ -61,7 +61,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.Set;
 
 /**
  * The compute-pass analog of {@link FullscreenPassRunner}: one built pipeline per declared
@@ -199,6 +198,7 @@ public final class ComputePassRunner implements AutoCloseable {
     private long descriptorPool;
     private final long[] descriptorSets = new long[FRAMES_IN_FLIGHT];
     private long frameIndex;
+    private final List<ComputeCapture.GraphicsRetirement> graphicsCaptures = new ArrayList<>();
 
     private static final class RingSlot {
         @Nullable VulkanCommandPool commandPool;
@@ -214,7 +214,7 @@ public final class ComputePassRunner implements AutoCloseable {
                                List<InputSamplerKind> samplerKinds,
                                int extraPushConstantBytes, boolean graphicsCompletionBeforeStorageWrite,
                                FrameProfiler profiler, String resolvedSource, byte[] compiledSpirv,
-                               Set<String> graphicsWrittenTargets) {
+                               boolean graphicsStream) {
         this.spec = spec;
         this.resolvedSource = resolvedSource;
         this.compiledSpirv = compiledSpirv;
@@ -243,9 +243,9 @@ public final class ComputePassRunner implements AutoCloseable {
         this.extraPushConstantBytes = extraPushConstantBytes;
         this.imageReuseSequence = graphicsCompletionBeforeStorageWrite
                 ? new CrossQueueImageReuseSequence() : null;
-        this.graphicsStream = GraphicsInputDependency.requiredBy(spec.inputs(), graphicsWrittenTargets);
-        // A pass with graphics-owned inputs runs in the graphics stream instead (see run()), so
-        // this dependency is never constructed. See docs/ARCHITECTURE.md.
+        this.graphicsStream = graphicsStream;
+        // Graphics-dependent and scratch passes run in the graphics stream (see run()), so
+        // this cross-queue graphics-input dependency is never constructed. See docs/ARCHITECTURE.md.
         this.graphicsInputDependency = null;
         // runInGraphicsStream() never touches timestampQueries/computeTimer; see its own doc
         // comment ("no fence, no timestamp query"). A pool allocated here would never be read:
@@ -334,7 +334,7 @@ public final class ComputePassRunner implements AutoCloseable {
     public static ComputePassRunner build(PassSpec spec, VulkanComputeBackend backend, TargetRegistry registry,
                                           int extraPushConstantBytes,
                                           boolean graphicsCompletionBeforeStorageWrite,
-                                          FrameProfiler profiler, Set<String> graphicsWrittenTargets) {
+                                          FrameProfiler profiler, boolean graphicsStream) {
         String source = RuntimeShaderPack.getInstance().sourceOrNull(spec.shader());
         if (source == null) {
             throw new IllegalStateException("Fornax graph: compute pass '" + spec.name()
@@ -363,7 +363,7 @@ public final class ComputePassRunner implements AutoCloseable {
             try {
                 runner = new ComputePassRunner(spec, backend, compiled, bindingOrder, descriptorTypes,
                         samplerKinds, extraPushConstantBytes, graphicsCompletionBeforeStorageWrite, profiler, source,
-                        compiledSpirv, graphicsWrittenTargets);
+                        compiledSpirv, graphicsStream);
                 runner.allocateDescriptorSets();
             } catch (RuntimeException e) {
                 if (runner != null) {
@@ -374,7 +374,7 @@ public final class ComputePassRunner implements AutoCloseable {
                 throw e;
             }
             if (runner.graphicsStream()) {
-                FornaxMod.LOGGER.info("[Fornax] ComputePassRunner('{}'): reads graphics-written inputs and runs "
+                FornaxMod.LOGGER.info("[Fornax] ComputePassRunner('{}'): requires ordered graphics access and runs "
                         + "in the graphics stream", spec.name());
             } else {
                 // Queue-topology fact, logged once per runner build instead of assumed.
@@ -761,6 +761,10 @@ public final class ComputePassRunner implements AutoCloseable {
                     if (capture.awaitFence(slot.fence)) slot.capture = null;
                 }
                 if (graphicsWaitStageMask != 0) {
+                    // Capture input copies precede their shader reads. Widen even the first handoff
+                    // and pre-opaque producers while a one-shot request is pending or active.
+                    long captureWaitStages = FullscreenCapture.isRequestedOrActive()
+                            ? VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT : graphicsWaitStageMask;
                     // VulkanDevice returns its persistent encoder. Lighting producers request this
                     // handoff from GraphRunner.prepare(), before opaque terrain begins, so closing
                     // the command buffer recorded so far cannot split an active Apple tile render
@@ -768,9 +772,9 @@ public final class ComputePassRunner implements AutoCloseable {
                     // visibility across the separate compute/graphics queues without a host stall.
                     if (graphicsWaits == null) {
                         VulkanCommandEncoder graphics = backend.device().createCommandEncoder();
-                        graphics.waitSemaphore(slot.graphicsSemaphore, 0L, graphicsWaitStageMask);
+                        graphics.waitSemaphore(slot.graphicsSemaphore, 0L, captureWaitStages);
                     } else {
-                        graphicsWaits.submitted(spec, slot.graphicsSemaphore, graphicsWaitStageMask);
+                        graphicsWaits.submitted(spec, slot.graphicsSemaphore, captureWaitStages);
                     }
                 }
                 if (synchronousWait) {
@@ -882,9 +886,9 @@ public final class ComputePassRunner implements AutoCloseable {
      * sending it to the compute queue. Recording order in that single encoder is what puts this
      * dispatch after the draws that produced its graphics-owned inputs. Metal catches that kind of
      * clash on its own within one queue. A cross-queue timeline wait does not give the same order on
-     * this MoltenVK version. No fence, no timestamp query, no capture, no reuse ticket, no
-     * graphics-wait semaphore signal. This dispatch needs none of the cross-queue code the
-     * compute-queue path below still uses. */
+     * this MoltenVK version. No timestamp query, reuse ticket or graphics-wait semaphore signal.
+     * Selected captures retain staging behind the normal graphics encoder's completion epoch;
+     * they never force a submit or redirect the dispatch to another queue. */
     private long runInGraphicsStream(TargetRegistry registry, PassParams params,
                                       @Nullable PackOptionsBuffer options, @Nullable GpuBufferSlice globals,
                                       @Nullable ExtraPushConstants extra, @Nullable int[] dispatchOverride,
@@ -892,26 +896,47 @@ public final class ComputePassRunner implements AutoCloseable {
         int slotIndex = (int) (frameIndex % FRAMES_IN_FLIGHT);
         frameIndex++;
         int[] groups = resolveDispatchGroups(dispatchOverride, registry);
-        VulkanMetalInterop.recordIntoStream(backend.device().createCommandEncoder(), cmd -> {
-            try (MemoryStack stack = MemoryStack.stackPush()) {
-                if (bindingOrder.contains(VoxelSourceWindow.TARGET)) VoxelWindow.refreshSourceWindow(registry);
-                EngineBufferUploadQueue.recordForBindings(cmd, stack, registry, bindingOrder,
-                        VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-                VK13.vkCmdBindPipeline(cmd, VK13.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline());
-                updateAndBindDescriptorSet(registry, cmd, descriptorSets[slotIndex], options, globals, null);
-                ByteBuffer push = stack.malloc(PassParams.PUSH_CONSTANT_BASE_SIZE + extraBytesThisCall);
-                writePushConstants(push, params, extra);
-                VK13.vkCmdPushConstants(cmd, pipeline.pipelineLayout(), VK13.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
-                VK13.vkCmdDispatch(cmd, groups[0], groups[1], groups[2]);
-                // Same-queue readers here are a fragment sampler (atmo_aerial -> resolve/resolve_hdr) and
-                // a RAY_QUERY transfer copy (sun_shadow_seed -> sun_shadow_trace). Same-queue compute can
-                // also read it.
-                recordComputeWriteReleaseBarrier(cmd, stack,
-                        VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK13.VK_PIPELINE_STAGE_TRANSFER_BIT
-                                | VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK13.VK_ACCESS_SHADER_READ_BIT | VK13.VK_ACCESS_TRANSFER_READ_BIT);
+        VulkanCommandEncoder encoder = backend.device().createCommandEncoder();
+        ComputeCapture capture = FullscreenCapture.isSelected(spec.name())
+                ? ComputeCapture.begin(spec, backend, resolvedSource, compiledSpirv) : null;
+        if (capture != null) {
+            try {
+                // Take the normal submission epoch before recording: even a failed execute can
+                // leave commands queued. Its fence must own staging before that uncertainty.
+                graphicsCaptures.add(capture.retainForGraphics(encoder.createFence()));
+            } catch (RuntimeException error) {
+                capture.abortBeforeSubmit();
+                throw error;
             }
-        });
+        }
+        try {
+            VulkanMetalInterop.recordIntoStream(encoder, cmd -> {
+                try (MemoryStack stack = MemoryStack.stackPush()) {
+                    if (bindingOrder.contains(VoxelSourceWindow.TARGET)) VoxelWindow.refreshSourceWindow(registry);
+                    EngineBufferUploadQueue.recordForBindings(cmd, stack, registry, bindingOrder,
+                            VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+                    recordGraphicsToComputeBarrier(cmd, stack);
+                    VK13.vkCmdBindPipeline(cmd, VK13.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline());
+                    updateAndBindDescriptorSet(registry, cmd, descriptorSets[slotIndex], options, globals, capture);
+                    ByteBuffer push = stack.malloc(PassParams.PUSH_CONSTANT_BASE_SIZE + extraBytesThisCall);
+                    writePushConstants(push, params, extra);
+                    VK13.vkCmdPushConstants(cmd, pipeline.pipelineLayout(), VK13.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
+                    if (capture != null) capture.beforeDispatch(cmd, push, groups[0], groups[1], groups[2], true);
+                    VK13.vkCmdDispatch(cmd, groups[0], groups[1], groups[2]);
+                    if (capture != null) capture.afterDispatch(cmd);
+                    // Graphics-stream buffers can feed terrain/particle vertex shaders, fragment
+                    // samplers, ray-query transfer copies and later compute kernels.
+                    recordComputeWriteReleaseBarrier(cmd, stack,
+                            VK13.VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK13.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                    | VK13.VK_PIPELINE_STAGE_TRANSFER_BIT | VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK13.VK_ACCESS_SHADER_READ_BIT | VK13.VK_ACCESS_TRANSFER_READ_BIT);
+                }
+            });
+        } catch (RuntimeException error) {
+            if (capture != null) capture.graphicsRecordingFailed(error);
+            throw error;
+        }
+        graphicsCaptures.removeIf(retirement -> retirement.retire(0L));
         return -1L;
     }
 
@@ -978,7 +1003,7 @@ public final class ComputePassRunner implements AutoCloseable {
      * its own transfer-write -> compute-read handoff).
      *
      * <p>Covers another compute pass reading this pass's STORAGE_BUFFER output on the SAME queue
-     * later this frame
+     * later this frame, including a later shader overwrite of reused scratch storage
      * (e.g. {@code light_propagate} reading {@code light_inject}'s {@code voxelLightVolume}
      * write) -- for this reader, {@code srcAccessMask -> dstAccessMask} on the compute queue is
      * the complete dependency. A same-frame FULLSCREEN graphics reader gets its cross-queue
@@ -994,10 +1019,21 @@ public final class ComputePassRunner implements AutoCloseable {
                                                           int dstStageMask, int dstAccessMask) {
         VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack).sType$Default()
                 .srcAccessMask(VK13.VK_ACCESS_SHADER_WRITE_BIT)
-                .dstAccessMask(dstAccessMask);
+                .dstAccessMask(dstAccessMask | VK13.VK_ACCESS_SHADER_WRITE_BIT);
         VK13.vkCmdPipelineBarrier(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 dstStageMask,
                 0, barrier, null, null);
+    }
+
+    /** A graphics-stream kernel may read prior attachments/copy-back or overwrite a buffer that
+     * graphics sampled. Submission order alone is not an execution dependency for that WAR edge.
+     * ALL_COMMANDS orders the earlier readers; MEMORY_WRITE makes earlier writes available. */
+    private static void recordGraphicsToComputeBarrier(VkCommandBuffer cmd, MemoryStack stack) {
+        VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack).sType$Default()
+                .srcAccessMask(VK13.VK_ACCESS_MEMORY_WRITE_BIT)
+                .dstAccessMask(VK13.VK_ACCESS_SHADER_READ_BIT | VK13.VK_ACCESS_SHADER_WRITE_BIT);
+        VK13.vkCmdPipelineBarrier(cmd, VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, barrier, null, null);
     }
 
     /** Re-points this frame's descriptor set at the CURRENT resolved target handles (a target can be
@@ -1133,6 +1169,14 @@ public final class ComputePassRunner implements AutoCloseable {
      * Called from {@code GraphRunner.closeCurrent()}. */
     @Override
     public void close() {
+        // GraphRunner drains the device before closing runners. A failed proof still retains
+        // the global capture ticket and staging, rather than freeing GPU-owned memory.
+        for (var retirement : graphicsCaptures) {
+            if (!retirement.retire(ComputeCapture.FENCE_TIMEOUT_NANOS)) {
+                FornaxMod.LOGGER.warn("[Fornax] Graphics capture for '{}' remains pending at teardown; retaining staging", spec.name());
+            }
+        }
+        graphicsCaptures.clear();
         var device = backend.device().vkDevice();
         boolean computeCompleted = destroyRingResources();
         destroyGraphicsInputTimeline(computeCompleted);

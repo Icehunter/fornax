@@ -83,17 +83,17 @@ class VoxelPaletteShapesTest {
 
     @Test void capRetainsOriginalFallbackAndStillFindsPreviouslyStoredVariants() {
         var entries = new ArrayList<SectionPalette.Entry>(Collections.nCopies(
-                SectionHarvester.MAX_PALETTE_ENTRIES - 1, entry(1)));
+                SectionHarvester.maxPaletteEntries() - 1, entry(1)));
         var copies = new ArrayList<Integer>();
         var variants = new VoxelPaletteShapes(entries, copies::add);
         int last = variants.refine(0, MODEL);
-        assertEquals(SectionHarvester.MAX_PALETTE_ENTRIES - 1, last);
+        assertEquals(SectionHarvester.maxPaletteEntries() - 1, last);
         assertFalse(variants.overflowed());
         assertEquals(0, variants.refine(0, List.of(MODEL.getFirst())));
         assertTrue(variants.overflowed());
         assertEquals(last, variants.refine(0, MODEL));
         assertEquals(List.of(0), copies);
-        assertEquals(SectionHarvester.MAX_PALETTE_ENTRIES, entries.size());
+        assertEquals(SectionHarvester.maxPaletteEntries(), entries.size());
     }
 
     @Test void copiedPolicyAndEvidenceStillEnumerateTheSameSourceAtTheVariantCell() {

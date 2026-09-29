@@ -177,6 +177,9 @@ public class FornaxSettings {
      */
     public boolean voxelReachIgnoresRenderDistance = false;
 
+    /** Saved to settings, applied at startup; live storage strides never follow pending UI choices. */
+    public VoxelPaletteCapacity voxelPaletteCapacity = VoxelPaletteCapacity.ENTRIES_96;
+
     /**
      * How much of a pack's authored labPBR sidecar resolution to keep -- see
      * {@link SidecarMapResolution} for the tiers and for why HALF is the default.
@@ -275,6 +278,9 @@ public class FornaxSettings {
         // leaves as null -- as does a config holding the `sidecarAtlasBudget` key instead of this
         // field. Normalizing to HALF is what keeps the first atlas build from dereferencing null,
         // and HALF is what that byte budget already produced on the packs the setting exists for.
+        if (settings.voxelPaletteCapacity == null) {
+            settings.voxelPaletteCapacity = VoxelPaletteCapacity.ENTRIES_96;
+        }
         if (settings.sidecarMapResolution == null) {
             settings.sidecarMapResolution = SidecarMapResolution.HALF;
         }

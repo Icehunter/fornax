@@ -46,7 +46,12 @@ using namespace metal;
 
 constant uint VOXELS_PER_SLOT = 4096;
 constant uint PALETTE_ENTRY_WORDS = 16;
-constant uint MAX_PALETTE_ENTRIES = 96; // SectionHarvester.MAX_PALETTE_ENTRIES
+// The compiler supplies the boot-latched capacity. Standalone diagnostic compilation uses
+// the deployed default; production never relies on this fallback.
+#ifndef FORNAX_VOXEL_PALETTE_CAPACITY
+#define FORNAX_VOXEL_PALETTE_CAPACITY 96
+#endif
+constant uint MAX_PALETTE_ENTRIES = FORNAX_VOXEL_PALETTE_CAPACITY;
 constant uint MAX_BOXES = 8; // VoxelShapeClassifier.MAX_BOXES, palette words 7..14
 constant uint CUTOUT_BIT = 1u << 30; // palette word 0, matches BrickGridUpload's packing
 constant uint CROSS_BIT = 1u << 31;  // palette word 0, matches BrickGridUpload's packing

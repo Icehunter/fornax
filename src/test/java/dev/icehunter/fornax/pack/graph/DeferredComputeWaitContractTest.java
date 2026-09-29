@@ -13,7 +13,11 @@ class DeferredComputeWaitContractTest {
     @Test void successfulSubmitPublishesTheWaitOutsideTheKernelReuseBranch() throws Exception {
         String runner = source("ComputePassRunner");
         int success = runner.indexOf("slot.submitted = true;");
-        int publication = runner.indexOf("graphicsWaits.submitted(spec, slot.graphicsSemaphore, graphicsWaitStageMask)");
+        int publication = runner.indexOf("graphicsWaits.submitted(spec, slot.graphicsSemaphore, captureWaitStages)");
+        assertTrue(runner.contains("long captureWaitStages = FullscreenCapture.isRequestedOrActive()"));
+        assertTrue(runner.contains("? VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT : graphicsWaitStageMask"));
+        assertTrue(runner.contains("graphics.waitSemaphore(slot.graphicsSemaphore, 0L, captureWaitStages)"),
+                "capture transfers need widened waits for immediate pre-opaque handoffs too");
         assertTrue(publication > success, "only successful submissions, including cache hits, may publish pending waits");
         assertTrue(runner.contains("if (graphicsWaits == null)"), "pre-opaque callers keep their immediate native wait");
     }

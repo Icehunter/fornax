@@ -24,6 +24,132 @@ class ComputeCaptureContractTest {
     private static final Path SOURCE = Path.of("src/main/java/dev/icehunter/fornax");
 
     @Test
+    void graphicsStreamCaptureBracketsItsOwnDispatchWithoutSubmittingTheFrame() throws Exception {
+        String source = Files.readString(SOURCE.resolve("pack/graph/ComputePassRunner.java"));
+        int start = source.indexOf("private long runInGraphicsStream(");
+        String body = source.substring(start, source.indexOf("private long publishGraphicsInputs()", start));
+        assertTrue(body.contains("ComputeCapture.begin("), "graphics dispatch must claim its selected capture");
+        assertTrue(body.contains("options, globals, capture)"));
+        int before = body.indexOf("capture.beforeDispatch(");
+        int dispatch = body.indexOf("VK13.vkCmdDispatch(");
+        int after = body.indexOf("capture.afterDispatch(");
+        assertTrue(before >= 0 && before < dispatch && dispatch < after);
+        assertTrue(body.contains("encoder.createFence()"));
+        assertFalse(body.contains("encoder.submit()"), "capture must preserve the normal submission schedule");
+        String selection = Files.readString(SOURCE.resolve("debug/FullscreenCapture.java"));
+        int frameStart = selection.indexOf("static void beginFrame(Path game,");
+        String frame = selection.substring(frameStart, selection.indexOf("public static boolean isSelected", frameStart));
+        assertTrue(frame.indexOf("pollGraphicsCaptures()") >= 0);
+        assertTrue(frame.indexOf("pollGraphicsCaptures()") < frame.indexOf("if (inFlight != null"));
+    }
+
+    @Test
+    void graphicsCaptureRetainsStagingUntilCompletionAndRetiresExactlyOnce() throws Exception {
+        Class<?> type = assertDoesNotThrow(() -> Class.forName("dev.icehunter.fornax.debug.ComputeCapture$GraphicsRetirement"));
+        int[] retired = {0}, closed = {0}, waited = {0};
+        boolean[] completed = {false};
+        var fence = new com.mojang.blaze3d.buffers.GpuFence() {
+            public boolean awaitCompletion(long timeout) { waited[0]++; return completed[0]; }
+            public void close() { closed[0]++; }
+        };
+        Object pending = type.getConstructor(com.mojang.blaze3d.buffers.GpuFence.class, Runnable.class)
+                .newInstance(fence, (Runnable) () -> retired[0]++);
+        Method poll = type.getMethod("retire", long.class);
+        assertEquals(false, poll.invoke(pending, 0L));
+        assertEquals(false, poll.invoke(pending, ComputeCapture.FENCE_TIMEOUT_NANOS));
+        assertEquals(0, retired[0]);
+        assertEquals(0, closed[0]);
+        completed[0] = true;
+        assertEquals(true, poll.invoke(pending, 0L));
+        assertEquals(true, poll.invoke(pending, 0L));
+        assertEquals(1, retired[0]);
+        assertEquals(1, closed[0]);
+        assertEquals(3, waited[0]);
+    }
+
+    @Test
+    void throwingGraphicsFenceRetainsStagingUntilALaterConfirmedCompletion() {
+        int[] retired = {0}, closed = {0}, waits = {0};
+        var fence = new com.mojang.blaze3d.buffers.GpuFence() {
+            public boolean awaitCompletion(long timeout) {
+                if (waits[0]++ == 0) throw new IllegalStateException("uncertain graphics submission");
+                return true;
+            }
+            public void close() { closed[0]++; }
+        };
+        var pending = new ComputeCapture.GraphicsRetirement(fence, () -> retired[0]++);
+        assertFalse(pending.retire(0L));
+        assertEquals(0, retired[0]);
+        assertEquals(0, closed[0]);
+        assertTrue(pending.retire(0L));
+        assertTrue(pending.retire(0L));
+        assertEquals(1, retired[0]);
+        assertEquals(1, closed[0]);
+        assertEquals(2, waits[0]);
+    }
+
+    @Test
+    void explicitBindingFilterPreservesExactHistoryNamesAndCannotClaimReplay(@TempDir Path game) throws Exception {
+        Files.createDirectories(game.resolve("config"));
+        Files.writeString(game.resolve("config/fornax-capture.json"),
+                "{\"pass\":\"selected\",\"bindings\":{\"selected\":[\"history.history\",\"output\"]}}");
+        FullscreenCapture.request();
+        FullscreenCapture.beginFrame(game, Map.of());
+        var capture = FullscreenCapture.beginCompute("selected", "selected.comp");
+        try {
+            Method includes = assertDoesNotThrow(() -> capture.getClass().getDeclaredMethod("includesBinding", String.class));
+            includes.setAccessible(true);
+            assertEquals(true, includes.invoke(capture, "history.history"));
+            assertEquals(true, includes.invoke(capture, "output"));
+            assertEquals(false, includes.invoke(capture, "history"));
+            assertEquals(false, includes.invoke(capture, "builtin.blockAtlas"));
+            capture.computeDispatched();
+        } finally {
+            capture.computeRetired(true);
+            FullscreenCapture.endFrame();
+        }
+        assertEquals(false, capture.computeData().get("replayComplete"));
+    }
+
+    @Test
+    void partialCopyFailureStillOrdersCopiesBeforeLaterWrites() throws Exception {
+        String source = Files.readString(SOURCE.resolve("debug/ComputeCapture.java"));
+        int before = source.indexOf("public void beforeDispatch(");
+        int after = source.indexOf("public void afterDispatch(");
+        String input = source.substring(before, after);
+        String output = source.substring(after, source.indexOf("public boolean awaitFence(", after));
+        assertTrue(input.contains("guard(() -> recordCopies(cmd, false));"), "failure guard ends before the copy-to-kernel barrier");
+        assertTrue(output.contains("guard(() -> recordCopies(cmd, true));"), "failure guard ends before the copy-to-writer barrier");
+        assertTrue(output.indexOf("VK13.VK_ACCESS_TRANSFER_READ_BIT | VK13.VK_ACCESS_TRANSFER_WRITE_BIT")
+                > output.indexOf("guard(() -> recordCopies(cmd, true));"));
+        assertTrue(output.contains("VK13.VK_ACCESS_MEMORY_WRITE_BIT"));
+    }
+
+    @Test
+    void filtersRejectMisspelledBindingsBeforeCaptureAllocation(@TempDir Path game) throws Exception {
+        Files.createDirectories(game.resolve("config"));
+        Files.writeString(game.resolve("config/fornax-capture.json"),
+                "{\"pass\":\"selected\",\"bindings\":{\"selected\":[\"typo\"]}}");
+        FullscreenCapture.request();
+        FullscreenCapture.beginFrame(game, Map.of());
+        var capture = FullscreenCapture.beginCompute("selected", "selected.comp");
+        try {
+            assertThrows(IllegalArgumentException.class, () -> capture.validateBindings(List.of("actual")));
+        } finally {
+            capture.computeDispatched();
+            capture.computeRetired(false);
+            FullscreenCapture.endFrame();
+        }
+        String source = Files.readString(SOURCE.resolve("debug/ComputeCapture.java"));
+        int bufferStart = source.indexOf("public void buffer(");
+        int imageStart = source.indexOf("public void image(");
+        assertTrue(source.indexOf("if (excluded(entry, ref)) return;", bufferStart)
+                < source.indexOf("bufferCopyBytes(offset, range, bufferBytes)", bufferStart));
+        assertTrue(source.indexOf("if (excluded(entry, ref)) return;", imageStart)
+                < source.indexOf("capture.reserveBytes(", imageStart));
+    }
+
+    @Test
     void captureCopiesOnlyTheRemainingBytesWithoutChangingTheSourceCursor() throws Exception {
         ByteBuffer source = ByteBuffer.wrap(new byte[]{9, 1, 2, 3, 8});
         source.position(1).limit(4);

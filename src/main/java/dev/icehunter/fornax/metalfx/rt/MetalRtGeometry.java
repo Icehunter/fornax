@@ -169,10 +169,10 @@ public final class MetalRtGeometry {
             return BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT;
         }
         if (target.equals(BrickGridUpload.PALETTE_TARGET)) {
-            return BrickGridUpload.PALETTE_BYTES_PER_SLOT;
+            return BrickGridUpload.paletteBytesPerSlot();
         }
         if (target.equals(VoxelFaceTexture.TARGET)) {
-            return VoxelFaceTexture.BYTES_PER_SLOT;
+            return VoxelFaceTexture.bytesPerSlot();
         }
         throw new IllegalArgumentException("MetalRtGeometry has no exported copy of target '" + target + "'");
     }
@@ -379,9 +379,9 @@ public final class MetalRtGeometry {
         occupancy = createExportedBuffer(device, slotCount * BrickGridUpload.OCCUPANCY_BYTES_PER_SLOT);
         payload = createExportedBuffer(device, slotCount * BrickGridUpload.VOXELS_PER_SECTION);
         faceSeal = createExportedBuffer(device, slotCount * BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT);
-        palette = createExportedBuffer(device, slotCount * BrickGridUpload.PALETTE_BYTES_PER_SLOT);
+        palette = createExportedBuffer(device, slotCount * BrickGridUpload.paletteBytesPerSlot());
         if (faceTextureEnabled) {
-            faceTexture = createExportedBuffer(device, slotCount * VoxelFaceTexture.BYTES_PER_SLOT);
+            faceTexture = createExportedBuffer(device, slotCount * VoxelFaceTexture.bytesPerSlot());
             faceTextureMissingWarned = false;
         } else if (!faceTextureMissingWarned) {
             faceTextureMissingWarned = true;
@@ -519,10 +519,10 @@ public final class MetalRtGeometry {
                 ok &= copySlot(cmd, faceSealRegion, BrickGridUpload.FACE_SEAL_TARGET, srcFaceSeal, faceSeal,
                         BrickGridUpload.FACE_SEAL_BYTES_PER_SLOT, slot);
                 ok &= copySlot(cmd, paletteRegion, BrickGridUpload.PALETTE_TARGET, srcPalette, palette,
-                        BrickGridUpload.PALETTE_BYTES_PER_SLOT, slot);
+                        BrickGridUpload.paletteBytesPerSlot(), slot);
                 if (srcFaceTexture != null && faceTexture != null) {
                     ok &= copySlot(cmd, faceTextureRegion, VoxelFaceTexture.TARGET, srcFaceTexture, faceTexture,
-                            VoxelFaceTexture.BYTES_PER_SLOT, slot);
+                            VoxelFaceTexture.bytesPerSlot(), slot);
                 }
                 if (ok) {
                     copied.add(slot);

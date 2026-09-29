@@ -149,6 +149,7 @@ public final class PackDiscovery {
         EntityOccluderStrideContract.validate(graph, shaderSources);
         Map<String, PackOption> options = OptionScanner.scan(shaderSources);
 
+        graph = GraphNumericExpressions.resolve(graph, options, Map.of());
         VramReport report = GraphValidator.validate(graph, options, renderWidth, renderHeight);
         FornaxMod.LOGGER.info("[Fornax] Pack '{}' targets total ~{} MB VRAM at {}x{}",
                 meta.name(), String.format("%.1f", report.totalBytes() / (1024.0 * 1024.0)), renderWidth, renderHeight);

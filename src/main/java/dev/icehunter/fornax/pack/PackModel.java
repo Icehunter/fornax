@@ -14,6 +14,11 @@ import java.util.Map;
 public record PackModel(Path root, PackMeta meta, GraphSpec graph, ScreensSpec screens,
                         Map<String, PackOption> options, BlocksSpec blocks, MaterialCategories categories,
                         BiomesSpec biomes) {
+    /** Same pack metadata/options, with a concrete graph for this compile-value snapshot. */
+    public PackModel withGraph(GraphSpec resolved) {
+        return new PackModel(root, meta, resolved, screens, options, blocks, categories, biomes);
+    }
+
     public PackModel(Path root, PackMeta meta, GraphSpec graph, ScreensSpec screens,
                      Map<String, PackOption> options, BlocksSpec blocks) {
         this(root, meta, graph, screens, options, blocks, MaterialCategories.from(blocks), BiomesSpec.empty());

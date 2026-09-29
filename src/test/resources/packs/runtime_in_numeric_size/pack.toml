@@ -1,0 +1,6 @@
+[pack]
+name="bad numeric sizing"
+version="1"
+authors=["fixture"]
+license="MIT"
+format=1

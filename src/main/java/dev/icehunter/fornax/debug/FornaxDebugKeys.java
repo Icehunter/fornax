@@ -46,9 +46,9 @@ import net.minecraft.network.chat.Component;
  *   <li>Palette Histogram Dump (unbound by default) -- one-shot {@link
  *       PaletteSizeHistogram#dumpToLog()}, logging the real per-section palette-size distribution
  *       (histogram, max/mean/p50/p95/p99, cap-hit count) plus what each candidate {@code
- *       SectionHarvester.MAX_PALETTE_ENTRIES} value would cost in VRAM -- the evidence that already
- *       took the constant from 256 to 96 and, via the cap-hits counter, the early warning if a
- *       future world ever needs it moved again.</li>
+ *       SectionHarvester.maxPaletteEntries()} value would cost in VRAM. This is the evidence that
+ *       set the constant to 96 (from 256), and the cap-hits counter warns if a future world needs
+ *       it moved again.</li>
  *   <li>Measure Env Specular (unbound by default) -- one-shot {@link
  *       EnvSpecularRatioReadback#requestMeasure()}: a VRAM-to-CPU readback of the crosshair pixel,
  *       valid only while one of {@link GBufferDebugView#ENV_SPEC_RATIO}/{@link

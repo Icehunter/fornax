@@ -5,6 +5,7 @@ import dev.icehunter.fornax.rt.RayQueryKind;
 import org.junit.jupiter.api.Test;
 
 import java.io.StringReader;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -99,15 +100,19 @@ class RenderBasisDeclarationTest {
     }
 
     @Test
-    void anyOtherStringIsRefusedNamingTheKeyAndTheOneAcceptedWord() {
+    void anUndeclaredStringIsRefusedDuringResolutionNamingItsDestination() {
+        // Strings other than the reserved render basis are compile-time expressions. A typo
+        // remains a load error once declared options are available, never a silent render alias.
+        GraphSpec countGraph = load(RENDER_GRAPH.replace("count = \"render\"", "count = \"screen\""));
         FornaxPackError count = assertThrows(FornaxPackError.class,
-                () -> load(RENDER_GRAPH.replace("count = \"render\"", "count = \"screen\"")));
+                () -> GraphNumericExpressions.resolve(countGraph, Map.of(), Map.of()));
         assertTrue(count.getMessage().contains("targets.rayRequests.count"), count.getMessage());
-        assertTrue(count.getMessage().contains("\"render\""), count.getMessage());
+        assertTrue(count.getMessage().contains("unknown sizing option 'screen'"), count.getMessage());
+        GraphSpec raysGraph = load(RENDER_GRAPH.replace("rays = \"render\"", "rays = \"screen\""));
         FornaxPackError rays = assertThrows(FornaxPackError.class,
-                () -> load(RENDER_GRAPH.replace("rays = \"render\"", "rays = \"screen\"")));
-        assertTrue(rays.getMessage().contains("rays"), rays.getMessage());
-        assertTrue(rays.getMessage().contains("\"render\""), rays.getMessage());
+                () -> GraphNumericExpressions.resolve(raysGraph, Map.of(), Map.of()));
+        assertTrue(rays.getMessage().contains("pass.trace_sun.ray_query.rays"), rays.getMessage());
+        assertTrue(rays.getMessage().contains("unknown sizing option 'screen'"), rays.getMessage());
     }
 
     @Test

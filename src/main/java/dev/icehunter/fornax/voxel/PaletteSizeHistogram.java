@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Palette-size diagnostic (2026-07-20): {@link SectionHarvester#MAX_PALETTE_ENTRIES} allocates a
+ * Palette-size diagnostic (2026-07-20): {@link SectionHarvester#maxPaletteEntries()} allocates a
  * FIXED N entries x {@code BrickGridUpload.PALETTE_ENTRY_BYTES} (64) = N*64 B PER SLOT in the
  * palette buffer, regardless of how many distinct block states a real section actually harvests. At
  * the original 256 that was 244 MiB at the default render-distance-12 window (diameter 25, 15625
@@ -68,9 +68,9 @@ public final class PaletteSizeHistogram {
     /**
      * Records one harvested section's real palette size. Called once per {@link
      * SectionHarvester#harvest} -- see that method's own call site for why {@code hitCap} is the
-     * harvester's real overflow flag (more than {@link SectionHarvester#MAX_PALETTE_ENTRIES} distinct
+     * harvester's real overflow flag (more than {@link SectionHarvester#maxPaletteEntries()} distinct
      * states were present) rather than merely {@code paletteSize == MAX_PALETTE_ENTRIES}, which a
-     * section with EXACTLY {@link SectionHarvester#MAX_PALETTE_ENTRIES} distinct states and no
+     * section with EXACTLY {@link SectionHarvester#maxPaletteEntries()} distinct states and no
      * overflow would also report.
      */
     public static void record(int paletteSize, boolean hitCap) {
@@ -101,7 +101,7 @@ public final class PaletteSizeHistogram {
      * and package-visible so {@code PaletteSizeHistogramTest} exercises the real bucketing math
      * directly, with no atomic-counter state involved. Falls back to the last bucket for a
      * hypothetical out-of-range input rather than throwing -- {@link SectionHarvester#harvest} never
-     * actually produces a size above {@link SectionHarvester#MAX_PALETTE_ENTRIES} (96, itself one of
+     * actually produces a size above {@link SectionHarvester#maxPaletteEntries()} (96, itself one of
      * {@link #BUCKET_UPPER_BOUNDS}'s own values, well under this array's last bound of 256 -- kept at
      * 256 rather than shrunk to match so the histogram still has headroom to notice if the cap is ever
      * raised again), but this stays defensive rather than trusting that invariant blindly. */
@@ -135,10 +135,10 @@ public final class PaletteSizeHistogram {
     }
 
     /** Bytes the palette buffer would need at {@link #REFERENCE_SLOT_COUNT} if {@code
-     * candidateMaxEntries} replaced {@link SectionHarvester#MAX_PALETTE_ENTRIES} -- {@code
-     * candidateMaxEntries * PALETTE_ENTRY_BYTES} per slot, times the reference slot count. Pure and
-     * package-visible for direct testing (mirrors {@code BrickGridUpload.PALETTE_BYTES_PER_SLOT}'s
-     * own per-slot formula, just parameterized on the candidate instead of the live constant). */
+     * candidateMaxEntries} replaced {@link SectionHarvester#maxPaletteEntries()}: {@code
+     * candidateMaxEntries * PALETTE_ENTRY_BYTES} per slot, times the reference slot count. Package-visible
+     * for tests; uses the same per-slot formula as {@code BrickGridUpload.paletteBytesPerSlot()}, with
+     * the candidate in place of the live constant. */
     static long vramBytesForCandidate(int candidateMaxEntries) {
         return (long) candidateMaxEntries * PALETTE_ENTRY_BYTES * REFERENCE_SLOT_COUNT;
     }
@@ -174,10 +174,23 @@ public final class PaletteSizeHistogram {
             FornaxMod.LOGGER.info("[Fornax][palette]{}", line);
         }
 
-        double currentMib = vramBytesForCandidate(SectionHarvester.MAX_PALETTE_ENTRIES) / (1024.0 * 1024.0);
+        int liveDiameter = VoxelWindow.currentState().diameter();
+        long liveSlots = (long) liveDiameter * liveDiameter * liveDiameter;
+        FornaxMod.LOGGER.info("[Fornax][palette] material capacity {}: live diameter {}, palette {} bytes, "
+                        + "optional face table {} bytes; RT export duplicates enabled tables (diameter <=17); "
+                        + "each coarse tier adds capacity*4913*64 bytes. Overflow counts are capped demand, not required capacity.",
+                SectionHarvester.maxPaletteEntries(), liveDiameter,
+                VoxelPaletteLayout.materialBytes(SectionHarvester.maxPaletteEntries(), liveSlots, false),
+                liveSlots * SectionHarvester.maxPaletteEntries() * VoxelFaceTexture.ENTRY_WORDS * Integer.BYTES);
+        for (var candidate : dev.icehunter.fornax.config.VoxelPaletteCapacity.values()) {
+            FornaxMod.LOGGER.info("[Fornax][palette] {} entries: palette+faces {} bytes at live diameter (excludes RT copies/coarse tiers)",
+                    candidate.entries(), VoxelPaletteLayout.materialBytes(candidate.entries(), liveSlots, true));
+        }
+
+        double currentMib = vramBytesForCandidate(SectionHarvester.maxPaletteEntries()) / (1024.0 * 1024.0);
         FornaxMod.LOGGER.info("[Fornax][palette] MAX_PALETTE_ENTRIES candidates at window diameter 25 "
                 + "({} slots, {} B/entry) -- current {} -> {} MiB:", REFERENCE_SLOT_COUNT, PALETTE_ENTRY_BYTES,
-                SectionHarvester.MAX_PALETTE_ENTRIES, String.format(Locale.ROOT, "%.1f", currentMib));
+                SectionHarvester.maxPaletteEntries(), String.format(Locale.ROOT, "%.1f", currentMib));
 
         for (int candidate : BUCKET_UPPER_BOUNDS) {
             double candidateMib = vramBytesForCandidate(candidate) / (1024.0 * 1024.0);

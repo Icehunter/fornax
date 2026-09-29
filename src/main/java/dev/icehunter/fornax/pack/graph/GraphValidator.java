@@ -148,6 +148,13 @@ public final class GraphValidator {
 
     public static VramReport validate(GraphSpec graph, Map<String, PackOption> options,
                                       int renderWidth, int renderHeight, int outputWidth, int outputHeight) {
+        if (!graph.numericExpressions().isEmpty()) {
+            dev.icehunter.fornax.pack.GraphNumericExpressions.forEachVariant(graph, options,
+                    variant -> validate(variant, options, renderWidth, renderHeight, outputWidth, outputHeight));
+            GraphSpec defaults = dev.icehunter.fornax.pack.GraphNumericExpressions.resolve(graph, options, Map.of());
+            return validate(dev.icehunter.fornax.pack.GraphNumericExpressions.withoutExpressions(defaults),
+                    options, renderWidth, renderHeight, outputWidth, outputHeight);
+        }
         checkRayTracedShadows(graph.rayTracedShadows(), options);
         for (TargetSpec t : graph.targets().values()) {
             if (t.kind() == TargetKind.TEXTURE) {
@@ -301,7 +308,7 @@ public final class GraphValidator {
 
         ComputeReuseValidation.validate(graph, options);
         checkAtMostOneGeometryPassPerSlot(graph);
-        detectCycles(graph);
+        detectCycles(graph, options);
 
         Map<String, Integer> defaults = compileDefaults(options);
         long total = 0;
@@ -1294,38 +1301,121 @@ public final class GraphValidator {
         }
     }
 
-    private static void detectCycles(GraphSpec graph) {
-        Map<String, List<String>> producers = new HashMap<>();
-        for (PassSpec p : graph.passes()) {
-            // builtin.output is the fixed pipeline's own terminal sink, not a pack-declared target --
-            // a linear post-process chain legitimately has many passes overwrite it in sequence (see
-            // the dev_graph fixture's resolve -> ... -> taa_copy_out), which is a straight-line
-            // handoff, not a same-frame producer/consumer relationship needing cycle validation.
+    private static void detectCycles(GraphSpec graph, Map<String, PackOption> options) {
+        Map<String, List<Integer>> producers = new HashMap<>();
+        List<PassSpec> passes = graph.passes();
+        for (int i = 0; i < passes.size(); i++) {
+            PassSpec p = passes.get(i);
+            // The fixed pipeline's terminal sink is overwritten by a linear post chain; it is
+            // not a pack-target dependency. History likewise belongs to a different frame.
             for (String out : p.outputs()) {
-                if (!out.equals("builtin.output")) producers.computeIfAbsent(out, k -> new ArrayList<>()).add(p.name());
+                if (!out.equals("builtin.output")) producers.computeIfAbsent(out, k -> new ArrayList<>()).add(i);
             }
-            if (p.target() != null) producers.computeIfAbsent(p.target(), k -> new ArrayList<>()).add(p.name());
+            if (p.target() != null) producers.computeIfAbsent(p.target(), k -> new ArrayList<>()).add(i);
         }
         Map<String, List<String>> adj = new HashMap<>();
-        for (PassSpec q : graph.passes()) {
-            for (String in : q.inputs()) {
-                if (in.endsWith(".history") || in.equals("builtin.output")) continue; // previous-frame/terminal-sink read: not a same-frame edge
-                for (String producer : producers.getOrDefault(in, List.of())) {
-                    if (producer.equals(q.name())) {
-                        // Reading a target the same pass writes this frame is a GPU
-                        // read-write feedback hazard; only '<target>.history' is legal.
-                        throw new FornaxPackError(FILE, "pass." + q.name(),
-                                "pass reads target '" + in + "' that it also writes in the same frame"
-                                        + " (read '" + in + ".history' for the previous frame instead)");
+        for (int i = 0; i < passes.size(); i++) {
+            PassSpec reader = passes.get(i);
+            for (String input : reader.inputs()) {
+                if (input.endsWith(".history") || input.equals("builtin.output")) continue;
+                List<Integer> writers = producers.getOrDefault(input, List.of());
+                TargetSpec target = graph.targets().get(input);
+                List<PassSpec> earlier = new ArrayList<>();
+                int previous = -1;
+                boolean self = false;
+                for (int writer : writers) {
+                    if (writer < i) {
+                        previous = writer;
+                        earlier.add(passes.get(writer));
+                    } else if (writer == i) {
+                        self = true;
                     }
-                    adj.computeIfAbsent(producer, k -> new ArrayList<>()).add(q.name());
+                }
+                if (self) {
+                    boolean storageUpdate = reader.type() == PassType.COMPUTE && target != null
+                            && target.kind() == TargetKind.BUFFER;
+                    if (!storageUpdate) {
+                        throw new FornaxPackError(FILE, "pass." + reader.name(),
+                                "pass reads target '" + input + "' that it also writes in the same frame"
+                                        + " (read '" + input + ".history' for the previous frame instead)");
+                    }
+                    if (!earlierWriterCoversReader(reader, earlier, options)) {
+                        throw new FornaxPackError(FILE, "pass." + reader.name(),
+                                "compute buffer update '" + input + "' requires an earlier same-frame writer"
+                                        + " whenever the pass is enabled; a gated or later writer cannot initialize it");
+                    }
+                }
+                if (target == null || target.kind() != TargetKind.BUFFER || reader.type() == PassType.GEOMETRY) {
+                    // Image versions do not share the buffer scratch-routing contract. Geometry
+                    // inputs are slot declarations outside the finish() pass sequence. Keep their
+                    // full dependency edges rather than admitting unproven ordering in either case.
+                    for (int writer : writers) {
+                        if (writer != i) adj.computeIfAbsent(passes.get(writer).name(), k -> new ArrayList<>())
+                                .add(reader.name());
+                    }
+                    continue;
+                }
+                if (previous >= 0) {
+                    // A physical pass consumes the preceding buffer version, not later overwrites.
+                    adj.computeIfAbsent(passes.get(previous).name(), k -> new ArrayList<>()).add(reader.name());
+                }
+                if (previous < 0 || !earlierWriterCoversReader(reader, earlier, options)) {
+                    // An absent or gated-off seed leaves a future-only dependency. Keep that edge
+                    // so a disabled initializer cannot hide a genuinely cyclic configuration.
+                    for (int writer : writers) {
+                        if (writer > i) adj.computeIfAbsent(passes.get(writer).name(), k -> new ArrayList<>())
+                                .add(reader.name());
+                    }
                 }
             }
         }
         Set<String> visiting = new HashSet<>();
         Set<String> done = new HashSet<>();
-        for (PassSpec p : graph.passes()) {
+        for (PassSpec p : passes) {
             if (!done.contains(p.name())) dfs(p.name(), adj, visiting, done);
+        }
+    }
+
+    /** Proves initialization for every compile configuration in which the update runs. Runtime
+     * gates are conservative: only an ungated writer or the reader's identical gate is guaranteed.
+     * Pre-opaque readers cannot consume a writer that actually runs later in finish(). */
+    private static boolean earlierWriterCoversReader(PassSpec reader, List<PassSpec> earlier,
+                                                      Map<String, PackOption> options) {
+        List<PassSpec> candidates = earlier.stream()
+                .filter(writer -> writer.runtimeEnabledIf() == null
+                        || writer.runtimeEnabledIf().equals(reader.runtimeEnabledIf()))
+                .filter(writer -> !GraphRunner.isPreOpaqueLightingComputePass(reader)
+                        || GraphRunner.isPreOpaqueLightingComputePass(writer))
+                .toList();
+        if (candidates.isEmpty()) return false;
+        for (PassSpec writer : candidates) {
+            if (writer.enabledIf() == null || writer.enabledIf().equals(reader.enabledIf())) return true;
+        }
+        EnabledIfExpr readGate = reader.enabledIf() == null ? null : EnabledIfExpr.parse(reader.enabledIf());
+        List<EnabledIfExpr> writeGates = candidates.stream()
+                .map(writer -> EnabledIfExpr.parse(writer.enabledIf())).toList();
+        Set<String> names = new java.util.LinkedHashSet<>();
+        if (readGate != null) names.addAll(readGate.referencedNames());
+        for (EnabledIfExpr gate : writeGates) names.addAll(gate.referencedNames());
+        List<String> nameList = List.copyOf(names);
+        List<int[]> domains = new ArrayList<>();
+        long combinations = 1;
+        for (String name : nameList) {
+            int[] domain = EngineDefines.KEYS.contains(name) ? new int[]{0, 1} : enumerableDomain(options.get(name));
+            // Match gate-consistency's bounded proof; exact identical/ungated coverage is handled
+            // above, so an unenumerable or larger domain has no safe fallback to initialization.
+            if (domain == null || (combinations *= domain.length) > 4096) return false;
+            domains.add(domain);
+        }
+        int[] indices = new int[nameList.size()];
+        Map<String, Integer> assignment = new HashMap<>();
+        while (true) {
+            for (int i = 0; i < nameList.size(); i++) assignment.put(nameList.get(i), domains.get(i)[indices[i]]);
+            if ((readGate == null || readGate.evaluate(assignment))
+                    && writeGates.stream().noneMatch(gate -> gate.evaluate(assignment))) return false;
+            int i = 0;
+            while (i < indices.length && ++indices[i] == domains.get(i).length) indices[i++] = 0;
+            if (i == indices.length) return true;
         }
     }
 

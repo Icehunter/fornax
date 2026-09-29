@@ -142,6 +142,7 @@ public final class FornaxSettingsScreen {
         copy.frameGenMode = source.frameGenMode;
         copy.metalHud = source.metalHud;
         copy.voxelReachIgnoresRenderDistance = source.voxelReachIgnoresRenderDistance;
+        copy.voxelPaletteCapacity = source.voxelPaletteCapacity;
         copy.sunPathRotation = source.sunPathRotation;
         copy.rayTracing = source.rayTracing;
         copy.rtDebugMode = source.rtDebugMode;
@@ -401,6 +402,16 @@ public final class FornaxSettingsScreen {
             metalHud = null; // not macOS/aarch64 -- expected, nothing to log
         }
 
+        Option<dev.icehunter.fornax.config.VoxelPaletteCapacity> voxelPaletteCapacity = Option.<dev.icehunter.fornax.config.VoxelPaletteCapacity>createBuilder()
+                .name(Component.translatable("gui.fornax.option.voxel_palette_capacity"))
+                .description(OptionDescription.of(Component.translatable("gui.fornax.option.voxel_palette_capacity.tooltip")))
+                .binding(dev.icehunter.fornax.config.VoxelPaletteCapacity.ENTRIES_96,
+                        () -> FornaxConfig.get().voxelPaletteCapacity, v -> FornaxConfig.get().voxelPaletteCapacity = v)
+                .controller(opt -> CyclingListControllerBuilder.create(opt)
+                        .values(java.util.List.of(dev.icehunter.fornax.config.VoxelPaletteCapacity.values()))
+                        .formatValue(v -> Component.literal(Integer.toString(v.entries()))))
+                .build();
+
         Option<Boolean> voxelReachIgnoresRenderDistance = Option.<Boolean>createBuilder()
                 .name(Component.translatable("gui.fornax.option.voxel_reach_ignores_render_distance"))
                 .description(OptionDescription.of(
@@ -417,7 +428,8 @@ public final class FornaxSettingsScreen {
                 .option(overlayShowCounters)
                 .option(overlayTopPassesOnly)
                 .option(debugView)
-                .option(voxelReachIgnoresRenderDistance);
+                .option(voxelReachIgnoresRenderDistance)
+                .option(voxelPaletteCapacity);
         if (metalHud != null) {
             group.option(metalHud);
         }

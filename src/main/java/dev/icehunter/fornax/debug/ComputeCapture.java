@@ -1,6 +1,8 @@
 package dev.icehunter.fornax.debug;
 
 import com.mojang.blaze3d.textures.GpuSampler;
+import com.mojang.blaze3d.buffers.GpuFence;
+import dev.icehunter.fornax.FornaxMod;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
@@ -31,8 +33,8 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkMemoryBarrier;
 
-/** One selected raw dispatch, captured on its own compute queue. Staging is first-used only on
- * that queue and survives a timed-out capture until the runner confirms the slot's fence. No GPU
+/** One selected raw dispatch on its execution queue. Staging stays on that queue and survives
+ * an incomplete fence until completion is confirmed. No GPU
  * copies, allocations or waits occur for unselected passes. */
 public final class ComputeCapture {
     // Five seconds bounds a debug readback; timeout does not authorize freeing GPU-owned storage.
@@ -46,6 +48,51 @@ public final class ComputeCapture {
     private boolean dispatched;
     private boolean failed;
     private boolean retired;
+    private static final List<GraphicsRetirement> GRAPHICS_CAPTURES = new ArrayList<>();
+
+    /** Completion of the encoder epoch owns staging, even after an uncertain recording failure. */
+    public static final class GraphicsRetirement {
+        private final GpuFence fence;
+        private final Runnable completed;
+        private boolean retired;
+        private boolean waitFailed;
+
+        public GraphicsRetirement(GpuFence fence, Runnable completed) {
+            this.fence = fence;
+            this.completed = completed;
+        }
+
+        /** A timeout is retention, never permission to free or close the completion token. */
+        public boolean retire(long timeoutNanos) {
+            if (retired) return true;
+            try {
+                if (!fence.awaitCompletion(timeoutNanos)) return false;
+            } catch (RuntimeException error) {
+                if (!waitFailed) FornaxMod.LOGGER.warn("[Fornax] Graphics capture fence failed; retaining staging: {}", error.toString());
+                waitFailed = true;
+                return false;
+            }
+            retired = true;
+            try { completed.run(); } finally { fence.close(); }
+            return true;
+        }
+    }
+
+    public GraphicsRetirement retainForGraphics(GpuFence fence) {
+        data().put("executionQueue", "graphics");
+        GraphicsRetirement retirement = new GraphicsRetirement(fence, this::retireAfterFence);
+        GRAPHICS_CAPTURES.add(retirement);
+        return retirement;
+    }
+
+    /** Render-thread only; called before the next one-shot request checks pending callbacks. */
+    public static void pollGraphicsCaptures() {
+        GRAPHICS_CAPTURES.removeIf(retirement -> retirement.retire(0L));
+    }
+
+    public void graphicsRecordingFailed(RuntimeException error) {
+        fail("Graphics capture recording failed; staging retained until its encoder fence completes: " + error);
+    }
 
     private static final class Readback {
         final Map<String, Object> entry;
@@ -72,6 +119,9 @@ public final class ComputeCapture {
         if (request == null) return null;
         ComputeCapture result = new ComputeCapture(request, spec, backend);
         result.guard(() -> {
+            List<String> references = new ArrayList<>(spec.inputs());
+            references.addAll(spec.outputs());
+            request.validateBindings(references);
             result.data().put("shaderSource", result.artifact(spec.name() + ".comp", resolvedSource.getBytes(StandardCharsets.UTF_8)));
             result.data().put("spirv", result.artifact(spec.name() + ".spv", spirv));
             result.data().put("localSize", localSize(spirv));
@@ -85,6 +135,7 @@ public final class ComputeCapture {
         this.inputCount = spec.inputs().size();
         data().put("bindings", bindings);
         data().put("entryPoint", "main");
+        data().put("executionQueue", "compute");
         data().put("descriptorSet", 0);
         data().put("computeQueueFamily", backend.computeQueue().queueFamilyIndex());
         data().put("graphicsQueueFamily", backend.device().graphicsQueue().queueFamilyIndex());
@@ -99,6 +150,7 @@ public final class ComputeCapture {
                        long bufferBytes, boolean copySource) {
         guard(() -> {
             Map<String, Object> entry = binding(binding, ref, type, "buffer");
+            if (excluded(entry, ref)) return;
             entry.put("vkBuffer", Long.toUnsignedString(handle));
             entry.put("sourceOffset", offset);
             entry.put("descriptorRange", range);
@@ -118,6 +170,7 @@ public final class ComputeCapture {
                       PackTextureRegistry.VolumeAsset asset) {
         guard(() -> {
             Map<String, Object> entry = binding(binding, ref, type, asset != null ? "image3d" : "image2d");
+            if (excluded(entry, ref)) return;
             if (sampler != null) {
                 Map<String, Object> state = new LinkedHashMap<>();
                 state.put("minFilter", sampler.getMinFilter().name());
@@ -176,29 +229,34 @@ public final class ComputeCapture {
     }
 
     public void beforeDispatch(VkCommandBuffer cmd, ByteBuffer push, int x, int y, int z, boolean dispatchKernel) {
+        dispatched = dispatchKernel;
         guard(() -> {
-            dispatched = dispatchKernel;
             data().put("dispatched", dispatched);
             data().put("groups", List.of(x, y, z));
             data().put("pushConstants", artifact(name + "-push.bin", copyBytes(push)));
-            if (!dispatchKernel) { fail("Selected compute pass reused its prior result; no kernel dispatched"); return; }
-            barrier(cmd, VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK13.VK_ACCESS_MEMORY_WRITE_BIT, VK13.VK_ACCESS_TRANSFER_READ_BIT);
-            recordCopies(cmd, false);
-            barrier(cmd, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK13.VK_ACCESS_TRANSFER_READ_BIT, VK13.VK_ACCESS_SHADER_READ_BIT | VK13.VK_ACCESS_SHADER_WRITE_BIT);
+            if (!dispatchKernel) fail("Selected compute pass reused its prior result; no kernel dispatched");
         });
+        if (!dispatched) return;
+        barrier(cmd, VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK13.VK_ACCESS_MEMORY_WRITE_BIT, VK13.VK_ACCESS_TRANSFER_READ_BIT);
+        guard(() -> recordCopies(cmd, false));
+        // A partial copy failure must still order the reads it already recorded before writes.
+        barrier(cmd, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK13.VK_ACCESS_TRANSFER_READ_BIT, VK13.VK_ACCESS_SHADER_READ_BIT | VK13.VK_ACCESS_SHADER_WRITE_BIT);
     }
 
     public void afterDispatch(VkCommandBuffer cmd) {
         capture.computeDispatched();
-        guard(() -> {
-            barrier(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK13.VK_ACCESS_SHADER_WRITE_BIT, VK13.VK_ACCESS_TRANSFER_READ_BIT);
-            recordCopies(cmd, true);
-            barrier(cmd, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT, VK13.VK_PIPELINE_STAGE_HOST_BIT,
-                    VK13.VK_ACCESS_TRANSFER_WRITE_BIT, VK13.VK_ACCESS_HOST_READ_BIT);
-        });
+        if (!dispatched) return;
+        barrier(cmd, VK13.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK13.VK_ACCESS_SHADER_WRITE_BIT, VK13.VK_ACCESS_TRANSFER_READ_BIT);
+        guard(() -> recordCopies(cmd, true));
+        // Later passes may overwrite a copied input/output, including after a partial failure.
+        // Order those writes after copies, and expose staging writes to the host after its fence.
+        barrier(cmd, VK13.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK13.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK13.VK_PIPELINE_STAGE_HOST_BIT,
+                VK13.VK_ACCESS_TRANSFER_READ_BIT | VK13.VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK13.VK_ACCESS_MEMORY_READ_BIT | VK13.VK_ACCESS_MEMORY_WRITE_BIT | VK13.VK_ACCESS_HOST_READ_BIT);
     }
 
     /** True permits the runner to release the capture object; timeout retains it on the ring slot. */
@@ -232,6 +290,9 @@ public final class ComputeCapture {
             releaseStaging();
             retired = true;
             data().put("fenceCompleted", true);
+            List<Map<String, Object>> selected = bindings.stream()
+                    .filter(entry -> !"excluded".equals(entry.get("status"))).toList();
+            data().put("diagnosticComplete", !failed && replayComplete(dispatched, true, selected));
             capture.computeRetired(!failed && replayComplete(dispatched, true, bindings));
         }
     }
@@ -361,6 +422,13 @@ public final class ComputeCapture {
     static boolean replayComplete(boolean dispatched, boolean fenceCompleted, List<Map<String, Object>> bindings) {
         return dispatched && fenceCompleted && !bindings.isEmpty()
                 && bindings.stream().allMatch(entry -> "captured".equals(entry.get("status")));
+    }
+
+    private boolean excluded(Map<String, Object> entry, String reference) {
+        if (capture.includesBinding(reference)) return false;
+        entry.put("status", "excluded");
+        entry.put("reason", "Omitted by the explicit per-pass binding filter; not a replay-complete capture");
+        return true;
     }
 
     private static void unavailable(Map<String, Object> entry, String reason) {
